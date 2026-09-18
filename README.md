@@ -2,14 +2,14 @@
   <img src="https://github.com/user-attachments/assets/c2f7c245-8217-46a1-8d1e-e0ba967cd969" alt="microduck" width="820">
 </p>
 
-<h1 align="center">Microduck</h1>
+<h1 align="center">Bruzzz's Microduck replica</h1>
 
 <p align="center">
   <em>A tiny biped robot that moves using reinforcement learning policies.</em>
 </p>
 
 <p align="center">
-  <a href="https://pollen-robotics.com/microduck"><b>Get yours here</b></a> ·
+  <a href="docs/robot/purachse-list.md"><b>Purchase Parts</b></a> ·
   <a href="docs/robot/cheatsheet.md">Cheat sheet</a> ·
   <a href="https://github.com/pollen-robotics/microduck_rl">Training the policies</a> ·
   <a href="docs/design/architecture.md">How it works</a> ·
@@ -22,16 +22,17 @@
 
 ---
 
-**This repo is the duck's brain.** About 25 cm and 800 g of robot, run by a handful of daemons on a
+**This repo is the Bruzzz's replica duck's brain.** About 25 cm and 800 g of robot, run by a handful of daemons on a
 Rockchip RK3566: a 50 Hz control loop driving fifteen servos from neural policies, the radios and
 the camera, and the update machinery that gets new software onto a robot without bricking it.
 
-Everything you need to run a Microduck is here. **If you want one,
-[get yours here](https://pollen-robotics.com/microduck).**
+Everything you need to run a Microduck is here.
 
 The policies it runs are trained next door, in
 **[microduck_rl](https://github.com/pollen-robotics/microduck_rl)** — MuJoCo and PPO, the sim2real
 recipe, and the export to ONNX that this repo loads.
+
+You can find both the reverse engineered and off the shelf design `.stp` CAD files at [BruzMicroduck_CAD](https://github.com/BruzWJ/BruzMicroduck_CAD)
 
 ## It does things
 
@@ -80,6 +81,7 @@ It also sits, kicks a ball, rolls forward on command, and quacks in a voice that
 
 | | |
 |---|---|
+|[Purchase List](docs/robot/purachse-list.md) | Where to find all the parts to purchase and build your own duck | 
 | [microduck_rl](https://github.com/pollen-robotics/microduck_rl) | Where the policies come from: MuJoCo, PPO, domain randomisation, and the ONNX export this repo loads. |
 | [How it works](docs/design/architecture.md) | The whole system on one page — the daemons, the bus, how an update reaches a robot — then a page per part. |
 | [Set up a dev board](docs/robot/install-dev.md) | From a blank board to a robot that takes branch builds. |
