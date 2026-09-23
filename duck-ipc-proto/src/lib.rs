@@ -415,7 +415,15 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// Absent is also what a backend with nothing to measure sends — `--fake` has no servos — and
 /// what a robot with `[control] publish_velocity_and_load` off sends. A client that reads absent
 /// as "not told" rather than as zero handles all three without having to know which.
-pub const API_VERSION: u32 = 36;
+///
+/// # v37 — how the last check of the update source went
+///
+/// [`ComponentStatus::last_check_attempt`]: when the last check ran, and the error if it got no
+/// answer. v35 made "never answered" visible, and it was two states: checks that keep failing, and
+/// an `updaterd` that has not run its first check yet — every board for the minute after it
+/// starts, including the one right after the update that brought v35 in. Both warned. The attempt
+/// tells them apart, and its error is what the warning was pointing at the journal for.
+pub const API_VERSION: u32 = 37;
 
 /// The observation width every policy this robot family runs is built against.
 ///
@@ -3146,6 +3154,27 @@ pub struct ComponentStatus {
     /// last answered is what shows it. A source replaying an old signed manifest still answers,
     /// so this does not catch that one; `updater-design.md` §8.4.2 has what would.
     pub last_checked: Option<i64>,
+    /// The last check of this component's source, answered or not. `None` before the first one
+    /// on this board, and from an `updaterd` older than [`API_CHECK_ATTEMPT`].
+    ///
+    /// What turns an absent [`Self::last_checked`] into one of two things: no attempt yet, which
+    /// is a board that has just started, or attempts that failed, which is the robot that cannot
+    /// reach its source — and the error says why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_check_attempt: Option<CheckAttempt>,
+}
+
+/// One check of an update source: when, and what went wrong if it did not get an answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckAttempt {
+    /// Unix seconds, by the board's clock at the time — which is recorded even when it had not
+    /// synced, unlike [`ComponentStatus::last_checked`], because a clock TLS rejects is one of the
+    /// reasons a check fails.
+    pub at: i64,
+    /// Why the check got no answer: the fetch, the signature or the channel. `None` when it got
+    /// one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// The API version [`ComponentStatus::last_checked`] arrived in.
@@ -3156,6 +3185,10 @@ pub struct ComponentStatus {
 /// the one worth warning about. Without the version they are the same silence, and the case the
 /// report exists for is the one that reads as "fine".
 pub const API_LAST_CHECKED: u32 = 35;
+
+/// The API version [`ComponentStatus::last_check_attempt`] arrived in. Read the same way as
+/// [`API_LAST_CHECKED`]: from this version on, absent means no check has run yet.
+pub const API_CHECK_ATTEMPT: u32 = 37;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstalledRelease {
