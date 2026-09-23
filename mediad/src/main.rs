@@ -375,6 +375,7 @@ fn main() -> ExitCode {
                             &args.token,
                             meta,
                             sockets.clone(),
+                            duck_ipc_proto::remote_status_path(),
                         )
                     {
                         // The bridge is a *consumer* of the signalling server this same process

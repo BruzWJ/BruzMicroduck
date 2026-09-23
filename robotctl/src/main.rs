@@ -1596,6 +1596,18 @@ struct HealthReport {
     /// GStreamer stack runs no `mediad`, and the units block is where that is reported.
     #[serde(skip_serializing_if = "Option::is_none")]
     camera: Option<proto::CameraStats>,
+    /// What `mediad`'s relay last published about the rendezvous service. `None` for the camera's
+    /// reasons, plus `--no-remote`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote: Option<proto::RemoteStatus>,
+    /// Who `updaterd` says this robot is signed in as — the account on disk, which is not always
+    /// the one the service listed it under. `None` when `updaterd` could not be asked, which the
+    /// software block already reports.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account: Option<proto::AccountStatusResult>,
+    /// This machine's clock when `remote` was read, so rendering stays pure.
+    #[serde(skip)]
+    read_at: i64,
 }
 
 impl HealthReport {
@@ -1631,6 +1643,12 @@ fn run_health(
         robot_error: None,
         software: collect_version_report(socket, robot_socket, config_socket),
         camera: proto::read_camera_stats(),
+        remote: proto::read_remote_status(),
+        account: Client::connect(socket)
+            .ok()
+            .and_then(|mut client| client.call(&proto::Call::AccountStatus).ok())
+            .and_then(|response| response.result_as::<proto::AccountStatusResult>().ok()),
+        read_at: unix_now(),
     };
     // Here rather than in `collect_version_report`, which `robotctl version` shares: `version`
     // prints a component's name, release and revision and not the line this warning points at,
@@ -1838,6 +1856,10 @@ fn render_health(report: &HealthReport) -> String {
             "camera    {rate}, {}x{} {}{dropped} — {watching}",
             camera.width, camera.height, camera.format
         );
+    }
+
+    if let Some(line) = central_line(report) {
+        out.push_str(&line);
     }
 
     let _ = writeln!(out, "\nsoftware");
@@ -2111,6 +2133,79 @@ fn describe_age(age: i64) -> String {
     };
     let plural = if count == 1 { "" } else { "s" };
     format!("{count} {unit}{plural} ago")
+}
+
+/// Past this, a registration whose heartbeat has not moved is called stale. The relay posts every
+/// ten seconds and the service evicts after thirty, so a minute is a relay that has stopped.
+const STALE_HEARTBEAT_SECONDS: i64 = 60;
+
+/// The `central` line: whether the rendezvous service lists this robot, and under which account.
+///
+/// Two sources, because the question has two halves that can disagree: `updaterd` knows the account
+/// on disk, and only the service knows whose robot list this robot is in. `None` when neither said
+/// anything — a robot with no `mediad` and no `updaterd` has other lines to worry about.
+fn central_line(report: &HealthReport) -> Option<String> {
+    let signed_in = report
+        .account
+        .as_ref()
+        .map(|status| status.account.as_ref().map(|a| a.username.as_str()));
+    let since = |at: i64| describe_age((report.read_at - at).max(0));
+    let signed_out = "not signed in: reachable on its own network only · `robotctl account login`";
+    let body = match (&report.remote, signed_in) {
+        (None, None) => return None,
+        (None, Some(None)) => signed_out.to_owned(),
+        (None, Some(Some(name))) => {
+            format!("signed in as {name}, connection not reported (is mediad running?)")
+        }
+        (Some(status), signed_in) => {
+            let signed_in = signed_in.flatten();
+            match &status.link {
+                proto::RemoteLink::SignedOut => signed_out.to_owned(),
+                proto::RemoteLink::Connecting => format!(
+                    "connecting{}, {}",
+                    signed_in.map(|n| format!(" as {n}")).unwrap_or_default(),
+                    since(status.since)
+                ),
+                proto::RemoteLink::Registered {
+                    account,
+                    last_heartbeat,
+                    ..
+                } => {
+                    let listed = account.as_deref().unwrap_or("an account it did not name");
+                    let beat = (report.read_at - last_heartbeat).max(0);
+                    let mut line = format!(
+                        "registered as {listed} {} · last heartbeat {beat} s ago",
+                        since(status.since)
+                    );
+                    if beat > STALE_HEARTBEAT_SECONDS {
+                        line.push_str(" — stale, mediad's relay may be stuck");
+                    }
+                    // The case this line was written for is the account being the wrong one, and
+                    // that is a person's mistake the robot cannot see. This one it can.
+                    if let (Some(listed), Some(on_disk)) = (account.as_deref(), signed_in)
+                        && listed != on_disk
+                    {
+                        line.push_str(&format!(
+                            "\n  {:<9} ! signed in as {on_disk}, but listed under {listed}",
+                            ""
+                        ));
+                    }
+                    line
+                }
+                proto::RemoteLink::Refused => format!(
+                    "the service refused the token{} {} · `robotctl account login`",
+                    signed_in.map(|n| format!(" for {n}")).unwrap_or_default(),
+                    since(status.since)
+                ),
+                proto::RemoteLink::Retrying { reason } => format!(
+                    "not connected, retrying (first failed {}): {}",
+                    since(status.since),
+                    reason.lines().next().unwrap_or("no reason given")
+                ),
+            }
+        }
+    };
+    Some(format!("central   {body}\n"))
 }
 
 /// Past this, a quiet update source is said without being asked. A week is twenty-eight missed
@@ -5928,7 +6023,145 @@ mod tests {
             robot_error: robot_error.map(str::to_owned),
             software: report(vec![service("robotd", "0.2.0")], Some("0.2.0")),
             camera: None,
+            remote: None,
+            account: None,
+            read_at: 1_000_000,
         }
+    }
+
+    /// `updaterd` saying the robot is signed in as `name`, or signed in to nothing.
+    fn signed_in_as(name: Option<&str>) -> proto::AccountStatusResult {
+        proto::AccountStatusResult {
+            account: name.map(|username| proto::Account {
+                username: username.to_owned(),
+                token_expires_in: 30 * 86_400,
+                refreshable: true,
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// What `mediad` published, `ago` seconds before the report was read.
+    fn remote(link: proto::RemoteLink, ago: i64) -> proto::RemoteStatus {
+        proto::RemoteStatus {
+            service: "https://pollen-robotics-reachy-mini-central.hf.space".to_owned(),
+            since: 1_000_000 - ago,
+            link,
+        }
+    }
+
+    fn registered(account: &str, heartbeat_ago: i64) -> proto::RemoteLink {
+        proto::RemoteLink::Registered {
+            account: Some(account.to_owned()),
+            peer_id: "87a14833".to_owned(),
+            last_heartbeat: 1_000_000 - heartbeat_ago,
+        }
+    }
+
+    /// The line this exists for: registered, under which account, and still alive.
+    #[test]
+    fn health_says_which_account_the_central_lists_the_robot_under() {
+        let mut report = health_report(None, None);
+        report.remote = Some(remote(registered("cduss", 4), 11 * 60));
+        report.account = Some(signed_in_as(Some("cduss")));
+        let out = render_health(&report);
+
+        assert!(
+            out.contains("central   registered as cduss 11 minutes ago · last heartbeat 4 s ago\n"),
+            "{out}"
+        );
+        assert!(
+            !out.contains('!'),
+            "matching accounts are not a warning: {out}"
+        );
+    }
+
+    /// The account on disk and the account the service resolved it to disagree — say both.
+    #[test]
+    fn health_flags_a_robot_listed_under_another_account() {
+        let mut report = health_report(None, None);
+        report.remote = Some(remote(registered("cduss", 4), 60));
+        report.account = Some(signed_in_as(Some("pierre")));
+        let out = render_health(&report);
+
+        assert!(
+            out.contains("! signed in as pierre, but listed under cduss"),
+            "{out}"
+        );
+    }
+
+    /// A heartbeat that has stopped moving is a relay that has stopped, whatever the state says.
+    #[test]
+    fn health_calls_a_heartbeat_that_stopped_moving_stale() {
+        let mut report = health_report(None, None);
+        report.remote = Some(remote(registered("cduss", 300), 3_600));
+        let out = render_health(&report);
+
+        assert!(out.contains("last heartbeat 300 s ago — stale"), "{out}");
+    }
+
+    #[test]
+    fn health_says_why_the_robot_is_not_in_the_list() {
+        let mut report = health_report(None, None);
+        report.account = Some(signed_in_as(Some("cduss")));
+
+        report.remote = Some(remote(proto::RemoteLink::Refused, 120));
+        let out = render_health(&report);
+        assert!(
+            out.contains(
+                "central   the service refused the token for cduss 2 minutes ago · `robotctl account login`"
+            ),
+            "{out}"
+        );
+
+        report.remote = Some(remote(
+            proto::RemoteLink::Retrying {
+                reason: "GET https://x/events: HTTP 503".to_owned(),
+            },
+            300,
+        ));
+        let out = render_health(&report);
+        assert!(
+            out.contains(
+                "central   not connected, retrying (first failed 5 minutes ago): GET https://x/events: HTTP 503"
+            ),
+            "{out}"
+        );
+
+        report.remote = Some(remote(proto::RemoteLink::SignedOut, 300));
+        report.account = Some(signed_in_as(None));
+        let out = render_health(&report);
+        assert!(out.contains("central   not signed in"), "{out}");
+    }
+
+    /// Nothing from `mediad` — stopped, `--no-remote`, or older than this — falls back to the
+    /// account alone, and to no line at all when there is not even that.
+    #[test]
+    fn health_without_a_published_status_falls_back_to_the_account() {
+        let mut report = health_report(None, None);
+        assert!(!render_health(&report).contains("central"));
+
+        report.account = Some(signed_in_as(Some("cduss")));
+        let out = render_health(&report);
+        assert!(
+            out.contains("central   signed in as cduss, connection not reported"),
+            "{out}"
+        );
+    }
+
+    /// The published file is what `mediad` writes and this reads; the tagged, flattened shape is
+    /// the one easy to get wrong between the two.
+    #[test]
+    fn remote_status_round_trips_as_mediad_writes_it() {
+        let status = remote(registered("cduss", 4), 60);
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["state"], "registered");
+        assert_eq!(json["account"], "cduss");
+        assert_eq!(json["peerId"], "87a14833");
+        assert_eq!(
+            serde_json::from_value::<proto::RemoteStatus>(json).unwrap(),
+            status
+        );
     }
 
     fn camera_stats(fps: f64, dropped: u64, consumers: u32) -> proto::CameraStats {

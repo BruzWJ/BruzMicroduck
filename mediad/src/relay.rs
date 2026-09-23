@@ -83,6 +83,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use duck_ipc_proto::{RemoteLink, RemoteStatus};
 use eventsource_stream::Eventsource as _;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -407,6 +408,69 @@ enum Ended {
     CredentialChanged,
 }
 
+/// What this task last published, so a heartbeat can move `lastHeartbeat` without moving `since`.
+struct Published<'a> {
+    path: &'a Path,
+    service: &'a str,
+    current: Option<RemoteStatus>,
+    /// Said once: on a laptop there is no `/run/mediad`, and every heartbeat would say it again.
+    warned: bool,
+}
+
+impl<'a> Published<'a> {
+    fn new(path: &'a Path, service: &'a str) -> Self {
+        Self {
+            path,
+            service,
+            current: None,
+            warned: false,
+        }
+    }
+
+    fn is(&self, test: impl FnOnce(&RemoteLink) -> bool) -> bool {
+        self.current
+            .as_ref()
+            .is_some_and(|status| test(&status.link))
+    }
+
+    /// Publish `link`, keeping `since` while the kind of state is unchanged. Rewrites nothing when
+    /// nothing moved, which is every no-token poll on a robot nobody has signed in.
+    fn set(&mut self, link: RemoteLink) {
+        let since = match &self.current {
+            Some(current)
+                if std::mem::discriminant(&current.link) == std::mem::discriminant(&link) =>
+            {
+                current.since
+            }
+            _ => unix_now(),
+        };
+        let status = RemoteStatus {
+            service: self.service.to_owned(),
+            since,
+            link,
+        };
+        if self.current.as_ref() == Some(&status) {
+            return;
+        }
+        if let Err(e) = duck_ipc_proto::publish_remote_status(self.path, &status)
+            && !self.warned
+        {
+            tracing::warn!(
+                error = %e,
+                "could not publish the rendezvous status; `robotctl health` will not show it"
+            );
+            self.warned = true;
+        }
+        self.current = Some(status);
+    }
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
 /// The relay, as the task that owns the outward connection.
 pub struct Relay {
     base: String,
@@ -430,6 +494,9 @@ pub struct Relay {
     /// on a laptop, and a lane whose sockets were hardcoded to `/run/robot` could only be tested
     /// on a board.
     sockets: crate::upstream::Sockets,
+    /// Where to publish [`RemoteStatus`] for `robotctl health`. An argument for `sockets`' reason:
+    /// a test must not write the board's `/run/mediad`, and `main` must not forget to name it.
+    status_path: PathBuf,
 }
 
 impl Relay {
@@ -447,6 +514,7 @@ impl Relay {
         token_path: impl Into<PathBuf>,
         meta: Meta,
         sockets: crate::upstream::Sockets,
+        status_path: impl Into<PathBuf>,
     ) -> Option<Self> {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
@@ -468,6 +536,7 @@ impl Relay {
             local_signalling: DEFAULT_LOCAL_SIGNALLING.to_owned(),
             video: None,
             sockets,
+            status_path: status_path.into(),
         })
     }
 
@@ -506,8 +575,10 @@ impl Relay {
     /// across one: the service's view of this robot is rebuilt by the next `setPeerStatus`.
     pub async fn run(self) {
         let mut backoff = self.timings.backoff_start;
+        let mut published = Published::new(&self.status_path, &self.base);
         loop {
             let Some(token) = self.token() else {
+                published.set(RemoteLink::SignedOut);
                 // At `debug`: a robot nobody has signed in is not a robot with a problem, and
                 // this is every thirty seconds forever.
                 tracing::debug!(
@@ -518,8 +589,17 @@ impl Relay {
                 continue;
             };
 
-            match self.session(&token).await {
+            // Not over a retry or a refusal: "retrying since" and "refused since" should date the
+            // first failure, and a reconnect that flipped through `connecting` would reset both.
+            if !published
+                .is(|link| matches!(link, RemoteLink::Retrying { .. } | RemoteLink::Refused))
+            {
+                published.set(RemoteLink::Connecting);
+            }
+
+            match self.session(&token, &mut published).await {
                 Ended::Unauthorised => {
+                    published.set(RemoteLink::Refused);
                     tracing::warn!(
                         "the rendezvous service refused this robot's account token; a new login \
                          is what fixes it"
@@ -536,6 +616,11 @@ impl Relay {
                     backoff = self.timings.backoff_start;
                 }
                 Ended::SplitBrain => {
+                    published.set(RemoteLink::Retrying {
+                        reason: "the service stopped listing this robot although the stream was \
+                                 healthy"
+                            .to_owned(),
+                    });
                     // Reconnect immediately rather than backing off: the connection looked
                     // healthy, so there is nothing to wait for, and every second here is a
                     // second the robot is not reachable while believing it is.
@@ -547,6 +632,7 @@ impl Relay {
                 }
                 Ended::Reconnect(why) => {
                     tracing::info!(%why, retry_in = ?backoff, "remote access is off; will retry");
+                    published.set(RemoteLink::Retrying { reason: why });
                     tokio::time::sleep(jittered(backoff)).await;
                     backoff = (backoff * 2).min(self.timings.backoff_max);
                 }
@@ -563,7 +649,7 @@ impl Relay {
     }
 
     /// One connection: open the stream, register, then hold the lease until something breaks.
-    async fn session(&self, token: &str) -> Ended {
+    async fn session(&self, token: &str, published: &mut Published<'_>) -> Ended {
         let mut events = match self.open_stream(token).await {
             Ok(events) => events,
             Err(ended) => return ended,
@@ -587,6 +673,14 @@ impl Relay {
             "registered with the rendezvous service; this robot is reachable from outside its \
              network"
         );
+        let registered = |published: &mut Published<'_>| {
+            published.set(RemoteLink::Registered {
+                account: welcome.username.clone(),
+                peer_id: welcome.peer_id.clone(),
+                last_heartbeat: unix_now(),
+            });
+        };
+        registered(published);
 
         // At most one at a time. The service gates this too (`sessionRejected` with `robot_busy`),
         // so this is belt-and-braces — and it stays, because two remote peers writing into one
@@ -617,6 +711,7 @@ impl Relay {
                     if let Err(ended) = self.set_peer_status(token).await {
                         return ended;
                     }
+                    registered(published);
                 }
                 _ = polls.tick() => {
                     match self.lists_us(token, &welcome.peer_id).await {
@@ -1553,7 +1648,14 @@ mod tests {
     fn the_credential_is_read_for_the_one_field_that_matters() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hf-token");
-        let relay = Relay::new("http://127.0.0.1:1", &path, meta(), Default::default()).unwrap();
+        let relay = Relay::new(
+            "http://127.0.0.1:1",
+            &path,
+            meta(),
+            Default::default(),
+            remote_json(&dir),
+        )
+        .unwrap();
 
         assert_eq!(
             relay.token(),
@@ -1784,6 +1886,15 @@ mod tests {
         path
     }
 
+    fn remote_json(dir: &tempfile::TempDir) -> PathBuf {
+        dir.path().join("remote.json")
+    }
+
+    /// What the relay last published for `robotctl health`, if anything.
+    fn published(dir: &tempfile::TempDir) -> Option<RemoteStatus> {
+        serde_json::from_slice(&std::fs::read(remote_json(dir)).ok()?).ok()
+    }
+
     /// Wait for something to become true, or fail saying what never happened.
     async fn until(what: &str, mut ready: impl FnMut() -> bool) {
         for _ in 0..200 {
@@ -1807,9 +1918,15 @@ mod tests {
         let service = fake_service().await;
         *service.state.heartbeat_seconds.lock().unwrap() = Some(0.05);
 
-        let relay = Relay::new(&service.base, signed_in(&dir), meta(), Default::default())
-            .unwrap()
-            .with_timings(brisk());
+        let relay = Relay::new(
+            &service.base,
+            signed_in(&dir),
+            meta(),
+            Default::default(),
+            remote_json(&dir),
+        )
+        .unwrap()
+        .with_timings(brisk());
         let task = tokio::spawn(relay.run());
 
         until("registration", || {
@@ -1836,6 +1953,20 @@ mod tests {
             service.state.of_type("setPeerStatus").len() >= 3
         })
         .await;
+
+        // What `robotctl health` reads: the account the *service* named, which is the one whose
+        // robot list this robot is in — the question that had no answer but the journal.
+        let status = published(&dir).expect("a registered relay publishes its status");
+        assert_eq!(status.service, service.base);
+        match status.link {
+            RemoteLink::Registered {
+                account, peer_id, ..
+            } => {
+                assert_eq!(account.as_deref(), Some("PierreRouanet"));
+                assert_eq!(peer_id, PEER_ID);
+            }
+            other => panic!("expected registered, got {other:?}"),
+        }
         task.abort();
     }
 
@@ -1849,9 +1980,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let service = fake_service().await;
 
-        let relay = Relay::new(&service.base, signed_in(&dir), meta(), Default::default())
-            .unwrap()
-            .with_timings(brisk());
+        let relay = Relay::new(
+            &service.base,
+            signed_in(&dir),
+            meta(),
+            Default::default(),
+            remote_json(&dir),
+        )
+        .unwrap()
+        .with_timings(brisk());
         let task = tokio::spawn(relay.run());
         until("the first stream", || {
             service
@@ -1889,9 +2026,15 @@ mod tests {
         let path = dir.path().join("hf-token");
         let service = fake_service().await;
 
-        let relay = Relay::new(&service.base, &path, meta(), Default::default())
-            .unwrap()
-            .with_timings(brisk());
+        let relay = Relay::new(
+            &service.base,
+            &path,
+            meta(),
+            Default::default(),
+            remote_json(&dir),
+        )
+        .unwrap()
+        .with_timings(brisk());
         let task = tokio::spawn(relay.run());
 
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1902,6 +2045,11 @@ mod tests {
                 .load(std::sync::atomic::Ordering::SeqCst),
             0,
             "a robot with no account must not reach the service at all"
+        );
+        assert_eq!(
+            published(&dir).map(|status| status.link),
+            Some(RemoteLink::SignedOut),
+            "and says so, rather than publishing nothing"
         );
 
         // The login lands, over BLE, while this is running.
@@ -1930,9 +2078,15 @@ mod tests {
         let service = fake_service().await;
         *service.state.heartbeat_seconds.lock().unwrap() = Some(0.05);
 
-        let relay = Relay::new(&service.base, &path, meta(), Default::default())
-            .unwrap()
-            .with_timings(brisk());
+        let relay = Relay::new(
+            &service.base,
+            &path,
+            meta(),
+            Default::default(),
+            remote_json(&dir),
+        )
+        .unwrap()
+        .with_timings(brisk());
         let task = tokio::spawn(relay.run());
         until("registration", || {
             !service.state.of_type("setPeerStatus").is_empty()
@@ -1970,9 +2124,15 @@ mod tests {
         let service = fake_service().await;
         *service.state.heartbeat_seconds.lock().unwrap() = Some(0.05);
 
-        let relay = Relay::new(&service.base, &path, meta(), Default::default())
-            .unwrap()
-            .with_timings(brisk());
+        let relay = Relay::new(
+            &service.base,
+            &path,
+            meta(),
+            Default::default(),
+            remote_json(&dir),
+        )
+        .unwrap()
+        .with_timings(brisk());
         let task = tokio::spawn(relay.run());
         until("registration", || {
             !service.state.of_type("setPeerStatus").is_empty()
@@ -2008,12 +2168,18 @@ mod tests {
         let service = fake_service().await;
         *service.state.refuse_posts.lock().unwrap() = Some(401);
 
-        let relay = Relay::new(&service.base, signed_in(&dir), meta(), Default::default())
-            .unwrap()
-            .with_timings(Timings {
-                no_token_poll: Duration::from_secs(30),
-                ..brisk()
-            });
+        let relay = Relay::new(
+            &service.base,
+            signed_in(&dir),
+            meta(),
+            Default::default(),
+            remote_json(&dir),
+        )
+        .unwrap()
+        .with_timings(Timings {
+            no_token_poll: Duration::from_secs(30),
+            ..brisk()
+        });
         let task = tokio::spawn(relay.run());
 
         until("the first attempt", || {
@@ -2025,6 +2191,10 @@ mod tests {
             service.state.of_type("setPeerStatus").len(),
             1,
             "a 401 must not be retried on the reconnect timer"
+        );
+        assert_eq!(
+            published(&dir).map(|status| status.link),
+            Some(RemoteLink::Refused)
         );
         task.abort();
     }
@@ -2108,9 +2278,15 @@ mod tests {
         .to_string();
         let mut robotd = fake_daemon(&sockets.robot, vec![answer.clone()]);
 
-        let relay = Relay::new(&service.base, signed_in(&dir), meta(), sockets)
-            .unwrap()
-            .with_timings(brisk());
+        let relay = Relay::new(
+            &service.base,
+            signed_in(&dir),
+            meta(),
+            sockets,
+            remote_json(&dir),
+        )
+        .unwrap()
+        .with_timings(brisk());
         let task = tokio::spawn(relay.run());
         until("registration", || {
             !service.state.of_type("setPeerStatus").is_empty()
@@ -2174,9 +2350,15 @@ mod tests {
         let sockets = sockets_in(dir.path());
         // Deliberately no daemon at all: a refusal must not depend on one being there.
 
-        let relay = Relay::new(&service.base, signed_in(&dir), meta(), sockets)
-            .unwrap()
-            .with_timings(brisk());
+        let relay = Relay::new(
+            &service.base,
+            signed_in(&dir),
+            meta(),
+            sockets,
+            remote_json(&dir),
+        )
+        .unwrap()
+        .with_timings(brisk());
         let task = tokio::spawn(relay.run());
         until("registration", || {
             !service.state.of_type("setPeerStatus").is_empty()
@@ -2225,6 +2407,7 @@ mod tests {
             signed_in(&dir),
             meta(),
             sockets_in(dir.path()),
+            remote_json(&dir),
         )
         .unwrap()
         .with_timings(brisk());
@@ -2394,10 +2577,16 @@ mod tests {
         let service = fake_service().await;
         let (local_url, local) = fake_signalling(true).await;
 
-        let relay = Relay::new(&service.base, signed_in(&dir), meta(), Default::default())
-            .unwrap()
-            .with_timings(brisk())
-            .with_local_signalling(&local_url);
+        let relay = Relay::new(
+            &service.base,
+            signed_in(&dir),
+            meta(),
+            Default::default(),
+            remote_json(&dir),
+        )
+        .unwrap()
+        .with_timings(brisk())
+        .with_local_signalling(&local_url);
         let task = tokio::spawn(relay.run());
         until("registration", || {
             !service.state.of_type("setPeerStatus").is_empty()
@@ -2473,10 +2662,16 @@ mod tests {
         let service = fake_service().await;
         let (local_url, local) = fake_signalling(true).await;
 
-        let relay = Relay::new(&service.base, signed_in(&dir), meta(), Default::default())
-            .unwrap()
-            .with_timings(brisk())
-            .with_local_signalling(&local_url);
+        let relay = Relay::new(
+            &service.base,
+            signed_in(&dir),
+            meta(),
+            Default::default(),
+            remote_json(&dir),
+        )
+        .unwrap()
+        .with_timings(brisk())
+        .with_local_signalling(&local_url);
         let task = tokio::spawn(relay.run());
         until("registration", || {
             !service.state.of_type("setPeerStatus").is_empty()
@@ -2526,10 +2721,16 @@ mod tests {
         let service = fake_service().await;
         let (local_url, _local) = fake_signalling(false).await;
 
-        let relay = Relay::new(&service.base, signed_in(&dir), meta(), Default::default())
-            .unwrap()
-            .with_timings(brisk())
-            .with_local_signalling(&local_url);
+        let relay = Relay::new(
+            &service.base,
+            signed_in(&dir),
+            meta(),
+            Default::default(),
+            remote_json(&dir),
+        )
+        .unwrap()
+        .with_timings(brisk())
+        .with_local_signalling(&local_url);
         let task = tokio::spawn(relay.run());
         until("registration", || {
             !service.state.of_type("setPeerStatus").is_empty()

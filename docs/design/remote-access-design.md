@@ -505,6 +505,13 @@ One inherited rule: nothing in a GStreamer signal handler may panic (`pipeline.r
 process abort that taught it). The relay never touches one — but it will want to *reach* the pipeline
 eventually, and that is the boundary to keep clean.
 
+**What it is doing is published, not only logged.** Each state — signed out, connecting, registered,
+refused, retrying — lands in `/run/mediad/remote.json` (`RemoteStatus` in `duck-ipc-proto`), and a
+registration also records the account the service resolved the token to and every accepted heartbeat.
+`robotctl health` prints it as its `central` line, next to the account `updaterd` has on disk. A robot
+is most often "not in the list" because it is listed under somebody else's account, and that line is
+where the two names meet.
+
 ### 3.6 What a bridged peer may call: exactly what a LAN peer may
 
 The session is the same `webrtcsink` session and `route.rs` is the same table. This is deliberate and
