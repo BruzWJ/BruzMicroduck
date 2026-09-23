@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::Error;
 use crate::fsutil::write_atomic;
-use crate::proto::{LogEntry, Outcome};
+use crate::proto::{CheckAttempt, LogEntry, Outcome};
 
 /// Unix seconds now. The engine stamps log entries; nothing else in the engine
 /// depends on the clock except preflight's sanity check.
@@ -260,7 +260,8 @@ impl Pins {
     }
 }
 
-/// When each component's update source last answered with a manifest that verified.
+/// When each component's update source last answered with a manifest that verified, and how the
+/// last check went.
 ///
 /// A robot that cannot reach its source (a blocked host, a DNS that stopped resolving, a clock TLS
 /// will not accept) looks like a robot with nothing to install: the scheduled check fails, and
@@ -271,14 +272,22 @@ impl Pins {
 ///
 /// Only the source's latest counts. An exact version is one a source that stopped moving still
 /// serves.
+///
+/// The last attempt is kept beside it, in its own file, because "never answered" is two states
+/// and only it tells them apart: a board whose checks have been failing, which is the loudest case
+/// there is, and an `updaterd` that has not run its first check yet, which is every board for the
+/// minute after it starts. It also carries the failure, so the robot can say *why* it has not
+/// heard from its source without anyone reading the journal.
 pub struct Checked {
     path: PathBuf,
+    attempts: PathBuf,
 }
 
 impl Checked {
     pub fn open(state_dir: &Path) -> Self {
         Self {
             path: state_dir.join("checked.json"),
+            attempts: state_dir.join("check-attempts.json"),
         }
     }
 
@@ -286,12 +295,29 @@ impl Checked {
     /// board, or the record cannot be read: this is a report riding on `update.status`, and a
     /// report that failed the call it rides on would be worse than a missing one.
     pub fn get(&self, component: &str) -> Option<i64> {
-        self.read_all().unwrap_or_default().remove(component)
+        read_map(&self.path).unwrap_or_default().remove(component)
+    }
+
+    /// `component`'s last check, answered or not. `None` before the first one, and when the
+    /// record cannot be read, for the reason [`Self::get`] gives.
+    pub fn last_attempt(&self, component: &str) -> Option<CheckAttempt> {
+        read_map(&self.attempts)
+            .unwrap_or_default()
+            .remove(component)
     }
 
     /// Record that `component`'s source answered now.
     pub fn record(&self, component: &str) -> Result<(), Error> {
-        self.record_at(component, now_unix())
+        let at = now_unix();
+        // The attempt first and whatever the clock says: it is the half that is not gated on it.
+        let attempt = self.record_attempt(component, at, None);
+        self.record_at(component, at)?;
+        attempt
+    }
+
+    /// Record that a check of `component`'s source did not get an answer, and why.
+    pub fn record_failure(&self, component: &str, error: &str) -> Result<(), Error> {
+        self.record_attempt(component, now_unix(), Some(error.to_owned()))
     }
 
     /// A clock before the preflight floor is not written down. A board with no RTC boots in 1970,
@@ -311,35 +337,49 @@ impl Checked {
             );
             return Ok(());
         }
-        let mut all = self.read_all()?;
+        let mut all = read_map(&self.path)?;
         all.insert(component.to_owned(), at);
-        let bytes = serde_json::to_vec(&all)
-            .map_err(|e| Error::Internal(format!("serialising check times: {e}")))?;
-        write_atomic(&self.path, &bytes)
+        write_map(&self.path, &all)
     }
 
-    /// Absent is empty; unreadable is an error, because the caller is about to write the whole
-    /// map back. Swallowing an IO error here would replace every other component's time with a
-    /// map holding only the one being recorded — losing, on a transient failure, exactly the
-    /// record this exists to keep. Damaged JSON is different: nothing can read any entry in it,
-    /// so starting over loses nothing that was still there.
-    fn read_all(&self) -> Result<BTreeMap<String, i64>, Error> {
-        match std::fs::read(&self.path) {
-            Ok(bytes) => Ok(serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-                tracing::warn!(
-                    path = %self.path.display(),
-                    error = %e,
-                    "check times unreadable: starting the record again"
-                );
-                BTreeMap::new()
-            })),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
-            Err(e) => Err(Error::Io {
-                path: self.path.clone(),
-                source: e,
-            }),
-        }
+    /// Unlike the answer, an attempt is recorded under any clock. A board whose clock has not
+    /// synced is the one whose HTTPS checks fail on the certificate dates, and leaving that
+    /// attempt out would report it as not having checked yet — the one reading that says nothing
+    /// is wrong. The time is what the clock said; the failure is the part that is read.
+    fn record_attempt(&self, component: &str, at: i64, error: Option<String>) -> Result<(), Error> {
+        let mut all = read_map(&self.attempts)?;
+        all.insert(component.to_owned(), CheckAttempt { at, error });
+        write_map(&self.attempts, &all)
     }
+}
+
+/// Absent is empty; unreadable is an error, because the caller is about to write the whole map
+/// back. Swallowing an IO error here would replace every other component's entry with a map
+/// holding only the one being recorded — losing, on a transient failure, exactly the record this
+/// exists to keep. Damaged JSON is different: nothing can read any entry in it, so starting over
+/// loses nothing that was still there.
+fn read_map<T: serde::de::DeserializeOwned>(path: &Path) -> Result<BTreeMap<String, T>, Error> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "check record unreadable: starting it again"
+            );
+            BTreeMap::new()
+        })),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+        Err(e) => Err(Error::Io {
+            path: path.to_path_buf(),
+            source: e,
+        }),
+    }
+}
+
+fn write_map<T: serde::Serialize>(path: &Path, all: &BTreeMap<String, T>) -> Result<(), Error> {
+    let bytes = serde_json::to_vec(all)
+        .map_err(|e| Error::Internal(format!("serialising the check record: {e}")))?;
+    write_atomic(path, &bytes)
 }
 
 /// What `scripts/robot-rescue` leaves in the state dir when it swaps `current` to golden.
@@ -869,6 +909,39 @@ mod tests {
         checked.record_at("daemon", 1_800_000_000).unwrap();
         checked.record_at("daemon", 86_400).unwrap();
         assert_eq!(checked.get("daemon"), Some(1_800_000_000));
+    }
+
+    /// The last attempt is kept whatever became of it, and an answer clears the failure before it:
+    /// the reason is for a source that is not answering *now*.
+    #[test]
+    fn the_last_attempt_is_kept_answered_or_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let checked = Checked::open(dir.path());
+        assert_eq!(checked.last_attempt("daemon"), None);
+
+        checked
+            .record_failure("daemon", "network error: dns error")
+            .unwrap();
+        let attempt = checked.last_attempt("daemon").unwrap();
+        assert_eq!(attempt.error.as_deref(), Some("network error: dns error"));
+        assert_eq!(checked.get("daemon"), None, "a failure is not an answer");
+
+        checked.record("daemon").unwrap();
+        assert_eq!(checked.last_attempt("daemon").unwrap().error, None);
+        assert!(checked.get("daemon").is_some());
+    }
+
+    /// An attempt under a clock that has not synced is recorded, where the answer is not: that
+    /// board's checks are the ones failing on certificate dates, and without the attempt it would
+    /// read as one that has not checked yet.
+    #[test]
+    fn an_attempt_under_an_unsynced_clock_is_still_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let checked = Checked::open(dir.path());
+        checked.record_attempt("daemon", 86_400, None).unwrap();
+        checked.record_at("daemon", 86_400).unwrap();
+        assert_eq!(checked.get("daemon"), None);
+        assert_eq!(checked.last_attempt("daemon").unwrap().at, 86_400);
     }
 
     /// A damaged record is a missing report, not a failed `update.status`.

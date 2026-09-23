@@ -524,6 +524,17 @@ async fn last_checked(engine: &Engine) -> Option<i64> {
         .last_checked
 }
 
+/// How `daemon`'s last check went, as `update.status` reports it.
+async fn last_check_attempt(engine: &Engine) -> Option<updater::proto::CheckAttempt> {
+    engine
+        .status()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|status| status.component.to_string() == "daemon")?
+        .last_check_attempt
+}
+
 /// **A check that reached the source says when, and one that did not says nothing.**
 ///
 /// A robot that cannot reach its source reads exactly like one with nothing to install, so when
@@ -534,9 +545,17 @@ async fn status_says_when_the_source_last_answered() {
     let fx = Fixture::new();
     let engine = fx.engine_healthy();
 
-    // Nothing published, so the fetch fails, and that is not an answer.
-    engine.check("daemon").await.unwrap_err();
+    // Nothing checked yet: no answer, and no attempt either.
+    assert_eq!(last_check_attempt(&engine).await, None);
+
+    // Nothing published, so the fetch fails, and that is not an answer — but it is an attempt,
+    // and it says why.
+    let why = engine.check("daemon").await.unwrap_err().to_string();
     assert_eq!(last_checked(&engine).await, None);
+    let attempt = last_check_attempt(&engine)
+        .await
+        .expect("a check that failed is recorded as an attempt");
+    assert_eq!(attempt.error.as_deref(), Some(why.as_str()));
 
     fx.publish("1.0.0", None);
     let before = updater::journal::now_unix();
@@ -545,6 +564,22 @@ async fn status_says_when_the_source_last_answered() {
         .await
         .expect("a check that reached the source is recorded");
     assert!(at >= before, "{at} is before the check started at {before}");
+    assert_eq!(
+        last_check_attempt(&engine).await.unwrap().error,
+        None,
+        "an answer clears the failure before it"
+    );
+}
+
+/// **A check of a component this robot does not have is not an attempt.** The name arrives over
+/// IPC, and a typo must not add an entry for it.
+#[tokio::test]
+async fn a_check_of_an_unknown_component_records_nothing() {
+    let fx = Fixture::new();
+    let engine = fx.engine_healthy();
+    engine.check("nope").await.unwrap_err();
+    let attempts = fx.root.join("var/lib/robot/updater/check-attempts.json");
+    assert!(!attempts.exists(), "{}", attempts.display());
 }
 
 /// **A manifest that does not verify is not an answer either.** The fetch worked and the signature

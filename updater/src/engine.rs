@@ -469,11 +469,18 @@ impl Engine {
     /// Records that the source answered, when it did, because `update.status` reports how long ago
     /// that was ([`crate::journal::Checked`]). Every `Ok` below comes after the manifest verified
     /// and named this component's channel; an `Err` may be the fetch, the signature or the
-    /// channel, and none of those is an answer.
+    /// channel, and none of those is an answer — so it is recorded as an attempt that failed, with
+    /// the reason `robotctl health` gives for the silence.
     pub async fn check(&self, component: &str) -> Result<CheckResult, Error> {
         let result = self.check_source(component).await;
-        if result.is_ok() {
-            self.source_answered(component);
+        match &result {
+            Ok(_) => self.source_answered(component),
+            // Only for a component this robot has: the name arrives over IPC, and an unknown one
+            // is a mistyped command rather than a check that failed.
+            Err(e) if self.config.component(component).is_ok() => {
+                self.source_did_not_answer(component, e);
+            }
+            Err(_) => {}
         }
         result
     }
@@ -486,8 +493,17 @@ impl Engine {
         }
     }
 
+    fn source_did_not_answer(&self, component: &str, why: &Error) {
+        if let Err(e) = crate::journal::Checked::open(&self.config.state_dir)
+            .record_failure(component, &why.to_string())
+        {
+            tracing::warn!(component, error = %e, "could not record that a check of the update source failed");
+        }
+    }
+
     pub async fn status(&self) -> Result<Vec<ComponentStatus>, Error> {
         let mut out = Vec::new();
+        let checked = crate::journal::Checked::open(&self.config.state_dir);
         for (name, cfg) in &self.config.components {
             let store = Store::new(cfg.install_dir.clone());
             // The verdict, not a boolean summary of it: `healthy` alone cannot tell a board
@@ -532,7 +548,8 @@ impl Engine {
                 reason: report.and_then(|r| r.reason),
                 pinned: self.effective_pin(name),
                 last_attempt: self.journal.last_for(name)?,
-                last_checked: crate::journal::Checked::open(&self.config.state_dir).get(name),
+                last_checked: checked.get(name),
+                last_check_attempt: checked.last_attempt(name),
             });
         }
         Ok(out)

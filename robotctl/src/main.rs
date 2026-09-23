@@ -334,6 +334,11 @@ enum Namespace {
         /// Machine-readable output, for scripts and support bundles.
         #[arg(long)]
         json: bool,
+        /// Check each update source now, before reporting, rather than reporting the last
+        /// scheduled check. Waits on the network, which is why it is not the default: the login
+        /// banner runs `robotctl health`.
+        #[arg(long)]
+        check: bool,
     },
 
     /// What is running on this robot, and what is installed. The first thing to ask for
@@ -1471,10 +1476,22 @@ struct ComponentReport {
     /// threshold, and the phrase is wrong the moment it is stored.
     #[serde(skip_serializing_if = "Option::is_none")]
     last_checked: Option<i64>,
+    /// The last check, answered or not, as `update status --json` carries it — the error is the
+    /// one thing here that says why the source has gone quiet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_check_attempt: Option<proto::CheckAttempt>,
     /// What that means, decided once where the clock and the daemon's version are both known.
     /// The line and the warning both read it rather than re-deriving it from the timestamp.
     #[serde(skip)]
     source: SourceCheck,
+}
+
+impl ComponentReport {
+    /// Why the last check of the source got no answer. `None` when it got one, and when there has
+    /// been none or this `updaterd` does not say.
+    fn check_failure(&self) -> Option<&str> {
+        self.last_check_attempt.as_ref()?.error.as_deref()
+    }
 }
 
 /// What the record says about a component's update source.
@@ -1492,7 +1509,16 @@ enum SourceCheck {
     /// A daemon that would say, with nothing to say. The source has not answered once since this
     /// board started recording — a robot blocked since it was provisioned, and the exact shape of
     /// #282: no error anywhere, and an installed release that looks current.
+    ///
+    /// From an `updaterd` that records attempts, only when there has been one and it failed.
     Never,
+    /// No check has run since this board started recording: an `updaterd` that has just started,
+    /// which is every board for the minute after an update. Said, not warned: until the first
+    /// check there is nothing to know, and warning then is a false alarm on every upgrade.
+    NotYet,
+    /// Checks are answered, but when is not written down: the clock was before the preflight
+    /// floor, which a `local_dir` source on a board with no RTC gets past. Not a quiet source.
+    Unrecorded,
     /// It answered, this many seconds ago.
     Answered(i64),
     /// Recorded ahead of this clock, so the age is unknown. A board that checked with a fast
@@ -1504,13 +1530,29 @@ enum SourceCheck {
 
 impl SourceCheck {
     /// Read a component's status, with the API version of the `updaterd` that answered.
-    fn read(last_checked: Option<i64>, api_version: Option<u32>, now: i64) -> Self {
-        if api_version.is_none_or(|v| v < proto::API_LAST_CHECKED) {
+    ///
+    /// Below [`proto::API_CHECK_ATTEMPT`] there is no attempt to read, and nothing recorded is
+    /// still "never": that daemon cannot tell a board that has just started from one that cannot
+    /// reach its source, and the second is the one that matters.
+    fn read(
+        last_checked: Option<i64>,
+        attempt: Option<&proto::CheckAttempt>,
+        api_version: Option<u32>,
+        now: i64,
+    ) -> Self {
+        let Some(api) = api_version.filter(|v| *v >= proto::API_LAST_CHECKED) else {
             return Self::Unsupported;
+        };
+        if let Some(at) = last_checked {
+            return Self::at(at, now);
         }
-        match last_checked {
-            None => Self::Never,
-            Some(at) => Self::at(at, now),
+        if api < proto::API_CHECK_ATTEMPT {
+            return Self::Never;
+        }
+        match attempt {
+            None => Self::NotYet,
+            Some(proto::CheckAttempt { error: Some(_), .. }) => Self::Never,
+            Some(proto::CheckAttempt { error: None, .. }) => Self::Unrecorded,
         }
     }
 
@@ -1529,6 +1571,12 @@ impl SourceCheck {
         match self {
             Self::Unsupported => None,
             Self::Never => Some("source has never answered on this robot".to_owned()),
+            Self::NotYet => {
+                Some("source not checked yet (`robotctl update check` checks it now)".to_owned())
+            }
+            Self::Unrecorded => {
+                Some("source answers, but when is not recorded: this clock was not set".to_owned())
+            }
             Self::Ahead => Some(
                 "source last answered at a time this clock has not reached (not synced yet?)"
                     .to_owned(),
@@ -1543,7 +1591,7 @@ impl SourceCheck {
             return None;
         }
         match self {
-            Self::Unsupported => None,
+            Self::Unsupported | Self::NotYet | Self::Unrecorded => None,
             Self::Never => Some("has not answered once on this robot".to_owned()),
             Self::Ahead => Some(
                 "last answered at a time this clock has not reached, so how long ago is not known"
@@ -1555,7 +1603,7 @@ impl SourceCheck {
 
     fn past_threshold(self) -> bool {
         match self {
-            Self::Unsupported => false,
+            Self::Unsupported | Self::NotYet | Self::Unrecorded => false,
             Self::Never | Self::Ahead => true,
             Self::Answered(age) => age / 86_400 >= QUIET_SOURCE_DAYS,
         }
@@ -1625,7 +1673,13 @@ fn run_health(
     robot_socket: &Path,
     config_socket: &Path,
     json: bool,
+    check: bool,
 ) -> Result<(), Failure> {
+    let not_checked = if check {
+        check_sources(socket)
+    } else {
+        Vec::new()
+    };
     let mut report = HealthReport {
         robot: None,
         robot_error: None,
@@ -1637,6 +1691,7 @@ fn run_health(
     // so a robot that had gone quiet warned there about something nothing on screen said.
     let quiet = quiet_source_warnings(&report.software.components);
     report.software.warnings.extend(quiet);
+    report.software.warnings.extend(not_checked);
 
     match Client::connect_to("robotd", robot_socket) {
         Err(failure) => report.robot_error = Some(failure.message),
@@ -1878,6 +1933,9 @@ fn render_health(report: &HealthReport) -> String {
         if let Some(line) = component.source.line() {
             let _ = writeln!(out, "  {:<9} {line}", "");
         }
+        if let Some(why) = component.check_failure() {
+            let _ = writeln!(out, "  {:<9} last check failed: {why}", "");
+        }
     }
 
     // After the installed lines rather than between them and the daemons above, because it has a
@@ -2063,7 +2121,13 @@ fn installed_components(client: &mut Client, api_version: Option<u32>) -> Vec<Co
                 pinned: status.pinned.map(|v| v.to_string()),
                 last_attempt: status.last_attempt.as_ref().map(describe_attempt),
                 last_checked: status.last_checked,
-                source: SourceCheck::read(status.last_checked, api_version, now),
+                source: SourceCheck::read(
+                    status.last_checked,
+                    status.last_check_attempt.as_ref(),
+                    api_version,
+                    now,
+                ),
+                last_check_attempt: status.last_check_attempt,
             }
         })
         .collect()
@@ -2113,6 +2177,44 @@ fn describe_age(age: i64) -> String {
     format!("{count} {unit}{plural} ago")
 }
 
+/// `health --check`: have `updaterd` check every component's source now, so the report that
+/// follows says whether it answers rather than how the last scheduled check went.
+///
+/// The outcome is not read here. `updaterd` records it — the answer, or the failure and why — and
+/// the report reads that record like any other, so a check run here and one run by the timer
+/// print the same way. What only this can say is that a check did not run: an update in progress
+/// holds the engine, and without a line saying so the report would be read as fresh.
+///
+/// An `updaterd` that cannot be reached is left to the report, which already says so.
+fn check_sources(socket: &Path) -> Vec<String> {
+    let Ok(mut client) = Client::connect(socket) else {
+        return Vec::new();
+    };
+    let statuses = client
+        .call(&proto::Call::Status)
+        .ok()
+        .and_then(|r| r.result_as::<Vec<proto::ComponentStatus>>().ok())
+        .unwrap_or_default();
+    statuses
+        .into_iter()
+        .filter_map(|status| {
+            let response = client
+                .call(&proto::Call::Check(proto::ComponentParams {
+                    component: status.component.clone(),
+                }))
+                .ok()?;
+            let error = response.error?;
+            (error.code == proto::code::BUSY).then(|| {
+                format!(
+                    "the {} update source was not checked: an update is in progress. What is \
+                     shown is the last check before it.",
+                    status.component
+                )
+            })
+        })
+        .collect()
+}
+
 /// Past this, a quiet update source is said without being asked. A week is twenty-eight missed
 /// checks at the shipped six-hour interval, which is not a flaky link.
 const QUIET_SOURCE_DAYS: i64 = 7;
@@ -2125,10 +2227,18 @@ fn quiet_source_warnings(components: &[ComponentReport]) -> Vec<String> {
         .iter()
         .filter_map(|component| {
             let how_long = component.source.quiet()?;
+            // The reason, when this `updaterd` records one; the journal is where it was before.
+            let why = match component.check_failure() {
+                Some(why) => format!(
+                    "The last check failed: {why}\n  \
+                     `robotctl update check` tries again now."
+                ),
+                None => "`journalctl -u updaterd` has each attempt and why.".to_owned(),
+            };
             Some(format!(
                 "the {} update source {how_long}.\n  \
                  A robot that cannot reach it still reads as up to date, because the only thing\n  \
-                 that fails is the check. `journalctl -u updaterd` has each attempt and why.",
+                 that fails is the check. {why}",
                 component.name
             ))
         })
@@ -4720,8 +4830,14 @@ fn resolve_from_dir(dir: &std::path::Path) -> Result<String, Failure> {
 fn run(cli: Cli) -> Result<(), Failure> {
     let command = match cli.namespace {
         Namespace::Frame { output } => return frame::run(&cli.media_socket, &output),
-        Namespace::Health { json } => {
-            return run_health(&cli.socket, &cli.robot_socket, &cli.config_socket, json);
+        Namespace::Health { json, check } => {
+            return run_health(
+                &cli.socket,
+                &cli.robot_socket,
+                &cli.config_socket,
+                json,
+                check,
+            );
         }
         Namespace::Version { json } => {
             return run_version(&cli.socket, &cli.robot_socket, &cli.config_socket, json);
@@ -4949,6 +5065,13 @@ fn print_result(command: &UpdateCommand, result: serde_json::Value) {
                             .and_then(SourceCheck::line)
                         {
                             println!("  {line}");
+                        }
+                        if let Some(why) = status
+                            .last_check_attempt
+                            .as_ref()
+                            .and_then(|attempt| attempt.error.as_deref())
+                        {
+                            println!("  last check failed: {why}");
                         }
                     }
                 }
@@ -6330,6 +6453,7 @@ mod tests {
             pinned: None,
             last_attempt: None,
             last_checked: None,
+            last_check_attempt: None,
         }
     }
 
@@ -6507,19 +6631,95 @@ mod tests {
     #[test]
     fn an_absent_timestamp_is_read_against_the_daemons_api_version() {
         let now = 1_800_000_000;
-        assert_eq!(SourceCheck::read(None, None, now), SourceCheck::Unsupported);
+        let v35 = Some(proto::API_LAST_CHECKED);
         assert_eq!(
-            SourceCheck::read(None, Some(proto::API_LAST_CHECKED - 1), now),
+            SourceCheck::read(None, None, None, now),
             SourceCheck::Unsupported
         );
         assert_eq!(
-            SourceCheck::read(None, Some(proto::API_LAST_CHECKED), now),
+            SourceCheck::read(None, None, Some(proto::API_LAST_CHECKED - 1), now),
+            SourceCheck::Unsupported
+        );
+        assert_eq!(SourceCheck::read(None, None, v35, now), SourceCheck::Never);
+        assert_eq!(
+            SourceCheck::read(Some(now - 600), None, v35, now),
+            SourceCheck::Answered(600)
+        );
+    }
+
+    /// From an `updaterd` that records attempts, nothing recorded is three things, and only one of
+    /// them is the source not answering.
+    #[test]
+    fn an_absent_timestamp_is_read_against_the_last_attempt() {
+        let now = 1_800_000_000;
+        let v37 = Some(proto::API_CHECK_ATTEMPT);
+        let failed = proto::CheckAttempt {
+            at: now - 60,
+            error: Some("network error: dns error".into()),
+        };
+        let answered = proto::CheckAttempt {
+            at: 86_400,
+            error: None,
+        };
+        assert_eq!(SourceCheck::read(None, None, v37, now), SourceCheck::NotYet);
+        assert_eq!(
+            SourceCheck::read(None, Some(&failed), v37, now),
             SourceCheck::Never
         );
         assert_eq!(
-            SourceCheck::read(Some(now - 600), Some(proto::API_LAST_CHECKED), now),
-            SourceCheck::Answered(600)
+            SourceCheck::read(None, Some(&answered), v37, now),
+            SourceCheck::Unrecorded
         );
+        assert_eq!(
+            SourceCheck::read(Some(now - 600), Some(&failed), v37, now),
+            SourceCheck::Answered(600),
+            "a failure after an answer does not unmake the answer"
+        );
+    }
+
+    /// The minute after `updaterd` starts, before its first check. That warned "has not answered
+    /// once" on every board just updated to the release that brought the record in, which is
+    /// the one moment someone is looking.
+    #[test]
+    fn a_source_not_checked_yet_is_said_and_not_warned() {
+        let mut report = health_report(Some(proto::HealthResult::default()), None);
+        report.software.components[0].source = SourceCheck::NotYet;
+
+        let out = render_health(&report);
+        assert!(out.contains("source not checked yet"), "{out}");
+        assert!(out.contains("robotctl update check"), "{out}");
+        assert!(quiet_source_warnings(&report.software.components).is_empty());
+    }
+
+    /// A source that keeps failing says why, in the warning and beside the line, rather than
+    /// pointing at the journal.
+    #[test]
+    fn a_failing_source_says_why() {
+        let why = "network error: GET https://x/manifest.json: error sending request: dns error";
+        let mut report = health_report(Some(proto::HealthResult::default()), None);
+        report.software.components[0].source = SourceCheck::Never;
+        report.software.components[0].last_check_attempt = Some(proto::CheckAttempt {
+            at: 1_800_000_000,
+            error: Some(why.into()),
+        });
+
+        let out = render_health(&report);
+        assert!(out.contains(&format!("last check failed: {why}")), "{out}");
+        let warnings = quiet_source_warnings(&report.software.components);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains(why), "{warnings:?}");
+        assert!(
+            warnings[0].contains("robotctl update check"),
+            "{warnings:?}"
+        );
+        assert!(!warnings[0].contains("journalctl"), "{warnings:?}");
+
+        // Answered this morning, failing since: said, and under the week it is not a warning.
+        report.software.components[0].source = SourceCheck::Answered(3 * 3_600);
+        let out = render_health(&report);
+        assert!(out.contains("source last answered 3 hours ago"), "{out}");
+        assert!(out.contains("last check failed"), "{out}");
+        assert!(quiet_source_warnings(&report.software.components).is_empty());
     }
 
     /// A clock corrected backwards after a check must not read as a fresh one. Clamping the age
@@ -6528,7 +6728,12 @@ mod tests {
     #[test]
     fn a_record_ahead_of_this_clock_warns_rather_than_reading_as_fresh() {
         let now = 1_800_000_000;
-        let ahead = SourceCheck::read(Some(now + 3 * 86_400), Some(proto::API_LAST_CHECKED), now);
+        let ahead = SourceCheck::read(
+            Some(now + 3 * 86_400),
+            None,
+            Some(proto::API_LAST_CHECKED),
+            now,
+        );
         assert_eq!(ahead, SourceCheck::Ahead);
         assert!(ahead.line().unwrap().contains("not synced"));
         assert!(ahead.quiet().unwrap().contains("not known"));
@@ -6567,6 +6772,7 @@ mod tests {
                 pinned: None,
                 last_attempt: None,
                 last_checked: None,
+                last_check_attempt: None,
                 source: SourceCheck::Unsupported,
             }],
             warnings: Vec::new(),
