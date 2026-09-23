@@ -29,7 +29,8 @@ robotctl health
 
 Hardware and software in one report. Exits non-zero when the robot is unhealthy or unreachable, so
 it can gate a script — a hot motor or a pinned component is reported, not judged, and does not
-affect the exit code. `--json` for a support bundle.
+affect the exit code. `--json` for a support bundle; `--check` checks the update source first, so
+the line about it says whether it answers now.
 
 ### Watching the loop
 

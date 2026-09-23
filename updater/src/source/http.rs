@@ -221,12 +221,9 @@ async fn attempt_download(
         request = request.bearer_auth(token);
     }
 
-    let response = request
-        .send()
-        .await
-        .map_err(|e| {
-            AttemptError::transient(Error::Network(format!("GET {url}: {}", describe_error(e))))
-        })?;
+    let response = request.send().await.map_err(|e| {
+        AttemptError::transient(Error::Network(format!("GET {url}: {}", describe_error(e))))
+    })?;
 
     let status = response.status();
     if !status.is_success() {
@@ -450,7 +447,11 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(msg.to_lowercase().contains("refused"), "{msg}");
-        assert_eq!(msg.matches(&url).count(), 1, "the URL once, not twice: {msg}");
+        assert_eq!(
+            msg.matches(&url).count(),
+            1,
+            "the URL once, not twice: {msg}"
+        );
     }
 
     #[test]

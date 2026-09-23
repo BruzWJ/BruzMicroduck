@@ -913,6 +913,19 @@ than `API_LAST_CHECKED` sends. `robotctl health` tells the two apart by the API 
 `hello` it already has, and warns on the first: a robot that has never reached its source is the
 worst case this report exists for, and reading it as "no news" prints what a healthy robot prints.
 
+**Each check is recorded too, answered or not, with why it failed.** Nothing recorded was still two
+states: checks that fail, and an `updaterd` that has not run its first one — every board for the
+minute after it starts, including right after the update that brought the record in, which warned
+that the source had never answered. `check-attempts.json` holds the last check per component and
+`update.status` carries it as `last_check_attempt` (`API_CHECK_ATTEMPT`). No attempt yet is a line,
+not a warning; attempts that failed are the warning, and it gives the error rather than pointing at
+the journal. An attempt is recorded under any clock, unlike the answer: a board whose clock has not
+synced is the one failing TLS, and dropping its attempts would read as one that has not checked.
+
+`robotctl update check` runs a check at once, and `robotctl health --check` runs one per component
+before reporting. It is a flag, not the default, because the login banner runs `health` and would
+otherwise wait on the network at every ssh.
+
 **It does depend on the clock**, unlike the option as listed above — a recorded time is only
 meaningful against the one reading it. Both directions are handled where they land rather than
 trusted: a time below §7.2's clock floor is not recorded at all (a board with no RTC, on a
