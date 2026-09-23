@@ -323,14 +323,11 @@ this field to route on. Cheapest item here.
 
 ## 6. What it opens, but is not
 
-`remote-webrtc.md` §11 defers "a WebSocket surface for server-side programs — same JSON-RPC, no
-media stack, `get_frame` returning a JPEG", and calls it a few dozen lines once §5's routing
-exists. Once there is an `axum` server in `mediad`, it is a route on a server that already runs,
-and the frame is already there: `_frames` in `main.rs` is the raw NV12 tap off the tee, and
-nothing reads it yet.
-
-Named so the shape is visible, not proposed here. It is a second transport and the first one
-should be good.
+A surface for server-side programs. The console's `axum` server makes a WebSocket beside the page
+look like one more route, but a program that drives a duck is off the LAN by definition, and it
+already has a transport: the rendezvous control lane
+([`remote-access-design.md`](remote-access-design.md) §3.8). This listener serves `/frame` for a
+still on the LAN and nothing more for programs.
 
 ## 7. Order, and what is left
 
