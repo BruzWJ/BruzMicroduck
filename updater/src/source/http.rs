@@ -106,7 +106,7 @@ pub async fn get_bytes(
     let response = request
         .send()
         .await
-        .map_err(|e| Error::Network(format!("GET {url}: {e}")))?;
+        .map_err(|e| Error::Network(format!("GET {url}: {}", describe_error(e))))?;
 
     let status = response.status();
     if !status.is_success() {
@@ -124,7 +124,7 @@ pub async fn get_bytes(
     let bytes = response
         .bytes()
         .await
-        .map_err(|e| Error::Network(format!("reading {url}: {e}")))?;
+        .map_err(|e| Error::Network(format!("reading {url}: {}", describe_error(e))))?;
 
     if bytes.len() as u64 > MAX_METADATA_BYTES {
         return Err(Error::Network(format!("GET {url}: response too large")));
@@ -221,10 +221,9 @@ async fn attempt_download(
         request = request.bearer_auth(token);
     }
 
-    let response = request
-        .send()
-        .await
-        .map_err(|e| AttemptError::transient(Error::Network(format!("GET {url}: {e}"))))?;
+    let response = request.send().await.map_err(|e| {
+        AttemptError::transient(Error::Network(format!("GET {url}: {}", describe_error(e))))
+    })?;
 
     let status = response.status();
     if !status.is_success() {
@@ -287,7 +286,8 @@ async fn attempt_download(
             Ok(Some(Ok(chunk))) => chunk,
             Ok(Some(Err(e))) => {
                 return Err(AttemptError::transient(Error::Network(format!(
-                    "reading {url}: {e}"
+                    "reading {url}: {}",
+                    describe_error(e)
                 ))));
             }
             Ok(None) => break,
@@ -358,6 +358,28 @@ fn github_token() -> Option<String> {
 }
 
 /// Turn a status code into something diagnosable from a support ticket.
+/// A request that failed before it had a status, with what caused it.
+///
+/// reqwest's own message stops at "error sending request", and the reason is in its sources: a
+/// name that did not resolve, a refused connection, a certificate the clock puts in the future.
+/// That reason is what a failed check records and `robotctl health` shows, so it has to be in the
+/// text. The URL is dropped from it because every caller has already said which one.
+fn describe_error(e: reqwest::Error) -> String {
+    let e = e.without_url();
+    let mut out = e.to_string();
+    let mut cause = std::error::Error::source(&e);
+    while let Some(c) = cause {
+        let text = c.to_string();
+        // Layers often repeat the one below them; saying it twice adds nothing.
+        if !out.contains(&text) {
+            out.push_str(": ");
+            out.push_str(&text);
+        }
+        cause = c.source();
+    }
+    out
+}
+
 fn describe_failure(url: &str, status: reqwest::StatusCode) -> String {
     let hint = match status.as_u16() {
         401 | 403 => " (private repo, or rate-limited — set GITHUB_TOKEN?)",
@@ -406,6 +428,30 @@ mod tests {
 
         let msg = describe_failure("https://x/y", reqwest::StatusCode::FORBIDDEN);
         assert!(msg.contains("GITHUB_TOKEN"), "{msg}");
+    }
+
+    /// A request that never got a status names why. reqwest's own message is "error sending
+    /// request" and nothing else, and that sentence is what a failed check recorded and
+    /// `robotctl health` would have shown for every unreachable source alike.
+    #[tokio::test]
+    async fn a_failed_request_says_what_caused_it() {
+        // A port nothing listens on: refused at once, and no network involved.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let url = format!("http://127.0.0.1:{port}/manifest.json");
+        let msg = get_bytes(&client().unwrap(), &url, None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(msg.to_lowercase().contains("refused"), "{msg}");
+        assert_eq!(
+            msg.matches(&url).count(),
+            1,
+            "the URL once, not twice: {msg}"
+        );
     }
 
     #[test]
