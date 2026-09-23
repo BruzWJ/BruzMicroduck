@@ -43,6 +43,8 @@ pub struct GithubReleases {
 /// exhaustive.
 #[derive(Debug, Deserialize)]
 struct Release {
+    /// What [`GithubReleases::release_for_tag`] re-asks by when the tag answer lists nothing.
+    id: u64,
     tag_name: String,
     #[serde(default)]
     draft: bool,
@@ -103,13 +105,34 @@ impl GithubReleases {
         format!("{}{}", self.staging_tag_prefix, version)
     }
 
+    /// The release behind `tag`, with its assets.
+    ///
+    /// **An empty asset list from the tag lookup is asked again by id.** From 2026-09-23 the
+    /// unauthenticated `releases/tags/{tag}` answer — and the listing — carry no assets for any
+    /// release published since, while `releases/{id}` for the same release lists every one. A
+    /// board asks without a token, so it saw a finished build as an empty one and refused it,
+    /// every time. The second request costs nothing on a release that really is empty, and it
+    /// is what makes [`Error::ReleaseNotReady`] mean what it says.
     async fn release_for_tag(&self, tag: &str) -> Result<Release, Error> {
         let url = format!(
             "https://api.github.com/repos/{}/releases/tags/{tag}",
             self.repo
         );
-        let bytes =
-            http::get_bytes(&self.client, &url, Some("application/vnd.github+json")).await?;
+        let release = self.release_at(&url, tag).await?;
+        if !release.assets.is_empty() {
+            return Ok(release);
+        }
+
+        let url = format!(
+            "https://api.github.com/repos/{}/releases/{}",
+            self.repo, release.id
+        );
+        tracing::debug!(%tag, id = release.id, "tag lookup listed no assets; asking by id");
+        self.release_at(&url, tag).await
+    }
+
+    async fn release_at(&self, url: &str, tag: &str) -> Result<Release, Error> {
+        let bytes = http::get_bytes(&self.client, url, Some("application/vnd.github+json")).await?;
         serde_json::from_slice(&bytes)
             .map_err(|e| Error::Network(format!("parsing release {tag}: {e}")))
     }
@@ -468,6 +491,7 @@ mod tests {
     #[test]
     fn asset_lookup_lists_what_was_available_on_failure() {
         let release = Release {
+            id: 1,
             tag_name: "daemon-v1.0.0".into(),
             draft: false,
             prerelease: false,
@@ -489,6 +513,7 @@ mod tests {
     #[test]
     fn an_empty_release_says_its_build_has_not_finished() {
         let release = Release {
+            id: 1,
             tag_name: "daemon-staging-v0.5.1".into(),
             draft: false,
             prerelease: true,
@@ -590,6 +615,7 @@ mod tests {
     #[test]
     fn unknown_release_fields_are_tolerated() {
         let json = serde_json::json!({
+            "id": 7,
             "tag_name": "daemon-v1.0.0",
             "some_new_field": 42,
             "assets": [{
