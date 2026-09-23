@@ -5272,6 +5272,74 @@ pub fn read_camera_stats() -> Option<CameraStats> {
     serde_json::from_slice(&std::fs::read(camera_stats_path()).ok()?).ok()
 }
 
+/// What `mediad`'s relay is doing with the rendezvous service, published for `robotctl` to read.
+///
+/// A file for [`CameraStats`]' reasons. It exists because "is my robot in the central's list, and
+/// under which account" had no answer short of reading `mediad`'s journal — and the usual wrong
+/// answer is a robot registered perfectly well under an account other than the one looking.
+///
+/// Times are Unix seconds on the robot's clock, which is the clock `robotctl` reads them against.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteStatus {
+    /// The service's base URL, so a reader can tell the shipped rendezvous from a test one.
+    pub service: String,
+    /// When [`RemoteStatus::link`] last changed *kind* — a heartbeat does not move it.
+    pub since: i64,
+    #[serde(flatten)]
+    pub link: RemoteLink,
+}
+
+/// Where the relay is in its loop, with only the facts each state has.
+///
+/// An enum with data rather than a state plus optional fields, so a registration without a peer id,
+/// or a retry without a reason, cannot be written.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RemoteLink {
+    /// No account token on disk: reachable on its own network only. The ordinary state of a robot
+    /// nobody has signed in.
+    SignedOut,
+    /// A token, and a connection being opened with it.
+    Connecting,
+    /// In the service's listing.
+    #[serde(rename_all = "camelCase")]
+    Registered {
+        /// The account the service resolved the token to — the one whose robot list this robot is
+        /// in. `None` when the welcome did not say.
+        account: Option<String>,
+        peer_id: String,
+        /// The last lease refresh the service accepted. A value that stops moving is a relay that
+        /// has stopped, whatever `state` says.
+        last_heartbeat: i64,
+    },
+    /// The service refused the token. A new login is what fixes it; the relay waits for one.
+    Refused,
+    /// The last connection ended and another is coming.
+    Retrying { reason: String },
+}
+
+/// Where `mediad` publishes [`RemoteStatus`].
+pub fn remote_status_path() -> std::path::PathBuf {
+    std::path::PathBuf::from("/run/mediad/remote.json")
+}
+
+/// Publish [`RemoteStatus`] at `path`. Never fatal: a robot that cannot describe its connection is
+/// still connected.
+pub fn publish_remote_status(path: &std::path::Path, status: &RemoteStatus) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut json = serde_json::to_vec(status).map_err(|e| e.to_string())?;
+    json.push(b'\n');
+    std::fs::write(path, json).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// What `mediad` published about its relay, or `None` — not running, `--no-remote`, or too old.
+pub fn read_remote_status() -> Option<RemoteStatus> {
+    serde_json::from_slice(&std::fs::read(remote_status_path()).ok()?).ok()
+}
+
 /// What one daemon published, or `None` if it published nothing.
 ///
 /// `None` covers both "not running" — systemd removes the directory with the unit — and "too old to
