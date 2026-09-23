@@ -556,6 +556,36 @@ cloned, so there is no path by which a credential is copied onto a second board.
   own token on the same account, or the visitor's. §5's client uses the visitor's, which is why it
   never meets this.
 
+### 3.8 A control lane that needs no candidate pair
+
+The bridge carries a *negotiation*, and the `control` datachannel is SCTP over whatever pair ICE
+settles on. A relay that is metered out or briefly not answering therefore takes a JSON-RPC call
+of a few hundred bytes down with the video.
+
+The rendezvous already carries what a call needs. `handle_peer_message` in their `app.py` relays
+**every key of a `peer` envelope except `type` and `sessionId`** to the session partner verbatim.
+So a `peer` envelope with an `rpc` key is a control call, relayed opaquely, with no change to a
+service the mini fleet also depends on:
+
+```
+  consumer ──POST /send {type:peer, sessionId, rpc:{…}}──► rendezvous ──SSE──► relay
+           ◄─────────── SSE {type:peer, sessionId, rpc:{…}} ◄──POST /send───────┘
+```
+
+`mediad::relay` answers it with `session::run`: the same routing table, the same per-lane sockets,
+and what a bridged peer may call is §3.6's answer unchanged. `spaces/shared/wire.py` is the client
+half. This is the path for a **program** that drives a duck: it works from a data centre, it is
+authenticated by the account at both ends (§7), and it needs nothing but HTTP.
+
+Two limits, both from the service rather than from us:
+
+- **No pixels.** Video over this would be base64 inside JSON at the rate below. Frames come from
+  WebRTC, or from `media.stream` (§5.3).
+- **Not a teleop lane.** The rendezvous allows 1200 requests per 60 s per peer, and going over
+  earns a `429` on the whole peer — the robot's own lease included. So the robot budgets its
+  notifications on this lane (`relay::Budget`), and a client calls at the rate of a behaviour
+  rather than of a joystick.
+
 ## 4. The rendezvous is the one `reachy_mini` uses — **decided**
 
 `pollen-robotics-reachy-mini-central.hf.space`, the Space the mini's fleet already registers

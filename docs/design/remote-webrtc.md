@@ -571,10 +571,6 @@ along with a transport. `remote-access-design.md` §9 carries it as open.
 
 ## 12. Deferred, with reasons
 
-- **A WebSocket surface for server-side programs** (`architecture.md` §5.3). Same JSON-RPC, no
-  media stack, `get_frame` returning a JPEG. It is a few dozen lines once §5's routing exists, and
-  it is what makes "an LLM drives the robot" easy — but it is a second transport and the first one
-  should work.
 - **The `teleop` datachannel.** Not the near-term priority; §6 covers what deferring it removes,
   what it costs in the meantime, and the sequence numbers it will need.
 - **Multi-peer video.** One media session at a time, plus control-only clients. Simulcast and

@@ -353,8 +353,8 @@ absurdly have to go through BLE.
         ┌──────── one API definition (shared crate: types + operations)
         │
    ┌────┴─────┬────────────┬──────────────┬────────────────┐
-  BLE       unix socket   WebSocket     WebRTC datachannel
- (btd)      robotctl,     server-side   telepresence,
+  BLE       unix socket   rendezvous    WebRTC datachannel
+ (btd)      robotctl,     control lane  telepresence,
   subset    on-robot SDK  agents/LLM    full fidelity
 ```
 
@@ -411,16 +411,19 @@ For an LLM-driven controller, WebRTC is the *harder* path. An agent doesn't want
 30 fps H.264 track to decode — it wants a frame every second or two plus a state
 blob. Requiring ICE/DTLS/SDP and a decode pipeline first is a poor trade.
 
-| Consumer | Transport | Media |
+| Consumer | Control | Media |
 |---|---|---|
-| Telepresence (human) | WebRTC | tracks, low latency |
-| Server-side agent / LLM | **WebSocket** | `get_frame` → JPEG on demand, or 1–2 fps push |
+| Telepresence (human) | WebRTC datachannel | tracks, low latency |
+| Server-side agent / LLM | **rendezvous control lane** — JSON-RPC over HTTP/SSE, no WebRTC | WebRTC track; `media.stream` for a long-running program |
 | On-robot SDK, `robotctl` | unix socket | snapshot API |
 | App | BLE + WebRTC | as needed |
 
 Same API behind all of them. "Run an LLM on a server that controls the robot"
-becomes: open a WebSocket, poll a frame, send intents — a few dozen lines, no
-media stack. That is what makes it genuinely easy.
+becomes: sign in, send intents over the rendezvous, and take video only if it is
+wanted. The control lane reaches a robot from a data centre with no ICE, DTLS or
+TURN, which is what makes it genuinely easy;
+[`remote-access-design.md`](remote-access-design.md) §3.8 owns it, and
+[`faq.md`](../faq.md) says which media path to pick.
 
 Note also that LLM latency (hundreds of ms to seconds) means the agent is a
 **high-level** controller: "go to the kitchen", "look at the person". Reactive

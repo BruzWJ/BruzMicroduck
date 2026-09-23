@@ -7,7 +7,7 @@
 //! - [`session`] — the pipe. Lines in, lines out, replies never parsed.
 //!
 //! [`session::run`] is transport-agnostic on purpose: it takes lines and gives lines, so it is
-//! testable without a WebRTC peer and would serve a WebSocket surface (§11) unchanged.
+//! testable without a WebRTC peer, and why [`relay`]'s rendezvous control lane reuses it unchanged.
 //!
 //! - [`config`] — `[media]` in `robotd.toml`: what the stream is, edited with `robotctl configure`.
 //! - [`web`] — the console page, served by the daemon it drives. `webrtc-console.md` §1.

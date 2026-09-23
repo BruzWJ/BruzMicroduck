@@ -2,8 +2,8 @@
 //!
 //! Transport-agnostic on purpose: this takes lines in and gives lines out, and knows nothing about
 //! datachannels. That is what makes it testable without a WebRTC peer — the tests below drive it
-//! over channels against fake daemons on real unix sockets — and it is also what would let a
-//! WebSocket surface (`remote-webrtc.md` §11) reuse it unchanged.
+//! over channels against fake daemons on real unix sockets — and it is also what lets the
+//! rendezvous control lane (`remote-access-design.md` §3.8) reuse it unchanged.
 //!
 //! ## What it does not do
 //!

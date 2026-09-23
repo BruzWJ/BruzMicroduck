@@ -37,9 +37,9 @@
 //!            ◄─────────── SSE {type:peer, sessionId, rpc:{…}} ◄──POST /send────────┘
 //! ```
 //!
-//! `session::run` is what answers it, unchanged: its own header says it is transport-agnostic so
-//! that "a WebSocket surface could reuse it unchanged", and this is that surface. Same routing
-//! table, same per-lane sockets, same refusal to parse a reply. No ICE, no DTLS, no TURN.
+//! `session::run` is what answers it, unchanged, because it is transport-agnostic on purpose. Same
+//! routing table, same per-lane sockets, same refusal to parse a reply. No ICE, no DTLS, no TURN.
+//! `remote-access-design.md` §3.8 owns the lane; this module owns the code.
 //!
 //! **What it is not is a teleop lane.** The rendezvous allows 1200 requests per 60 s per peer, so
 //! roughly twenty a second shared with the heartbeat — four calls to install and run a policy is
