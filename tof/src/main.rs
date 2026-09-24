@@ -101,12 +101,9 @@ fn no_frame_timeout(hz: u8) -> Duration {
     NO_FRAME_MIN.max(Duration::from_secs_f64(3.0 / f64::from(hz.max(1))))
 }
 
-/// Buses to try when none was named, in order.
-///
-/// `/dev/i2c-qwiic` is the stable symlink installed by `setup-board.sh`;
-/// `/dev/i2c-3` is the underlying Radxa header bus and keeps a provisioned board
-/// usable if udev has not created the link yet.
-pub(crate) const BUS_CANDIDATES: [&str; 2] = ["/dev/i2c-qwiic", "/dev/i2c-3"];
+/// The one provisioned name for the Qwiic adapter. A missing alias is a board-setup failure,
+/// not a reason for the daemon to bypass the device contract through `/dev/i2c-3`.
+const QWIIC_BUS: &str = "/dev/i2c-qwiic";
 
 #[derive(Parser, Debug)]
 #[command(name = "tofd", about = "Head ToF sensor daemon", version)]
@@ -115,9 +112,9 @@ struct Args {
     #[arg(long, default_value = proto::socket::TOF)]
     socket: PathBuf,
 
-    /// I²C bus device. Unset tries the Qwiic symlink, then the i2c3 bus.
-    #[arg(long)]
-    bus: Option<PathBuf>,
+    /// I²C bus device. Override only for an explicit bench setup.
+    #[arg(long, default_value = QWIIC_BUS)]
+    bus: PathBuf,
 
     /// VL53L5CX 7-bit I²C address.
     #[arg(long, default_value_t = 0x29, value_parser = parse_address)]
@@ -254,7 +251,7 @@ async fn main() -> std::process::ExitCode {
                 } else if fake {
                     fake_loop(hz, &status, &frames, &shutdown);
                 } else {
-                    sensor_loop(bus.as_deref(), address, hz, &status, &frames, &shutdown);
+                    sensor_loop(&bus, address, hz, &status, &frames, &shutdown);
                 }
             })
             .expect("spawn the sensor thread")
@@ -301,14 +298,7 @@ async fn main() -> std::process::ExitCode {
             std::thread::Builder::new()
                 .name("head-imu".to_owned())
                 .spawn(move || {
-                    imu::imu_loop(
-                        bus.as_deref(),
-                        address,
-                        hz,
-                        &imu_status,
-                        &imu_frames,
-                        &shutdown,
-                    )
+                    imu::imu_loop(&bus, address, hz, &imu_status, &imu_frames, &shutdown)
                 })
                 .expect("spawn the head-imu thread"),
         )
@@ -342,7 +332,7 @@ fn quiet_period(hz: u8) -> Duration {
 /// Bring the sensor up and stream from it, forever, with a backoff between
 /// attempts. Never returns until shutdown.
 fn sensor_loop(
-    bus: Option<&Path>,
+    bus: &Path,
     address: u8,
     hz: u8,
     status: &Arc<Status>,
@@ -618,29 +608,9 @@ struct SimDepth {
     status: Vec<u8>,
 }
 
-/// Try the named bus, or each standard Qwiic bus path, at the configured address
-/// and return the first sensor that comes up ranging.
-fn open_sensor(bus: Option<&Path>, address: u8, hz: u8) -> Result<tof::Sensor> {
-    // A provisioned `/dev/i2c-qwiic` is a symlink to `/dev/i2c-3`, not a
-    // second adapter. Fall back only when the alias is absent; retrying a
-    // failed firmware upload through both names would hammer the shared bus
-    // twice before backoff begins.
-    let bus = match bus {
-        Some(bus) if bus.exists() => bus.to_path_buf(),
-        Some(bus) => anyhow::bail!("{} does not exist", bus.display()),
-        None => BUS_CANDIDATES
-            .iter()
-            .map(PathBuf::from)
-            .find(|candidate| candidate.exists())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "neither {} nor {} exists",
-                    BUS_CANDIDATES[0],
-                    BUS_CANDIDATES[1]
-                )
-            })?,
-    };
-    let mut sensor = tof::Sensor::open(&bus, address)?;
+/// Open the ToF on the one configured Qwiic adapter and start ranging.
+fn open_sensor(bus: &Path, address: u8, hz: u8) -> Result<tof::Sensor> {
+    let mut sensor = tof::Sensor::open(bus, address)?;
     tracing::info!(bus = %bus.display(), address = format!("{address:#04x}"), "VL53L5CX found");
     sensor.start(hz)?;
     Ok(sensor)
