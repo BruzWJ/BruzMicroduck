@@ -14,7 +14,7 @@ pub struct Status {
 }
 
 struct Inner {
-    /// The generation that answered, once one has.
+    /// The sensor model that answered, once one has.
     sensor: Option<&'static str>,
     /// Why there is none, when there is none.
     unavailable: Option<String>,
@@ -87,9 +87,9 @@ mod tests {
         assert_eq!(starting.rows, 8);
         assert_eq!(starting.hz, 15);
 
-        status.up("VL53L8CX");
+        status.up("VL53L5CX");
         let ranging = status.result();
-        assert_eq!(ranging.sensor.as_deref(), Some("VL53L8CX"));
+        assert_eq!(ranging.sensor.as_deref(), Some("VL53L5CX"));
         assert_eq!(
             ranging.unavailable, None,
             "a sensor that is up has no excuse"

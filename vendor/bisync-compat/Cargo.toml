@@ -1,0 +1,13 @@
+[package]
+name = "bisync"
+version = "0.3.2"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Compatibility shim for the maintained bisync2 macro implementation"
+publish = false
+
+[dependencies]
+bisync2-macros = "=0.2.4"
+
+[lib]
+path = "src/lib.rs"

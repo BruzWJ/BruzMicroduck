@@ -24,13 +24,13 @@
 use crate::head::HeadFk;
 use crate::{Model, Pose, Quat};
 
-/// The grid every VL53L5CX/L8CX ranges in 8×8 mode.
+/// The VL53L5CX grid in 8×8 mode.
 pub const ROWS: usize = 8;
 pub const COLS: usize = 8;
 const N_ZONES: usize = ROWS * COLS;
 
 /// The sensor's square field of view, degrees per axis — 45°×45° per ST's
-/// datasheet for both generations, the value the prototype's beam table used.
+/// VL53L5CX datasheet, the value the prototype's beam table used.
 pub const FOV_DEG: f64 = 45.0;
 
 /// What one zone's return turned out to be, once it has a place in the world.

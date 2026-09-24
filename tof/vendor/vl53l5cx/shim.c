@@ -24,6 +24,16 @@
 
 #include "vl53l5cx_api.h"
 
+/*
+ * This is not a published field, but the ULD needs it to turn a zone with zero
+ * detected targets into target_status 255. Keep the dependency visible here:
+ * otherwise an output-size cleanup silently changes "empty space" into an
+ * arbitrary raw target status before Rust sees the frame.
+ */
+#ifdef VL53L5CX_DISABLE_NB_TARGET_DETECTED
+#error "tof requires NB_TARGET_DETECTED so the ULD can synthesize status 255"
+#endif
+
 static VL53L5CX_Configuration dev;
 static VL53L5CX_ResultsData results;
 
@@ -55,11 +65,6 @@ int vl5_is_alive(void)
 int vl5_init(void)
 {
     return (int)vl53l5cx_init(&dev);
-}
-
-int vl5_set_address(uint8_t new_addr_7bit)
-{
-    return (int)vl53l5cx_set_i2c_address(&dev, (uint16_t)(new_addr_7bit << 1));
 }
 
 int vl5_start(uint8_t freq_hz)

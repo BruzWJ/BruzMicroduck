@@ -479,13 +479,35 @@ echo "    [ok] btd runs on the target (vendored libdbus links)"
 # Behavioural rather than a grep. `systemctl` is stubbed to record its arguments, so this
 # asserts what the script *does*. A grep would have caught the deletion but not a masking
 # call naming the wrong unit.
-mkdir -p /stub /boot /usr/local/lib
+QWIIC_DTBO_DIR="/boot/dtb-$(uname -r)/rockchip/overlay"
+mkdir -p /stub "$QWIIC_DTBO_DIR" /usr/local/lib /etc/udev/rules.d
 
 # check_environment only probes with `command -v`, and the ONNX step is skipped below, so
 # stubs for tools this image lacks are enough and cost no download.
 cat > /stub/curl <<"STUB"
 #!/bin/sh
-exit 0
+# Serve repository files fetched by setup-board.sh. ONNX is already present below, so no
+# network download is expected in this block.
+dest=""
+url=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o) dest="$2"; shift 2 ;;
+        -H) shift 2 ;;
+        -*) shift ;;
+        *)  url="$1"; shift ;;
+    esac
+done
+case "$url" in
+    *raw.githubusercontent.com/*)
+        path="${url#*raw.githubusercontent.com/}"
+        path="${path#*/}"
+        path="${path#*/}"
+        path="${path#*/}"
+        [ -f "/bin/$path" ] || exit 22
+        cp "/bin/$path" "$dest" ;;
+    *) exit 22 ;;
+esac
 STUB
 cp /stub/curl /stub/find
 cat > /stub/systemctl <<"STUB"
@@ -542,11 +564,16 @@ cat > /etc/bluetooth/main.conf <<"BTCONF"
 Name = radxa
 BTCONF
 
-# The wrong overlay prefix and a console on the motor UART: what Armbian actually ships.
+# The wrong overlay prefix, the old HAT-named sensor overlay, and a console on the motor UART:
+# the state of a board provisioned before the Qwiic migration.
 cat > /boot/armbianEnv.txt <<"ENV"
 overlay_prefix=rk35xx
+overlays=i2c3-pihat
 console=both
 ENV
+cat > /etc/udev/rules.d/99-robot-i2c-pihat.rules <<"OLDRULE"
+SUBSYSTEM=="i2c-dev", KERNELS=="fe5c0000.i2c", SYMLINK+="i2c-pihat"
+OLDRULE
 
 ONNX_VERSION=9.9.9 PATH="/stub:$PATH" sh /bin/scripts/setup-board.sh >/tmp/board.log 2>&1
 
@@ -555,6 +582,20 @@ ONNX_VERSION=9.9.9 PATH="/stub:$PATH" sh /bin/scripts/setup-board.sh >/tmp/board
 grep -q "^overlay_prefix=rk3568$" /boot/armbianEnv.txt
 grep -E "^overlays=" /boot/armbianEnv.txt | grep -qw uart2-m0
 echo "    [ok] setup-board fixes overlay_prefix and enables uart2-m0"
+
+# The Qwiic bus does not depend on the optional audio HAT. The old overlay word and udev rule
+# are migrated in place; the new rule also owns the group/mode needed by unprivileged tofd.
+grep -E "^overlays=" /boot/armbianEnv.txt | grep -qw i2c3-qwiic
+if grep -E "^overlays=" /boot/armbianEnv.txt | grep -qw i2c3-pihat; then
+    echo "    [FAIL] setup-board left the old i2c3-pihat overlay enabled"
+    exit 1
+fi
+test -f "$QWIIC_DTBO_DIR/rk3568-i2c3-qwiic.dtbo"
+test ! -e /etc/udev/rules.d/99-robot-i2c-pihat.rules
+grep -Fq SYMLINK+=\"i2c-qwiic\" /etc/udev/rules.d/99-robot-i2c-qwiic.rules
+grep -Fq GROUP=\"i2c\" /etc/udev/rules.d/99-robot-i2c-qwiic.rules
+grep -Fq MODE=\"0660\" /etc/udev/rules.d/99-robot-i2c-qwiic.rules
+echo "    [ok] setup-board migrates the sensor bus to the generic Qwiic overlay and device name"
 
 # A getty *reads* the port, consuming servo replies, so every motor looks absent —
 # indistinguishable from unwired hardware and far harder to guess.
@@ -572,6 +613,8 @@ ONNX_VERSION=9.9.9 PATH="/stub:$PATH" sh /bin/scripts/setup-board.sh >/tmp/board
 grep -q "^overlay_prefix=rk3568$" /boot/armbianEnv.txt
 grep -q "^console=display$" /boot/armbianEnv.txt
 test "$(grep -c uart2-m0 /boot/armbianEnv.txt)" = 1
+test "$(grep -c i2c3-qwiic /boot/armbianEnv.txt)" = 1
+test "$(grep -Fc SYMLINK+=\"i2c-qwiic\" /etc/udev/rules.d/99-robot-i2c-qwiic.rules)" = 1
 echo "    [ok] setup-board is idempotent on a second run"
 
 # The gamepad setting, which is the kind that fails silently — and whose polarity this script has
@@ -808,6 +851,9 @@ PATH="/stub:$PATH" sh /bin/scripts/install.sh > /tmp/install.log 2>&1 || {
     exit 1
 }
 echo "    [ok] install.sh runs to completion on a board with a release already live"
+grep -q "/dev/i2c-qwiic does not exist" /tmp/install.log \
+    || { echo "    [FAIL] install.sh did not flag the missing Qwiic hardware cutover"; exit 1; }
+echo "    [ok] install.sh preflights the required Qwiic sensor bus"
 
 # Every unit the release ships, installed where systemd reads them. install.sh globs the
 # release directory rather than naming units, so this walks the same set rather than a list

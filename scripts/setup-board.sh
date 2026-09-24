@@ -35,8 +35,8 @@ set -eu
 ONNX_VERSION="${ONNX_VERSION:-1.28.0}"
 ONNX_LIB_DIR=/usr/local/lib
 
-# The Dynamixel bus. Every servo and the imu_to_dxl board share it, so without this there
-# is no robot — just a daemon reporting that it cannot see one.
+# The Dynamixel bus. All fifteen servos share it, so without this there is no robot — just
+# a daemon reporting that it cannot see one. The body IMU is on the Qwiic bus configured below.
 MOTOR_PORT="${MOTOR_PORT:-/dev/ttyS2}"
 
 ENV_TXT=/boot/armbianEnv.txt
@@ -82,17 +82,17 @@ WEIRD_BLE_MARKER=/var/lib/robot/weird-ble
 # Where this script puts itself so it is still around after the reboot it asks for.
 SELF=/usr/local/sbin/robot-setup-board
 
-# Where the sibling scripts come from, for the commands this prints. Same override names as
+# Where repository-owned board files and the sibling scripts come from. Same override names as
 # `install.sh`, so a fork or a pinned tag is one decision for the whole bring-up rather than
-# per script. Nothing here is fetched by this script — see `fetch_cmd`.
+# per script. The Qwiic/audio overlays are fetched during this run; `fetch_cmd` uses the same
+# source when it prints the next command.
 REPO="${DUCK_REPO:-pollen-robotics/microduck}"
 REF="${DUCK_REF:-main}"
 RAW="https://raw.githubusercontent.com/${REPO}/${REF}/scripts"
 
-# For a private repository: a token with read access to contents. Only ever interpolated into
-# the commands this prints, and by name (`$DUCK_TOKEN`) rather than by value — a bring-up log
-# gets pasted into chat, and a token that leaks that way cannot be rotated without touching
-# every board. What it decides is *which form* to print, not what to run.
+# For a private repository: a token with read access to contents. Used as an Authorization
+# header when this script fetches repository-owned overlays and support files. Printed advice
+# refers to it only by name (`$DUCK_TOKEN`), never by value — bring-up logs get pasted into chat.
 TOKEN="${DUCK_TOKEN:-}"
 
 # Wifi migration lives in its own script — see `check_network` for why. Named here so the
@@ -109,10 +109,16 @@ MIGRATE="/tmp/${MIGRATE_NAME}"
 MIGRATE_SELF=/usr/local/sbin/robot-migrate-network
 NET_CHECK_UNIT=/etc/systemd/system/robot-net-check.service
 
-# Only what `robotd` needs. The prototype also enables i2c-gpio-pihat, aic3104-pihat and a
-# camera overlay; none apply here — our IMU rides the Dynamixel bus rather than I²C, and
-# `robotd` owns no camera or audio.
+# The motor UART overlay. The Qwiic I2C3 overlay is compiled and enabled separately because it
+# is repository-owned rather than one Armbian ships.
 REQUIRED_OVERLAY=uart2-m0
+
+# Header pins 3/5 are I2C3-M0. This generic overlay is required by both IMUs and the ToF;
+# the optional legacy audio HAT merely adds another device to the same controller.
+QWIIC_OVERLAY=i2c3-qwiic
+LEGACY_QWIIC_OVERLAY=i2c3-pihat
+QWIIC_RULE=/etc/udev/rules.d/99-robot-i2c-qwiic.rules
+LEGACY_QWIIC_RULE=/etc/udev/rules.d/99-robot-i2c-pihat.rules
 
 needs_reboot=0
 # Whether we managed to leave a persistent copy, which decides what the reboot advice says.
@@ -122,12 +128,27 @@ say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[33mwarning:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
+# Print a shell-safe single-quoted literal. Used only for reboot advice: repo
+# and ref are not secrets, while the token is deliberately printed as a
+# placeholder rather than leaked into a bring-up log.
+shell_literal() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+print_source_exports() {
+    printf '  export DUCK_REPO=%s\n' "$(shell_literal "$REPO")"
+    printf '  export DUCK_REF=%s\n' "$(shell_literal "$REF")"
+    if [ -n "$TOKEN" ]; then
+        echo "  export DUCK_TOKEN=github_pat_replace_with_the_same_token"
+    fi
+}
+
 # The command that puts a sibling script on this board, as a string to *print*.
 #
-# This script downloads exactly one thing — the ONNX Runtime tarball, from a public
-# microsoft/onnxruntime release — so it never needs a token itself. Its siblings do, while
-# the repository is private, and every step of bring-up that told someone to fetch one
-# without a header sent them into a 404 that reads like a wrong URL.
+# This script fetches repository-owned overlays and support files as well as the public ONNX
+# Runtime tarball. A private repository therefore needs the token for work performed here *and*
+# for sibling commands this function prints. Every bring-up step that omitted the header turned
+# the resulting GitHub 404 into what looked like a wrong URL.
 #
 # Two forms, keyed on whether this run was given a token, because the wrong one is worse than
 # no advice: a private repo not told to send one 404s, and a public one told to send an unset
@@ -489,10 +510,8 @@ free_motor_port() {
 #   1. alsa-utils (aplay/arecord/amixer) + the DKMS toolchain + dtc.
 #   2. The Armbian *vendor* (BSP 6.1) kernel: the codec's I²S clock tree only exists there,
 #      and the DKMS module builds against its headers.
-#   3. Device-tree overlays, compiled from the sources vendored in deploy/audio/: the
-#      hardware i2c3 bus on header pins 3/5, and the codec + I²S sound card grafted onto it.
-#      (The prototype also kept a bit-banged i2c-gpio fallback; it was the revert path for
-#      rise-time trouble that never came back, and it is not carried here.)
+#   3. An audio-only device-tree overlay, grafting the codec + I²S sound card onto the
+#      independently provisioned Qwiic I2C3 bus.
 #   4. The codec driver itself, out of tree via DKMS — the vendor kernel does not build
 #      SND_SOC_AIC3X, which is why a stock board has no aic3104 card.
 #   5. Mixer levels at boot: aic3104-init.service, running the vendored amixer script
@@ -501,8 +520,8 @@ free_motor_port() {
 # The voice bank itself is NOT provisioned here — the release's postinstall renders it with
 # the `sounds` binary the release carries, seeded from the SoC serial.
 
-# Fetch a repository file (deploy/audio/...) into $2. The token, when given, rides along —
-# same reasoning as fetch_cmd, done rather than printed.
+# Fetch a repository file into $2. The token, when given, rides along — same reasoning as
+# fetch_cmd, done rather than printed.
 fetch_repo_file() {
     if [ -n "$TOKEN" ]; then
         curl -fsSL -H "Authorization: Bearer $TOKEN" "${RAW%/scripts}/$1" -o "$2"
@@ -511,8 +530,7 @@ fetch_repo_file() {
     fi
 }
 
-# Add one word to armbianEnv's overlays= line, preserving order (the codec overlay must
-# come after its bus overlay — it grafts the codec node onto the bus that overlay enables).
+# Add one word to armbianEnv's overlays= line, preserving order.
 ensure_overlay_word() {
     # Same guard `configure_overlay` has, for the same reason — and here it matters more:
     # without it the `echo >>` below *creates* an armbianEnv.txt that never existed, on a
@@ -532,14 +550,162 @@ ensure_overlay_word() {
     fi
 }
 
+# Put the generic I2C3 overlay in `overlays=` exactly once, replacing the old HAT-oriented
+# name in place. In-place replacement preserves the ordering of a following codec overlay.
+ensure_qwiic_overlay_word() {
+    if [ ! -f "$ENV_TXT" ]; then
+        warn "no ${ENV_TXT}; not an Armbian image?
+  Load the ${QWIIC_OVERLAY} overlay by whatever means this image provides, then re-run.
+  Everything else here will still be done."
+        return 0
+    fi
+
+    if ! grep -Eq '^overlays=' "$ENV_TXT"; then
+        echo "overlays=${QWIIC_OVERLAY}" >> "$ENV_TXT"
+        needs_reboot=1
+        return 0
+    fi
+
+    old_line=$(grep -E '^overlays=' "$ENV_TXT" | head -1)
+    words=${old_line#overlays=}
+    new_words=""
+    have_qwiic=0
+    for word in $words; do
+        if [ "$word" = "$LEGACY_QWIIC_OVERLAY" ]; then
+            word=$QWIIC_OVERLAY
+        fi
+        if [ "$word" = "$QWIIC_OVERLAY" ]; then
+            [ "$have_qwiic" = 1 ] && continue
+            have_qwiic=1
+        fi
+        if [ -n "$new_words" ]; then
+            new_words="${new_words} ${word}"
+        else
+            new_words=$word
+        fi
+    done
+    if [ "$have_qwiic" = 0 ]; then
+        new_words="${new_words}${new_words:+ }${QWIIC_OVERLAY}"
+    fi
+    new_line="overlays=${new_words}"
+
+    if [ "$old_line" != "$new_line" ]; then
+        sed -i "s/^overlays=.*/${new_line}/" "$ENV_TXT"
+        needs_reboot=1
+    fi
+}
+
+# Compile the Qwiic bus overlay into one kernel's overlay directory. Audio can install a new
+# vendor kernel after the first pass, so it calls this helper again for that kernel; the helper
+# is byte-comparing and therefore idempotent.
+install_qwiic_overlay() {
+    dtbo_dir=$1
+    if [ -z "$dtbo_dir" ] || [ ! -d "$dtbo_dir" ]; then
+        warn "no rockchip overlay directory under /boot; the Qwiic I2C3 overlay was not installed"
+        return 0
+    fi
+    if ! command -v dtc >/dev/null 2>&1; then
+        warn "device-tree-compiler is unavailable; the Qwiic I2C3 overlay was not installed"
+        return 0
+    fi
+
+    ov_tmp=$(mktemp -d)
+    if fetch_repo_file "deploy/overlays/${QWIIC_OVERLAY}.dts" "$ov_tmp/src.dts" \
+        && dtc -@ -I dts -O dtb -o "$ov_tmp/out.dtbo" "$ov_tmp/src.dts" 2>/dev/null; then
+        if [ ! -f "$dtbo_dir/rk3568-${QWIIC_OVERLAY}.dtbo" ] \
+            || ! cmp -s "$ov_tmp/out.dtbo" "$dtbo_dir/rk3568-${QWIIC_OVERLAY}.dtbo"; then
+            say "Qwiic: installing overlay rk3568-${QWIIC_OVERLAY}.dtbo"
+            cp "$ov_tmp/out.dtbo" "$dtbo_dir/rk3568-${QWIIC_OVERLAY}.dtbo"
+            needs_reboot=1
+        fi
+        ensure_qwiic_overlay_word
+    else
+        warn "could not fetch or compile ${QWIIC_OVERLAY}.dts; header pins 3/5 will not expose the sensor bus"
+    fi
+    rm -rf "$ov_tmp"
+}
+
+# ── Qwiic sensor bus: body IMU, head IMU and ToF ───────────────────────────────
+#
+# This is deliberately independent of `configure_audio`. A robot built entirely from the
+# off-the-shelf SparkFun boards has no audio HAT, but it still needs I2C3-M0, the i2c group and
+# a stable device name. The physical chain is:
+#
+#   Radxa SHIM -> VL53L5CX 0x29 -> head LSM6DSV16X 0x6a -> body Micro IMU 0x6b
+#
+# The Micro board has one Qwiic socket, so it is the endpoint. The head address jumper is moved
+# to GND; the body stays at its factory address. All addresses above are Linux 7-bit values.
+configure_qwiic() {
+    say "Qwiic: I2C3 sensor-bus bring-up"
+
+    qwiic_pkgs="device-tree-compiler i2c-tools"
+    missing=""
+    for pkg in $qwiic_pkgs; do
+        dpkg -s "$pkg" >/dev/null 2>&1 || missing="$missing $pkg"
+    done
+    if [ -n "$missing" ]; then
+        say "installing:$missing"
+        apt-get update -qq || true
+        # shellcheck disable=SC2086  # word-splitting the package list is the point
+        apt-get install -y -qq $missing \
+            || warn "apt failed; install i2c-tools and device-tree-compiler before using the Qwiic sensors"
+    fi
+
+    # Debian's i2c-tools normally creates this group. Assert it explicitly because both the
+    # udev rule and tofd.service name it, and a partial package install must not leave a rule
+    # referring to a group that does not exist.
+    if ! getent group i2c >/dev/null 2>&1; then
+        if command -v groupadd >/dev/null 2>&1 && groupadd --system i2c; then
+            say "Qwiic: created the i2c group"
+        else
+            warn "could not create the i2c group; unprivileged sensor access will not work"
+        fi
+    fi
+
+    dtbo_dir=""
+    boot_dtb=$(readlink -f /boot/dtb 2>/dev/null || true)
+    if [ -n "$boot_dtb" ] && [ -d "$boot_dtb/rockchip/overlay" ]; then
+        dtbo_dir="$boot_dtb/rockchip/overlay"
+    elif [ -d "/boot/dtb-$(uname -r)/rockchip/overlay" ]; then
+        dtbo_dir="/boot/dtb-$(uname -r)/rockchip/overlay"
+    else
+        dtbo_dir=$(find /boot -maxdepth 3 -type d -path '*/rockchip/overlay' 2>/dev/null | head -1)
+    fi
+    install_qwiic_overlay "$dtbo_dir"
+
+    content='SUBSYSTEM=="i2c-dev", KERNELS=="fe5c0000.i2c", GROUP="i2c", MODE="0660", SYMLINK+="i2c-qwiic"'
+    rule_changed=0
+    if [ -f "$LEGACY_QWIIC_RULE" ]; then
+        say "Qwiic: removing stale ${LEGACY_QWIIC_RULE}"
+        rm -f "$LEGACY_QWIIC_RULE"
+        rule_changed=1
+    fi
+    # Never unlink a real device node under an old name; only retire the udev-created symlink.
+    if [ -L /dev/i2c-pihat ]; then
+        rm -f /dev/i2c-pihat
+        rule_changed=1
+    fi
+    if [ ! -f "$QWIIC_RULE" ] || [ "$(cat "$QWIIC_RULE")" != "$content" ]; then
+        say "Qwiic: installing the /dev/i2c-qwiic udev rule"
+        mkdir -p "$(dirname "$QWIIC_RULE")"
+        printf '%s\n' "$content" > "$QWIIC_RULE"
+        chmod 644 "$QWIIC_RULE"
+        rule_changed=1
+    else
+        say "Qwiic: /dev/i2c-qwiic rule already in place"
+    fi
+    if [ "$rule_changed" = 1 ]; then
+        udevadm control --reload-rules 2>/dev/null || true
+        udevadm trigger --subsystem-match=i2c-dev 2>/dev/null || true
+    fi
+}
+
 configure_audio() {
     say "audio: TLV320AIC3104 codec bring-up"
 
-    # 1. Packages. i2c-tools is here rather than with the ToF below because it is
-    #    what *creates the `i2c` group* (its postinst does), and both the codec and
-    #    the ToF sit on that bus — plus `i2cdetect` is the first thing anyone runs
-    #    when a device on it goes quiet.
-    audio_pkgs="alsa-utils device-tree-compiler dkms gcc make i2c-tools"
+    # 1. Packages needed only by the optional codec path. Qwiic provisioning owns
+    #    i2c-tools, the i2c group and dtc independently above.
+    audio_pkgs="alsa-utils device-tree-compiler dkms gcc make"
     missing=""
     for pkg in $audio_pkgs; do
         dpkg -s "$pkg" >/dev/null 2>&1 || missing="$missing $pkg"
@@ -583,26 +749,28 @@ configure_audio() {
     done
     depmod "$vendor_ver" 2>/dev/null || true
 
-    # 3. Overlays: compile the vendored sources against the vendor kernel's overlay dir.
+    # 3. Overlays: compile the audio source against the vendor kernel's overlay dir.
     dtbo_dir="/boot/dtb-${vendor_ver}/rockchip/overlay"
     [ -d "$dtbo_dir" ] || dtbo_dir=$(find /boot -maxdepth 3 -type d -path '*/rockchip/overlay' 2>/dev/null | head -1)
     if [ -n "$dtbo_dir" ]; then
-        for ov_name in i2c3-pihat aic3104-i2c3; do
-            ov_tmp=$(mktemp -d)
-            if fetch_repo_file "deploy/audio/${ov_name}.dts" "$ov_tmp/src.dts" \
-                && dtc -@ -I dts -O dtb -o "$ov_tmp/out.dtbo" "$ov_tmp/src.dts" 2>/dev/null; then
-                if [ ! -f "$dtbo_dir/rk3568-${ov_name}.dtbo" ] \
-                    || ! cmp -s "$ov_tmp/out.dtbo" "$dtbo_dir/rk3568-${ov_name}.dtbo"; then
-                    say "installing overlay rk3568-${ov_name}.dtbo"
-                    cp "$ov_tmp/out.dtbo" "$dtbo_dir/rk3568-${ov_name}.dtbo"
-                    needs_reboot=1
-                fi
-                ensure_overlay_word "$ov_name"
-            else
-                warn "could not fetch or compile ${ov_name}.dts — audio will not work"
+        # A newly installed vendor kernel needs its own copy of the generic bus overlay.
+        # This is the audio path depending on Qwiic, never the sensors depending on audio.
+        install_qwiic_overlay "$dtbo_dir"
+        ov_name=aic3104-i2c3
+        ov_tmp=$(mktemp -d)
+        if fetch_repo_file "deploy/audio/${ov_name}.dts" "$ov_tmp/src.dts" \
+            && dtc -@ -I dts -O dtb -o "$ov_tmp/out.dtbo" "$ov_tmp/src.dts" 2>/dev/null; then
+            if [ ! -f "$dtbo_dir/rk3568-${ov_name}.dtbo" ] \
+                || ! cmp -s "$ov_tmp/out.dtbo" "$dtbo_dir/rk3568-${ov_name}.dtbo"; then
+                say "installing overlay rk3568-${ov_name}.dtbo"
+                cp "$ov_tmp/out.dtbo" "$dtbo_dir/rk3568-${ov_name}.dtbo"
+                needs_reboot=1
             fi
-            rm -rf "$ov_tmp"
-        done
+            ensure_overlay_word "$ov_name"
+        else
+            warn "could not fetch or compile ${ov_name}.dts — audio will not work"
+        fi
+        rm -rf "$ov_tmp"
     else
         warn "no rockchip overlay directory under /boot — audio overlays not installed"
     fi
@@ -689,38 +857,6 @@ UNIT
         warn "could not fetch aic3104-init.sh — the mixer stays at power-on levels"
     fi
     rm -f "$init_tmp"
-}
-
-# ── the head ToF sensor's bus ──────────────────────────────────────────────────
-#
-# The sensor is a VL53L5CX or VL53L8CX on the *same* i2c3 bus the audio codec is
-# on, so `configure_audio` has already done the expensive part: the overlay, the
-# vendor kernel, and i2c-tools (which is what creates the `i2c` group `tofd`
-# joins). This adds the one thing left — a stable name for the bus.
-#
-# `/dev/i2c-3` is what the overlay happens to produce today, and a kernel or
-# overlay change can renumber it. A udev symlink keeps `tofd`'s default correct
-# across that. `tofd` also falls back to `/dev/i2c-3` on a board provisioned
-# before this rule existed, so neither half is load-bearing on its own.
-configure_tof() {
-    rule=/etc/udev/rules.d/99-robot-i2c-pihat.rules
-    # Two matchers, one per bus flavour the board may end up with: the RK3566's
-    # i2c3 controller by its device-tree address, and the bit-banged i2c-gpio bus
-    # by name. Only one exists at a time, so the symlink follows whichever it is.
-    content='SUBSYSTEM=="i2c-dev", KERNELS=="fe5c0000.i2c", SYMLINK+="i2c-pihat"
-SUBSYSTEM=="i2c-dev", ATTR{name}=="i2c-gpio-pihat", SYMLINK+="i2c-pihat"'
-
-    if [ -f "$rule" ] && [ "$(cat "$rule")" = "$content" ]; then
-        say "ToF: /dev/i2c-pihat rule already in place"
-        return 0
-    fi
-    say "ToF: installing the /dev/i2c-pihat udev rule"
-    printf '%s\n' "$content" > "$rule"
-    chmod 644 "$rule"
-    # Applied now as well as at the next boot, so a sensor already fitted works
-    # without one — `udevadm` failing is not worth stopping provisioning for.
-    udevadm control --reload-rules 2>/dev/null || true
-    udevadm trigger --subsystem-match=i2c-dev 2>/dev/null || true
 }
 
 # ── the head camera's device-tree overlay ──────────────────────────────────────
@@ -905,6 +1041,20 @@ report() {
   will not drive anything."
     fi
 
+    if [ -e /dev/i2c-qwiic ]; then
+        qwiic_target=$(readlink -f /dev/i2c-qwiic 2>/dev/null || true)
+        printf '  %-22s %s\n' "Qwiic sensor bus" "/dev/i2c-qwiic -> ${qwiic_target:-unknown}"
+    elif [ -f "$ENV_TXT" ] \
+        && grep -E '^overlays=' "$ENV_TXT" | grep -qw "$QWIIC_OVERLAY" \
+        && [ "$needs_reboot" = 1 ]; then
+        printf '  %-22s %s\n' "Qwiic sensor bus" "absent — enabled, pending reboot"
+    else
+        printf '  %-22s %s\n' "Qwiic sensor bus" "ABSENT"
+        warn "/dev/i2c-qwiic is missing. After the overlay is live, this scan should show
+  VL53L5CX=0x29, head LSM6DSV16X=0x6a and body LSM6DSV16X=0x6b:
+      sudo i2cdetect -y 3"
+    fi
+
     # Gamepad readiness. This board's part of it is two independent settings; who may read the pad is
     # `padd.service`'s business now, and pairing one is `sudo robotctl pad pair`.
     #
@@ -1057,14 +1207,16 @@ report() {
         say "reboot required, then run this again"
         echo
         echo "  sudo reboot"
+        echo "  # In the new login shell, restore this run's source settings:"
+        print_source_exports
         if [ "$persisted" = 1 ]; then
-            echo "  sudo ${SELF}"
+            echo "  sudo -E ${SELF}"
         else
             # Piped in, so there was no file to persist. Print the fetch rather than a comment
             # saying one is needed — /tmp is cleared by the reboot this is asking for, and the
             # operator has no shell history to recover the command from either.
             printf '  %s\n' "$(fetch_cmd setup-board.sh)"
-            echo "  sudo sh /tmp/setup-board.sh"
+            echo "  sudo -E sh /tmp/setup-board.sh"
         fi
         cat <<'EOF'
 
@@ -1076,19 +1228,18 @@ EOF
 
     say "board ready — install the daemon next"
     echo
+    print_source_exports
     printf '  %s\n' "$(fetch_cmd install.sh)"
     if [ -n "$TOKEN" ]; then
-        # Literal, not expanded: this line gets pasted around, and the value must not.
-        # shellcheck disable=SC2016
-        printf '  %s\n' 'sudo DUCK_TOKEN="$DUCK_TOKEN" sh /tmp/install.sh'
+        echo "  sudo -E sh /tmp/install.sh"
         cat <<'EOF'
 
   Both halves need the token while the repository is private: raw.githubusercontent.com 404s
-  without the header, and sudo does not pass the variable through on its own. Once the
-  repository is public, drop the header and the prefix.
+  without the header, and sudo does not pass the variable through unless asked. Once the
+  repository is public, omit the token export; keep the repo/ref exports for a fork or branch.
 EOF
     else
-        echo "  sudo sh /tmp/install.sh"
+        echo "  sudo -E sh /tmp/install.sh"
         cat <<'EOF'
 
   If that 404s rather than downloading, the repository is private and needs a token — a 404
@@ -1107,8 +1258,8 @@ main() {
     free_motor_port
     configure_bluetooth
     configure_classic_hid
+    configure_qwiic
     configure_audio
-    configure_tof
     # After configure_audio, which is what installs the vendor kernel: the camera's MIPI-CSI
     # capture driver lives only on that branch, and its overlay directory is the one to mirror
     # into. `vendor_ver` is what configure_audio resolved it to, or empty.

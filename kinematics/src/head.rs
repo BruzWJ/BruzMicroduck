@@ -15,7 +15,7 @@ use crate::{Model, Pose, Quat, SiteId};
 /// `q_site⁻¹ * q_cv2` comes out the same.
 pub const SITE_TO_CV2: Quat = Quat::new(0.5, -0.5, 0.5, -0.5);
 
-/// Sensor frame (+x forward, +y left, +z up — the VL53L5CX/L8CX integration
+/// Sensor frame (+x forward, +y left, +z up — the VL53L5CX integration
 /// convention) → cv2 camera frame.
 pub const SENSOR_IN_CV2_Q: Quat = Quat::new(0.5, 0.5, -0.5, 0.5);
 
@@ -31,7 +31,7 @@ pub struct HeadFk {
     /// true position, a couple of centimetres from the camera it would
     /// otherwise borrow.
     tof: Option<SiteId>,
-    /// The MJCF's `head_imu` site (the BMI088 on the HAT), when the asset carries one. Tilted
+    /// The MJCF's `head_imu` site (the head LSM6DSV16X), when the asset carries one. Tilted
     /// relative to the camera — the mount is not axis-aligned.
     head_imu: Option<SiteId>,
     joints: [usize; 4],
@@ -88,7 +88,7 @@ impl HeadFk {
         }
     }
 
-    /// Head-IMU (BMI088) pose in the trunk frame, when the asset has a `head_imu` site.
+    /// Head LSM6DSV16X pose in the trunk frame, when the asset has a `head_imu` site.
     ///
     /// The site frame is the sensor's own axes as mounted — tilted, not aligned with the camera.
     /// Rotating a sensor-frame vector by the result's quat expresses it in the trunk, which is how
