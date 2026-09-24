@@ -104,10 +104,11 @@ unhealthy reverts on its own.
 ### M4 — Hardware bring-up · **closing**
 
 A measurement milestone, not a feature one: it exists to turn guesses into numbers on a real
-Radxa. Nearly all of it was answered as a side effect of shipping — the loop holds 50.0 Hz on a
-non-RT kernel (`missed=3` in 15022 ticks), the bus and the `imu_to_dxl` board answer on
-`/dev/ttyS2`, thermals have a real reading across every zone, `systemctl restart` in `on_apply`
-works against real systemd, and the gate commits and reverts for real.
+Radxa. The legacy build established that the loop holds 50.0 Hz on a non-RT kernel (`missed=3` in
+15022 ticks), thermals have a real reading across every zone, `systemctl restart` in `on_apply`
+works against real systemd, and the gate commits and reverts for real. The replacement Qwiic body
+LSM6DSV16X is now the required policy sensor; its shared-bus timing and mount-axis check still need
+to be repeated on the retrofitted hardware.
 
 **The log-retention question was settled by deciding rather than measuring.** `/var/log` is a
 zram device on this image, so `Storage=persistent` gets journald a directory that is itself in

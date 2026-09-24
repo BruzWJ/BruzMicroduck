@@ -1,5 +1,10 @@
 # The head sensors when nobody is looking
 
+> Historical measurement record: the CPU numbers and driver details below were measured with the
+> retired BMI088/custom-HAT head and Dynamixel body IMU. The retained decision is that head-IMU
+> acquisition is off until requested. Current hardware ownership and Qwiic addresses live in
+> [`robotd-design.md`](../design/robotd-design.md) and [`architecture.md`](../design/architecture.md).
+
 `tofd` ranged a laser and read an IMU from boot to shutdown on every duck with the head module
 fitted, whether or not one process was subscribed to either stream. This started as "start the
 unit when it is needed and stop it after" and ended somewhere much smaller, by measuring at each

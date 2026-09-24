@@ -148,8 +148,8 @@ is:
   now prints that ceiling beside the temperature, so the throttling half of this no longer needs
   an ssh session to see (`../design/robotd-design.md` §2.1).
 - `tofd`'s guard against a real sensor clock. The poll is anchored on each frame's arrival and
-  tolerates the sensor running 20 ms early — a 30% period error — but no VL53L8 has been watched
-  doing it.
+  tolerates the sensor running 20 ms early — a 30% period error — but the replacement VL53L5CX
+  on the shared Qwiic chain has not yet been watched doing it.
 - That petting still starts as promptly as it did, on a robot in an ordinary room rather than a
   silent one.
 

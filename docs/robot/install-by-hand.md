@@ -28,11 +28,20 @@ sudo groupadd --system robot
 sudo usermod -aG robot "$USER"
 ```
 
+`setup-board.sh` fetches the repository-owned Qwiic overlay. Export the repository ref and, while
+the repository is private, a contents-read token before running it; `sudo -E` carries those values
+through:
+
+```bash
+export DUCK_TOKEN=github_pat_replace_with_your_token
+export DUCK_REF=main
+```
+
 Board bring-up — device-tree overlay, kernel console off the motor UART, the getty mask,
 `Privacy = device`, onnxruntime:
 
 ```bash
-sudo sh ~/setup-board.sh
+sudo -E sh ~/setup-board.sh
 ```
 
 Network — netplan to NetworkManager:
@@ -54,23 +63,17 @@ Both again. They are idempotent, and the second `migrate-network.sh` run is what
 backstop that would otherwise revert this board to netplan on any boot where wifi is slow:
 
 ```bash
-sudo sh ~/setup-board.sh
+export DUCK_TOKEN=github_pat_replace_with_your_token
+export DUCK_REF=main
+sudo -E sh ~/setup-board.sh
 ```
 
 ```bash
 sudo sh ~/migrate-network.sh
 ```
 
-Then the daemon. `install.sh` reads its settings from the environment, and `sudo -E` is what gets
-them through:
-
-```bash
-export DUCK_TOKEN=github_pat_replace_with_your_token
-```
-
-```bash
-export DUCK_REF=main
-```
+The reboot starts a new shell, which is why the token and ref are exported again above. Then the
+daemon. `install.sh` reads the same settings from the environment, and `sudo -E` gets them through:
 
 ```bash
 export DUCK_DEV_KEY=$HOME/team.dev.pub

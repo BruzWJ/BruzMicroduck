@@ -26,3 +26,52 @@ and [control-loop design](../design/robotd-design.md).
 | NP-F battery | [Amazon battery listing](https://www.amazon.com/dp/B0007Q9PWQ?ref=ppx_yo2ov_dt_b_fed_asin_title) — requested as NP-F500; see note below | 1 |
 | NP-F battery adapter plate | [Accsoon Toprig NP-F Battery Adapter Mount Plate](https://www.amazon.com/dp/B0BR6JLLFC?ref=ppx_yo2ov_dt_b_fed_asin_title) | 1 |
 | Main computer | [Radxa ZERO 3W](https://radxa.com/products/zeros/zero3w/) | 1 |
+
+## Qwiic assembly
+
+Fit the Qwiic SHIM to the Radxa's Pi-style header with its pin-1 mark aligned. The SHIM uses
+header pins 3/5 for SDA/SCL and regulates the header's 5 V supply to the Qwiic chain's 3.3 V;
+installing it backwards can short the supply.
+
+Connect the boards in this order, starting at the Radxa:
+
+```text
+Qwiic SHIM -> VL53L5CX ToF -> head standard LSM6DSV16X -> body Micro LSM6DSV16X
+```
+
+That order is structural, not cosmetic. The ToF and standard IMU each have two Qwiic connectors
+and pass the bus onward. The Micro IMU has only one connector, so it must be the endpoint; it
+cannot be the first board in a connector-only daisy chain.
+
+The electrical migration preserves the existing model's mount transforms. Mount the body Micro
+board so the trunk axes are `[+sensor Z, +sensor Y, -sensor X]`, and align the head board's sensor
+axes with the model's `head_imu` site. A bracket that rotates either breakout also requires the
+matching transform change in `duck-control/src/imu.rs` or the head MJCF site; wiring alone cannot
+correct a rotated sensor.
+
+The replacement bracket has not been measured in this repository, so the current alpha MJCF poses
+remain the mechanical contract rather than a claim that the SparkFun hole pattern lands there
+automatically: `tof` is at `pos="0.0143 0.0225 -0.0735"` with
+`quat="0.707107 0 0.707107 0"`, and `head_imu` is at
+`pos="0.0114823 0.000202447 -0.05126"` with an identity quaternion, both in the
+`bottom_head_shell` frame. The depth convention is +X optical-forward, +Y sensor-left, +Z up;
+wire zone 0 is the top-left return. If the bracket differs, update
+`kinematics/assets/alpha/robot_walk.xml` before mapping and verify all four grid corners against a
+flat target on hardware.
+
+Prepare the addresses before assembly:
+
+- Leave the body Micro IMU at its factory Linux 7-bit address, `0x6b`.
+- On the head IMU, cut the ADDR jumper's power-side trace and bridge its centre pad to ground,
+  selecting `0x6a`. Do not leave the address pad floating or open both sides into SPI mode.
+- Leave the VL53L5CX at `0x29`. ST material also writes `0x52`/`0x53`, but those are the shifted
+  8-bit write/read forms; Linux `i2c-dev` and this repository use `0x29`.
+
+Every SparkFun sensor board supplies a 2.2 kΩ SDA/SCL pull-up pair. Three enabled pairs in
+parallel are already about 733 Ω, before the Radxa's header-side pull-ups, which is too strong.
+For this build, cut the I2C pull-up jumper on all three sensor boards and use the Radxa-side
+pull-ups. If the host wiring changes, retain at most one sensor-board pair and verify the effective
+resistance and rise time rather than enabling all of them.
+
+Provisioning, the `/dev/i2c-qwiic` name, and the I2C3/FUSB302 pinmux consequence are owned by
+[`deploy/README.md`](../../deploy/README.md#what-those-commands-actually-do).
