@@ -818,10 +818,9 @@ impl Engine {
             });
         }
 
-        // `--staging` on a board that is ahead of the candidate channel. Reachable the moment a
-        // release is promoted straight to stable — which is a supported path, `release.yml` calls
-        // it "build → STABLE directly (no staging release exists; NOT canaried)" — because the
-        // staging scan then keeps answering with the last version that did publish a candidate.
+        // `--staging` on a board that is ahead of the candidate channel. Normal releases publish
+        // straight to stable, so the staging scan can keep answering with the last manually
+        // published candidate.
         //
         // Refused rather than installed. Every layer below here behaved correctly when it was
         // not: the artifact verified, the swap happened, a unit that the older release does not
@@ -2556,8 +2555,8 @@ impl Reverted {
 /// - `Latest` has its own guard, which makes a different claim.
 /// - `Ref` and `Exact` are exempt from both, for reasons the call site states.
 ///
-/// Equality is not "behind": that a candidate has been promoted to exactly what is installed is
-/// what `AlreadyCurrent` reports, above this and more usefully.
+/// Equality is not "behind": a candidate matching what is installed is what `AlreadyCurrent`
+/// reports, above this and more usefully.
 fn staging_has_nothing_newer<'a>(
     target: &crate::proto::Target,
     installed: Option<&'a semver::Version>,
@@ -3250,9 +3249,8 @@ mod staging_channel_tests {
         semver::Version::parse(s).expect("a version")
     }
 
-    /// The incident, in one assertion. A board on stable `0.4.0` asking for the newest candidate
-    /// when the last candidate published was `0.2.0`: 0.3.0 and 0.4.0 were promoted straight to
-    /// stable, so the staging scan still answers `0.2.0`.
+    /// A board on stable `0.4.0` asks for the newest candidate when the last manually published
+    /// candidate was `0.2.0`; the staging scan still answers `0.2.0`.
     #[test]
     fn a_candidate_older_than_the_board_is_reported() {
         assert_eq!(

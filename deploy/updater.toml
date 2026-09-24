@@ -93,9 +93,8 @@ keep_previous = 1
 # change that ships 1.0.0.
 # golden = "1.0.0"
 
-# The stable channel. `daemon-v*` tags only: staging publishes `daemon-staging-v*` and
-# marks it prerelease, so it is excluded twice over and a client robot cannot drift onto
-# a candidate build.
+# The stable channel. `daemon-v*` tags only; GitHub prereleases and any tag under a different prefix
+# are excluded, so a client robot cannot drift onto a candidate or branch build.
 [component.daemon.source]
 type           = "github_releases"
 repo           = "ORG/duck-daemon"
@@ -111,8 +110,8 @@ manifest_asset = "manifest.json"
 # if it somehow resolved the tag.
 # ref_tag_prefix = "daemon-dev-"
 
-# Where `--staging` looks: the tags `release.yml` pushes for release candidates. Shown for
-# completeness — this is the default, and a robot needs no configuration to reach a candidate.
+# Where `--staging` looks if an operator manually publishes a signed release candidate. Shown for
+# completeness — this is the default, although the normal release workflow publishes stable only.
 #
 # Reaching one still takes a person with root typing `--staging`. A candidate is flagged as a
 # prerelease, which `latest` skips, so nothing here makes this robot *track* candidates.

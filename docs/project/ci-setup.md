@@ -3,24 +3,20 @@
 Status: draft · Date: 2026-07-28 · Owner: pierre
 
 One-time setup for the release pipeline. See [`updater-design.md`](../design/updater-design.md)
-§5.4 for key custody and §16.3 for the staging → stable model.
+§5.4 for key custody and §16.3 for publishing.
 
-## Decision: two keys, two triggers, and no gate on this plan
+## Decision: two signing keys and no gate on this plan
 
-**Decided 2026-07-29.** Branch pushes are signed with `team.dev`; tagged releases and
-promotions are signed with `release-1`. Both keys live in CI.
+**Decided 2026-07-29.** Branch pushes are signed with `team.dev`; stable releases are signed with
+`release-1`. Both keys live in CI.
 
 | trigger | workflow | key | reaches a customer robot |
 |---|---|---|---|
 | push to any branch | `dev.yml` | `team.dev` (repo secret) | **no** — `allow_dev_keys = false` there, and the trusted filename must end `.dev.pub` |
-| tag `daemon-staging-v*` | `release.yml` | `release-1` (`release` env secret) | not until promoted — published as a prerelease |
-| manual promotion | `promote.yml` | `release-1` | **yes** |
+| manual **Run workflow** | `release.yml` | `release-1` (`release` env secret) | **yes** — creates one stable release |
 
-This split is clean in a way an earlier proposal was not: keys never cross *within* the
-staging → stable path, so promotion still re-signs a manifest over identical bytes (§16.3).
-An artifact signed by `team.dev` could not be promoted, because `promote` points `sig_url`
-at the staging artifact's existing signature — which is why dev builds stay dev builds
-rather than becoming release candidates.
+Dev builds stay dev builds: their key is not trusted by customer robots, and a stable release is
+always rebuilt, signed, verified, tagged, and published by the manual release workflow.
 
 ### What was intended, and why it is not there
 
@@ -70,7 +66,7 @@ from where:
 
 | key | in CI | role |
 |---|---|---|
-| `release-1` | **not currently** — see above | signs every release and promotion |
+| `release-1` | **not currently** — see above | signs every stable release |
 | `release-2` | no | first rotation target if CI or `release-1` is compromised |
 | `release-3` | no, ideally never on a networked machine | last resort |
 | `team.dev` | intended, dev workflow only | branch builds; cannot touch a customer robot, because `allow_dev_keys` is false there |
@@ -101,38 +97,29 @@ gh secret set MINISIGN_PASSWORD --env release
 
 The second prompts, so the passphrase never lands in shell history or a transcript.
 
-**Secrets** (encrypted, not readable back). Current state:
+**Release secrets** (encrypted, not readable back):
 
-| name | scope | value | set |
-|---|---|---|---|
-| `MINISIGN_SECRET_KEY` | `release` env | `~/.duck-keys/release-1.key`, both lines | ✅ |
-| `MINISIGN_PASSWORD` | `release` env | the passphrase for `release-1` | ✅ |
-| `MINISIGN_DEV_SECRET_KEY` | **repo** | `~/.duck-keys/team.dev.key` | ✅ |
+| name | scope | value |
+|---|---|---|
+| `MINISIGN_SECRET_KEY` | `release` env | `~/.duck-keys/release-1.key`, both lines |
+| `MINISIGN_PASSWORD` | `release` env | the passphrase for `release-1` |
 
-`MINISIGN_DEV_SECRET_KEY` is repo-scoped on purpose: every branch push signs with it, so
+The separate `MINISIGN_DEV_SECRET_KEY` is repo-scoped: every branch push signs with it, so
 gating it behind an environment would mean the dev workflow declaring one meant for
 `release-1`. It needs no passphrase secret — a dev key is unencrypted so CI can sign
 non-interactively, which `xtask keycheck` confirms and calls correct for a dev key and wrong
 for a release key.
 
-**Variables** (plain, readable — a public key is not a secret):
-
-| name | value |
-|---|---|
-| `MINISIGN_PUBLIC_KEY` | the key line of `~/.duck-keys/release-1.pub` |
-
-The public key is used by `release.yml` to verify a release through the robot's own code
-path before publishing it. Keeping it as a *variable* rather than a secret is
-deliberate: treating a public key as secret invites confusion about which half is which.
-
-Do **not** add `release-2` or `release-3`. Their entire value is being absent from here.
+The release verification job reads `deploy/trusted_keys/release-1.pub` directly, so there is no
+public-key variable to configure and no duplicate value to drift. Do **not** add the private halves
+of `release-2` or `release-3`; their value is being absent from CI.
 
 ## The `release` environment
 
-Both `release.yml` and `promote.yml` declare `environment: release`. Create it under
-Settings → Environments and add **required reviewers**.
+The build job called by `release.yml` declares `environment: release`. Create it under Settings →
+Environments and add **required reviewers**.
 
-Without it, anyone who can push a `daemon-staging-v*` tag can sign for the whole fleet.
+Without it, anyone who can run the release workflow can sign for the whole fleet.
 With it, reaching the signing key needs a second person's approval — which recovers most
 of what local signing would have given, at the cost of one click per release.
 
@@ -160,63 +147,36 @@ no benefit.
 
 ## Cutting a release
 
-**The GitHub releases page is the entry point.** What you create decides what happens, and
-`release.yml` reads the tag to work it out:
+The normal release is a single GitHub action:
 
-| you create | mode | what CI does |
-|---|---|---|
-| pre-release, tag `daemon-staging-v0.4.0` | `staging` | cross-builds for aarch64, packages, signs with `release-1`, verifies through the real engine, publishes a **prerelease** |
-| release, tag `daemon-v0.4.0`, staging 0.4.0 exists | `promote` | re-signs a stable manifest over **the same artifact bytes** staging validated; no rebuild; retires the staging release |
-| release, tag `daemon-v0.4.0`, no staging 0.4.0 | `stable` | builds 0.4.0 and publishes it straight to stable, with the notes saying it was never canaried |
+1. Bump `[workspace.package].version` in `Cargo.toml`, commit, and push the default branch.
+2. Open **Actions → release → Run workflow**. Leave the branch selector on the default branch;
+   there are no other inputs.
+3. Click **Run workflow**.
 
-The run summary names which of the three ran, because "which one was it" is the first question when a
-release looks wrong.
+`release.yml` reads the version, freezes the selected commit SHA, and calls the release recipe once.
+The GitHub-hosted runner cross-builds for aarch64, packages, signs with `release-1`, verifies a real
+install through `updaterd`, creates `daemon-v<version>` at that SHA, uploads every asset, and
+publishes one stable/latest release. A normal release therefore needs no local command, manually
+created tag, personal access token, `DUCK_TOKEN`, staging release, or promotion.
 
-Pushing the tag from a terminal does the same thing — the release object is created for you:
-
-```
-git tag daemon-staging-v0.4.0 && git push --tags
-```
-
-Bump the workspace version first: `xtask package` refuses a tag that disagrees with `Cargo.toml`.
-
-Two properties worth knowing, because they are what the split is *for*:
-
-- A prerelease is skipped by a plain `update apply`, so an unpromoted build cannot reach a robot that
-  did not ask for it with `--staging`. Both publish steps re-assert the flag on a release that already
-  exists — a staging release someone drafted without ticking the box would otherwise be installable by
-  the whole fleet, and a stable one flagged as a prerelease would ship to nobody.
-- Promotion never rebuilds. The stable release ends up self-contained (manifest, signature, artifact,
-  bootstrap binary), which is why the staging release can be deleted afterwards. Stable releases from
-  before that was true — `daemon-v0.3.0` — still point their `url` at their staging release, so
-  **those staging releases must not be deleted.**
-
-The manual promotion is the same recipe without a release to create first, and is where
-`min_supported` lives (§8.1 — it forces robots below that version to update without waiting for a
-client):
-
-```
-gh workflow run promote --field version=0.4.0
-```
+If that version is already published, the run refuses to replace it; bump the version. A retry may
+resume only a draft for the same version and commit.
 
 ### The workflows
 
 ```
-release.yml            the entry point: decides staging / promote / stable
+release.yml            manual entry point; derives the version and freezes the source SHA
 _build-release.yml     build · package · sign · verify · publish        (called)
-_promote-release.yml   copy bytes · verify sha · re-sign · retire staging (called)
-promote.yml            workflow_dispatch → _promote-release.yml
 dev.yml                every push: an unsigned-for-customers dev build, `team.dev` key
 ```
 
-The recipe lives in the two called workflows so the staging and stable paths cannot drift apart in
-what they ship. `xtask`'s packaging tripwires read `_build-release.yml` and `dev.yml` for the
-`--include` list, so a unit, hook or sysusers file that is not packaged fails a test rather than a
-robot.
+`xtask`'s packaging tripwires read `_build-release.yml` and `dev.yml` for the `--include` list, so a
+unit, hook or sysusers file that is not packaged fails a test rather than a robot.
 
-Both publish steps create the release only if it is absent and then upload with `--clobber`, so a job
-that failed halfway can be re-run. That was not true before: a release job that died after creating
-its release could only be retried by deleting the release and the tag by hand.
+The normal path creates the release with its assets, so `gh` uploads through an internal draft before
+making it visible. If a run leaves a draft, the same commit can resume it; an already-published
+manual release is never overwritten.
 
 ## Rotating a key
 

@@ -91,7 +91,7 @@ the libraries they drive — no sockets, no systemd, nothing starts them
 the tools
   robotctl/       the local CLI, including `monitor`
   duckctl/        the laptop-side client — never shipped, never cross-built
-  xtask/          package · sign · promote — build tooling, never shipped
+  xtask/          package · sign — build tooling, never shipped
   test-support/   signed-release fixtures for tests; never shipped
 
 deploy/         what a robot is configured with: updater.toml, robotd.toml, trust anchor, journald
@@ -155,28 +155,14 @@ Two or three seconds, treated as a moving thumbnail. Use a video where sound or 
 
 ## Releasing
 
-Releases are signed **in CI**, never locally. The entry point is the GitHub releases page, and the
-tag decides what happens:
+Releases are signed **in GitHub Actions**, never locally. Bump `[workspace.package].version` in
+`Cargo.toml`, commit and push it to the default branch, then open **Actions → release → Run
+workflow** and click **Run workflow**. There are no inputs.
 
-| you create | what CI does |
-|---|---|
-| a **pre-release** tagged `daemon-staging-v0.4.0` | builds, signs, verifies through the real update engine, publishes to **staging** |
-| a **release** tagged `daemon-v0.4.0` | **promotes** staging 0.4.0 if it exists — the same bytes, re-signed — otherwise builds 0.4.0 directly |
-
-Pushing either tag from a terminal does the same thing:
-
-```bash
-git tag daemon-staging-v0.4.0 && git push --tags
-```
-
-The canaried path is two steps on purpose: publish the pre-release, install it on a robot, then
-create the release. Creating a release with no staging build to promote is allowed and says so in its
-own notes — verified in CI, never run on a robot.
-
-Bump the workspace version first. `xtask package` refuses a tag that disagrees with `Cargo.toml`,
-which is what stops a robot reporting a version it is not running.
-
-`gh workflow run promote --field version=0.4.0` is the same promotion without a release to create
-first, and is where `min_supported` lives.
+The workflow reads that version, freezes the selected commit, builds for the board, signs the
+artifact, installs it through the real update engine as verification, and only then creates
+`daemon-v<version>`, uploads the assets, and publishes one stable release. Do not create a tag or a
+GitHub release first. The workflow uses GitHub's own token; `DUCK_TOKEN` and a personal access token
+are not involved.
 
 [`docs/project/ci-setup.md`](docs/project/ci-setup.md) covers key custody, the secrets, and rotation.

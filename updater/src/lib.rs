@@ -87,16 +87,16 @@ pub enum Error {
     /// Distinct from [`Self::WouldDowngrade`] because the operator's next move is different.
     /// That one is a rollback-attack guard: it says a *mirror* may have gone backwards, and
     /// the right response is to distrust the source. This one says the source is fine and the
-    /// channel is simply behind — usually because the last releases were promoted straight to
-    /// stable and published no candidate. Answering "refusing to downgrade" sent the one
+    /// channel is simply behind — usually because normal stable releases publish no candidate.
+    /// Answering "refusing to downgrade" sent the one
     /// person who hit it looking for a broken mirror.
     ///
     /// Only [`crate::proto::Target::Staging`] reaches it. `StagingExact` is how someone names
     /// an older candidate deliberately, so the message names that command as the way past.
     #[error(
         "the newest release candidate is {candidate}, and this board is already on \
-         {installed} — nothing more recent is available on the staging channel. A release \
-         promoted straight to stable publishes no candidate, so staging stays at the last \
+         {installed} — nothing more recent is available on the staging channel. A normal stable \
+         release publishes no candidate, so staging stays at the last \
          version that had one. There is nothing here to test. To install this older candidate \
          anyway, name it:\n  robotctl update apply {component} --staging --version {candidate}"
     )]

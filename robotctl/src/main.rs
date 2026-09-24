@@ -1104,9 +1104,9 @@ enum UpdateCommand {
 
         /// Install the release candidate from the staging channel.
         ///
-        /// A candidate is what `release.yml` published and nobody has promoted yet. It is
-        /// signed with the release key like any release, and carries the version it will be
-        /// promoted under — what makes it unreachable otherwise is that it is flagged as a
+        /// A candidate is a manually published prerelease under the configured staging prefix. It
+        /// is signed with the release key and carries the stable version it is testing. What makes
+        /// it unreachable otherwise is that it is flagged as a
         /// prerelease, which a plain `apply` skips so that no robot drifts onto a build no
         /// one has validated.
         ///

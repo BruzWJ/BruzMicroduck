@@ -2826,16 +2826,15 @@ pub enum Target {
     /// install of one looks like a downgrade. Refusing them would make the flow useless,
     /// and an operator naming a ref is stating intent as explicitly as naming a version.
     Ref(String),
-    /// The newest **release candidate** — what `release.yml` published to `staging` and
-    /// nobody has promoted yet.
+    /// The newest manually published **release candidate** under the staging tag prefix.
     ///
     /// A candidate is unreachable any other way. It is flagged as a prerelease on GitHub, so
     /// [`Target::Latest`] skips it by design — that filter is what keeps a robot from drifting
     /// onto a build no one has validated, and it has no opt-out. This variant is the opt-*in*:
     /// an operator with root saying "the one being tested", once.
     ///
-    /// The candidate carries the same version the promoted release will (`0.3.0`, not
-    /// `0.3.0-rc1`) and is signed with the same release key. What separates the two streams is
+    /// The candidate carries the stable version it is testing (`0.3.0`, not `0.3.0-rc1`) and is
+    /// signed with the release key. What separates the two streams is
     /// the tag it lives under, which is why resolving this needs its own prefix rather than a
     /// flag on the existing one.
     Staging,

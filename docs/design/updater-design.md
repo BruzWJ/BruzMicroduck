@@ -55,10 +55,9 @@ Cadence expectation *for client-facing releases*: a daemon release every ~2–3
 weeks for the first months, then every ~2–3 months. The model updates on its own
 separate rhythm.
 
-But **internal** iteration runs far hotter (the prototype saw ~8 tags in 3 days),
-so the system must serve two rhythms: a fast internal `staging` stream and a slow,
-curated `stable` stream (§16.3). That's what makes the staging channel and
-scripted rollback load-bearing rather than optional polish.
+But **internal** iteration runs far hotter (the prototype saw ~8 builds in 3 days), so branch builds
+use the separate dev-key path while customer robots see only manually published stable releases
+(§16.3). Scripted rollback remains load-bearing rather than optional polish.
 
 ### 3.1 Prerequisite: the robot needs its own internet access
 
@@ -713,9 +712,8 @@ the releases published to rescue a broken fleet.
 withdrawn. Ordinary releases wait because *when a robot restarts is its owner's decision*,
 which is the decision the whole app-driven update flow exists to give them.
 
-`all` is the canary and bench setting, and it is what makes §16.2's Tier 2 configurable:
-lab robots that track `staging` and install each candidate. Shipping it to client robots
-would take the restart decision away from them.
+`all` is the bench setting. Shipping it to client robots would take the restart decision away from
+them.
 
 Whatever the policy, an unattended apply is an **ordinary** apply. It runs the same
 preflight — so a robot that is walking or has a remote session refuses and retries at the
@@ -1256,7 +1254,7 @@ lives in the update *mechanism*, which is pure software and testable in CI with
 ### 16.1 Design for testability
 
 - **Real code path against test artifacts.** `updaterd` reads its source/manifest
-  from config, so tests point it at a local dir or a `staging` channel and drive
+  from config, so tests point it at a local directory and drive
   the *exact production code* — no mock updater that drifts from reality.
 - **Scriptable, idempotent primitives** (via `robotctl`, §15):
   `apply --version X`, `rollback`, `pin <version>` / `unpin`, `model select`,
@@ -1314,101 +1312,58 @@ Nothing else covers this. The protocol crate's own round-trip tests cannot detec
 because both sides share the struct; a `dispatch`-level unit test in `robotd` catches a
 changed reply shape cheaply, but only a real process exercises the socket itself.
 
-**Tier 2 — on-device acceptance (canary robots).** Hardware-dependent behavior
-(gait, motors, media) needs real boards. Keep a few **lab/canary robots** that
-track `staging`, auto-update on each candidate, run a scripted acceptance test
-(motor sweep, gait smoke test, media init, health self-test), and report
-pass/fail + the update log. Repeatable because reset-to-golden and
-`apply --version` are scriptable.
+**Tier 2 — on-device acceptance.** Hardware-dependent behavior (gait, motors, media) needs a real
+board. Install the selected branch build on a lab robot, run the scripted acceptance test (motor
+sweep, gait smoke test, media init, health self-test), and report pass/fail plus the update log.
+Repeatable because reset-to-golden and `apply --version` are scriptable.
 
-### 16.3 Channels & promotion
+### 16.3 Release publishing
 
-**Implemented** as three GitHub Actions workflows plus a `cargo xtask` publisher
-(`.github/workflows/`, `xtask/`):
+The release path has one operator action and produces one stable GitHub release:
 
-| | |
-|---|---|
-| `ci.yml` | fmt, clippy, tests, plus `board-test.sh` — the only job that proves the binaries run on aarch64 Linux |
-| `release.yml` | on a `daemon-staging-v*` tag: cross-build, package, sign, **verify with the robot's own code path**, publish a prerelease |
-| `promote.yml` | manual: re-sign a *stable* manifest, copy the validated artifact onto the stable release, retire staging |
+1. Bump `[workspace.package].version`, commit, and push the default branch.
+2. Click **Actions → release → Run workflow** with the default branch selected.
+3. GitHub freezes that commit, cross-builds the board binaries, packages and signs them, installs
+   the package through the real updater as verification, creates `daemon-v<version>` at that exact
+   SHA, uploads every asset, and publishes it as the stable/latest release.
 
-The publisher is a Rust `xtask` rather than a shell script for one reason: it reuses the
-exact `minisign`, `tar`, `zstd` and `sha2` crates the updater verifies with. A shell
-version would depend on separately-installed binaries whose behaviour could drift from
-what the robot accepts — the last place a difference should be able to hide. It also
-links the *full* `minisign` crate (which can sign) while the daemon links only
-`minisign-verify` (which cannot).
+There are no workflow inputs, local tag commands, staging releases, or promotion step. The workflow
+uses its scoped `GITHUB_TOKEN` to create the tag and release; `DUCK_TOKEN` and personal access tokens
+are unrelated. The release signing key and passphrase still have to exist in the `release` GitHub
+environment because GitHub cannot invent the private key already trusted by the robots.
 
-Three properties worth stating, because each is asserted rather than assumed:
+The recipe is split across `release.yml` (source/version validation) and `_build-release.yml`
+(build, package, sign, verify, publish). That is an implementation split, not a second release. The
+publisher remains a Rust `xtask` so it uses the same minisign, tar, zstd, and SHA-256 formats that the
+updater verifies.
 
-- **Promotion never rebuilds.** The stable manifest carries the staging `sha256`, and
-  promotion copies the staging artifact onto the stable release after checking that
-  digest, so the bytes clients receive are the bytes the canary validated; a test asserts
-  the digest is unchanged.
+The workflow enforces these invariants:
 
-  The manifest used to point back at the *staging* release rather than copy, on the
-  reasoning that one set of bytes cannot diverge while two can. What that overlooked is
-  that the robot verifies `sha256` before installing, so a diverged copy could never
-  install silently — while a stable channel whose artifacts live under a tag named like
-  scaffolding is one cleanup away from breaking. It broke: deleting the
-  `daemon-staging-v0.1.x` releases left `daemon-v0.1.0`, `v0.1.1` and `v0.1.4` correctly
-  signed and pointing at a 404. Stable releases are now self-contained and staging is
-  retired by `promote.yml` itself.
-- **Artifacts are reproducible.** Fixed mtimes in the tar mean the same inputs produce
-  the same archive, so a rebuild can be compared against what shipped; a test asserts two
-  packages of the same inputs hash identically.
-- **`release.yml` verifies before publishing.** It installs the release through the real
-  engine (`updaterd install --from`, over a `LocalDir` source) and asserts the binaries land
-  executable. If the updater cannot accept a release, nobody can download it.
+- The selected ref must be the repository's default branch, and the checked-out SHA must equal the
+  dispatch SHA.
+- The tag is derived from the stable SemVer in `Cargo.toml`; `xtask package` independently checks the
+  same version.
+- An existing published version is never overwritten. Only a draft left by the same commit may be
+  resumed.
+- `gh release create` receives the exact source SHA and the assets together. It uploads through a
+  draft and publishes only after the uploads succeed, then the workflow verifies the final tag and
+  release state.
+- Before publication, `updaterd install --from` accepts the signed artifact and the workflow checks
+  the installed binaries, recorded revision, and bootstrap-binary digest.
+- Fixed mtimes keep artifacts reproducible, so a rebuild from identical inputs can be compared with
+  what shipped.
 
-Two guards exist because both mistakes are easy: `package` refuses a `--version` that
-doesn't match `Cargo.toml` (tagging without bumping), and `promote` refuses a version
-that doesn't match the staging manifest.
-
-- Channels: `staging` → `stable`. CI publishes candidates to `staging`.
-- A canary robot takes a candidate with **one flag, per command**:
-
-  ```
-  sudo robotctl update apply daemon --staging
-  ```
-
-  An earlier draft said canaries "auto-pull staging", and that was not implementable as written:
-  `newest_version` skips anything GitHub flags as a prerelease *and* anything carrying a semver
-  prerelease component. That filter is exactly what keeps a customer robot off candidate builds,
-  so it stays, and `--staging` is its only opt-in — a second scan under `staging_tag_prefix`
-  which allows the *GitHub* flag while still excluding semver prereleases, so a branch build can
-  never be mistaken for a candidate. `latest_manifest` is untouched, so `auto_apply` and the
-  periodic check keep resolving stable: nothing drifts onto a candidate without a person and
-  root.
-
-  The first attempt at this was a board pointed at staging by editing `tag_prefix`, which
-  reported `no releases in … with tag prefix "daemon-staging-v"` against a candidate sitting
-  right there — the prefix said where to look, and the prerelease filter refused to look.
-
-  **`--staging` refuses when the channel is behind the board.** A release promoted straight to
-  stable publishes no candidate — a supported path, and the one `release.yml` labels "NOT
-  canaried" — so the staging scan keeps answering with the last version that did publish one.
-  On a board already past that version, `--staging` used to install it: verified, swapped, and
-  then reverted when a daemon the older release does not contain failed to start. The rollback
-  was right and said nothing about the cause, so the resolved candidate is now compared against
-  what is installed and the refusal names both versions. `--staging --version X` is unguarded and
-  is the way past — an operator naming a candidate is stating intent, which is also how the one
-  a board just rolled back from gets reinstalled.
-- On green, **promote**: repoint `stable` at the *same bytes* already validated —
-  re-sign the `stable` manifest to reference the identical tarball + hash. No
-  rebuild, no re-flash, no hand-copying files. Promotion is one command / one
-  tap and ships exactly what was tested.
-- Bad `stable` → the same move in reverse: repoint `stable` at the prior
-  known-good manifest; `min_supported` (§8.1) then pulls robots forward once the
-  fix lands.
+Bad stable releases are handled by fixing the source, bumping the version, and running the same
+workflow again. The updater's health gate and rollback protect a robot during installation; release
+history remains immutable and auditable.
 
 ### 16.4 Provenance
 
 `version.toml` and the update log record each artifact's git SHA + hash, so "the
 exact version a client is running" is always reproducible in the lab.
 
-This closes the loop that hurt last time: **humans decide *whether* to promote;
-the machine does revert / apply / verify identically every time.**
+This closes the loop that hurt last time: **humans decide when to publish; the machine builds,
+signs, verifies, applies, and rolls back identically every time.**
 
 ### 16.5 Bootstrap state — over for the health gate, not for the payload
 

@@ -317,7 +317,7 @@ install_config() {
 # how this failed the first time it was run against a real board. The engine already
 # re-resolves its own download URLs through the release API (`resolve_download` in
 # `source/github.rs`); this script was the one place that had not caught up, because until a
-# release was promoted there was nothing here to exercise.
+# a stable release existed there was nothing here to exercise.
 resolve_bootstrap_asset() {
     # Idempotent: `main` resolves early so `install_config` knows the tag, and
     # `bootstrap_first_release` still asks for itself so it stands alone. One API call either
@@ -331,8 +331,7 @@ resolve_bootstrap_asset() {
     if ! fetch "$api" "$json"; then
         rm -f "$json"
         die "cannot read ${api}
-  A stable, non-prerelease release must exist. If only staging releases have been
-  published, promote one first:  gh workflow run promote --field version=X.Y.Z"
+  A stable release must exist. Run the release workflow in GitHub Actions first."
     fi
 
     # Parsed with grep rather than jq: this script runs before anything is installed, and
@@ -358,7 +357,7 @@ resolve_bootstrap_asset() {
     if [ -z "$id" ]; then
         rm -f "$json_compact"
         die "the latest release has no asset named ${BOOTSTRAP_ASSET}.
-  A promoted release must carry it — release.yml attaches it, promote.yml copies it across."
+  The release workflow must finish successfully before provisioning a board."
     fi
 
     # The tag as well, because the config has to come from the same version as the binary.
