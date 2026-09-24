@@ -116,6 +116,17 @@ pub const REGISTRY: &[Entry] = &[
         Kind::Bool,
         "Read the bus with fast sync read — needs XL330 firmware v46+",
     ),
+    // ── [body_imu] ───────────────────────────────────────────────────────────
+    entry(
+        "body_imu.bus",
+        Kind::Text,
+        "Qwiic i2c-dev path for the required trunk IMU",
+    ),
+    entry(
+        "body_imu.address",
+        Kind::Integer,
+        "Seven-bit body LSM6DSV16X address (normally 0x6b)",
+    ),
     // ── [control] ────────────────────────────────────────────────────────────
     entry("control.hz", Kind::Integer, "Control loop rate"),
     entry(
@@ -404,7 +415,7 @@ pub const REGISTRY: &[Entry] = &[
     feature(
         "head_imu.enabled",
         Kind::Bool,
-        "Read the head IMU at all — default off on zero3 (BMI088, ~4% of a core), on on beta (LSM6DSV16X, fused on the chip)",
+        "Read the head IMU — default off on zero3's shared Qwiic bus, on on beta's face board",
     ),
     // ── [audio] ──────────────────────────────────────────────────────────────
     feature(
@@ -618,6 +629,7 @@ mod tests {
         // build certainly has must all be found.
         for known in [
             "bus",
+            "body_imu",
             "control",
             "update_gate",
             "policy",

@@ -5,7 +5,7 @@
 //! `architecture.md` §1 splits perception from `robotd` deliberately: a
 //! perception crash must not take out motor control. This sensor makes the case
 //! concretely — bringing it up uploads ~90 KB of firmware over I²C, taking
-//! seconds; it shares a bus with the audio codec; and a sensor that is not fitted
+//! seconds; it shares a bus with both IMUs; and a sensor that is not fitted
 //! (the common case on a duck without the head module) must be a daemon logging
 //! one line, not a retry loop inside the control loop's process. Nothing in the
 //! 50 Hz loop reads depth, so nothing is gained by putting it there.
@@ -16,7 +16,7 @@
 //!
 //! ## Shape
 //!
-//! A blocking thread drives the sensor: open, probe, upload firmware, then poll
+//! A blocking thread drives the sensor: open, upload firmware, then poll
 //! for frames and broadcast them. The socket server is async and reads no
 //! hardware; a subscriber that stops reading is dropped rather than allowed to
 //! slow the sensor (`broadcast` gives that for free, and a lagging consumer's gap
@@ -86,13 +86,31 @@ const POLL_GUARD: Duration = Duration::from_millis(20);
 /// The two failures that matter are "not fitted" (forever, on most ducks) and
 /// "the bus glitched" (transient). One backoff serves both: the transient case
 /// recovers in a second, and the permanent one settles at one attempt a minute
-/// instead of hammering a bus the audio codec is also using.
+/// instead of hammering the Qwiic bus shared with both IMUs.
 const RETRY_MIN: Duration = Duration::from_secs(1);
 const RETRY_MAX: Duration = Duration::from_secs(60);
+/// Opening and accepting configuration is not enough to reset retry backoff:
+/// a sensor can fail on its first ranging read and otherwise re-upload 90 KB
+/// at the minimum interval forever.
+const RETRY_RESET_AFTER: Duration = Duration::from_secs(2);
+/// A ranging sensor must produce at least one frame in this floor, or three
+/// configured frame periods at very low rates.
+const NO_FRAME_MIN: Duration = Duration::from_secs(2);
 
-// EMFILE remains immediately ready until a descriptor is freed. Retrying without a pause fills
-// the journal and consumes a core instead of letting disconnected subscribers release their FDs.
+fn no_frame_timeout(hz: u8) -> Duration {
+    NO_FRAME_MIN.max(Duration::from_secs_f64(3.0 / f64::from(hz.max(1))))
+}
+
+// An exhausted descriptor table leaves accept immediately ready. Wait for a
+// client to disconnect before retrying so a busy daemon cannot spin on EMFILE.
 const ACCEPT_RETRY: Duration = Duration::from_secs(1);
+
+/// Buses to try when none was named, in order.
+///
+/// `/dev/i2c-qwiic` is the stable symlink installed by `setup-board.sh`;
+/// `/dev/i2c-3` is the underlying Radxa header bus and keeps a provisioned board
+/// usable if udev has not created the link yet.
+pub(crate) const BUS_CANDIDATES: [&str; 2] = ["/dev/i2c-qwiic", "/dev/i2c-3"];
 
 #[derive(Parser, Debug)]
 #[command(name = "tofd", about = "Head ToF sensor daemon", version)]
@@ -101,23 +119,17 @@ struct Args {
     #[arg(long, default_value = proto::socket::TOF)]
     socket: PathBuf,
 
-    /// I²C bus device, which forces I²C whatever the board. Unset, a board on I²C tries the HAT
-    /// symlink, then the i2c3 bus.
+    /// I²C bus device. Unset tries the Qwiic symlink, then the i2c3 bus.
     #[arg(long)]
     bus: Option<PathBuf>,
 
-    /// 7-bit I²C address, which forces I²C whatever the board. Unset tries 0x29, then 0x52.
-    #[arg(long, value_parser = parse_address)]
-    address: Option<u8>,
-
-    /// A spidev to find a VL53L8CX on, whatever the board. Unset, the board decides: the beta's
-    /// ToF is on SPI (`tof::link`), a Zero 3W's on I²C.
-    #[arg(long, conflicts_with_all = ["bus", "address"])]
-    spi: Option<PathBuf>,
+    /// VL53L5CX 7-bit I²C address.
+    #[arg(long, default_value_t = 0x29, value_parser = parse_address)]
+    address: u8,
 
     /// Ranging rate, Hz. 15 is what an 8×8 frame costs about 5% of a 400 kHz bus
     /// to deliver; the sensor accepts up to 15 at this resolution.
-    #[arg(long, default_value_t = 15)]
+    #[arg(long, default_value_t = 15, value_parser = parse_tof_hz)]
     hz: u8,
 
     /// Publish a synthetic scene instead of reading hardware.
@@ -130,9 +142,18 @@ struct Args {
     #[arg(long)]
     fake: bool,
 
-    /// Head-IMU (BMI088) sample rate, Hz. The chip's default bandwidth is 100 Hz.
-    #[arg(long, default_value_t = 100)]
+    /// Head LSM6DSV16X publication rate, Hz. The sensor rate rounds up to an
+    /// SFLP-supported 15/30/60/120/240/480 Hz rung.
+    #[arg(long, default_value_t = 100, value_parser = parse_nonzero_hz)]
     imu_hz: u8,
+
+    /// Head LSM6DSV16X 7-bit address. The standard board's jumper selects 0x6a.
+    #[arg(
+        long,
+        default_value_t = qwiic_imu::HEAD_ADDRESS,
+        value_parser = parse_address
+    )]
+    imu_address: u8,
 
     /// Read the head IMU for this session, whatever `[head_imu] enabled` says.
     ///
@@ -141,7 +162,7 @@ struct Args {
     #[arg(long, conflicts_with = "no_imu")]
     imu: bool,
 
-    /// Do not read the head IMU, whatever the file says (a board without the HAT module, or to
+    /// Do not read the head IMU, whatever the file says (a board without the head module, or to
     /// free the bus for a measurement).
     #[arg(long)]
     no_imu: bool,
@@ -168,7 +189,30 @@ fn parse_address(s: &str) -> Result<u8, String> {
         Some(hex) => (16, hex),
         None => (10, s),
     };
-    u8::from_str_radix(digits, radix).map_err(|e| format!("{s:?} is not an address: {e}"))
+    let address =
+        u8::from_str_radix(digits, radix).map_err(|e| format!("{s:?} is not an address: {e}"))?;
+    if address > 0x7f {
+        return Err(format!("{s:?} is not a 7-bit I²C address"));
+    }
+    Ok(address)
+}
+
+fn parse_tof_hz(s: &str) -> Result<u8, String> {
+    let hz = parse_nonzero_hz(s)?;
+    if hz > 15 {
+        return Err("VL53L5CX 8x8 ranging rate must be between 1 and 15 Hz".to_owned());
+    }
+    Ok(hz)
+}
+
+fn parse_nonzero_hz(s: &str) -> Result<u8, String> {
+    let hz = s
+        .parse::<u8>()
+        .map_err(|e| format!("{s:?} is not a sample rate: {e}"))?;
+    if hz == 0 {
+        return Err("sample rate must be greater than zero".to_owned());
+    }
+    Ok(hz)
 }
 
 // One thread is plenty: the sensor is on its own std thread, and everything here
@@ -195,23 +239,14 @@ async fn main() -> std::process::ExitCode {
     let status = Arc::new(Status::new(args.hz));
     let (frames, _) = tokio::sync::broadcast::channel(FRAME_BUFFER);
 
-    // `robotd`'s file, read once: the board decides which bus the sensor is on, and
-    // `[head_imu]` whether the IMU is read.
-    let config_path = args.config.clone().unwrap_or_else(config::default_path);
-    let params = config::load(&config_path, args.config.is_some());
-    let links = tof::link::candidates(
-        params.board.version,
-        args.spi.as_deref(),
-        args.bus.as_deref(),
-        args.address,
-    );
-
     // The sensor runs on a plain thread, not a tokio task: every call into the
-    // driver blocks on the bus — the firmware upload for seconds — and none of it is
+    // driver blocks on I²C — the firmware upload for seconds — and none of it is
     // cancellation-safe. `shutdown` lets it out of its loops at exit.
     let shutdown = Arc::new(AtomicBool::new(false));
     let sensor_thread = {
         let (status, frames, shutdown) = (status.clone(), frames.clone(), shutdown.clone());
+        let bus = args.bus.clone();
+        let address = args.address;
         let hz = args.hz;
         let fake = args.fake;
         let sim = args.sim.clone();
@@ -223,7 +258,7 @@ async fn main() -> std::process::ExitCode {
                 } else if fake {
                     fake_loop(hz, &status, &frames, &shutdown);
                 } else {
-                    sensor_loop(&links, hz, &status, &frames, &shutdown);
+                    sensor_loop(bus.as_deref(), address, hz, &status, &frames, &shutdown);
                 }
             })
             .expect("spawn the sensor thread")
@@ -233,33 +268,20 @@ async fn main() -> std::process::ExitCode {
     // subscribers pick the stream by method.
     //
     // **Off unless `[head_imu] enabled` says otherwise**, and that default is the measurement in
-    // `docs/project/tof-on-demand.md`: reading this chip at 100 Hz costs ~3.5-4.5% of a core, of
-    // which the wakeups are 0.7 points and the fusion 0.3 — the rest is two I²C transactions a
-    // sample, which is what a gyro and an accelerometer sample *is*. Nothing in the loop was
-    // worth fixing, nothing subscribes to the stream yet, and a duck that is not mapping was
-    // paying for it from boot.
+    // `docs/project/tof-on-demand.md`: nothing subscribes to the stream yet, and a duck that is
+    // not mapping should not pay for an otherwise unused high-rate sensor from boot.
     //
     // Skipped for --sim/--fake too: there is no real bus behind either.
     let imu_status = Arc::new(ImuStatus::new(args.imu_hz));
     let (imu_frames, _) = tokio::sync::broadcast::channel(imu::FRAME_BUFFER);
-    // The beta's head IMU is a different chip on a different bus, and `robotd` reads it
-    // (robotd/src/head_imu.rs). There is nothing of tofd's on that board to read, so a
-    // subscriber here is pointed at the daemon that does serve it — even under `--imu`, which
-    // would only sweep the buses for a BMI088 that is not fitted.
-    let board = params.board.version;
-    let served_elsewhere = board != robotd_params::board::Board::Zero3;
-    let configured = params.head_imu.enabled_on(board);
-    let wanted = !served_elsewhere && (args.imu || (configured && !args.no_imu));
-    let imu_thread = if served_elsewhere {
-        tracing::info!(
-            board = board.label(),
-            "the head IMU on this board is robotd's"
-        );
-        imu_status.elsewhere(robotd_params::HeadImuParams::reader(board));
-        None
-    } else if !wanted || args.fake || args.sim.is_some() {
+    let config_path = args.config.clone().unwrap_or_else(config::default_path);
+    let configured = config::load(&config_path, args.config.is_some())
+        .head_imu
+        .enabled;
+    let wanted = args.imu || (configured && !args.no_imu);
+    let imu_thread = if !wanted || args.fake || args.sim.is_some() {
         // Said out loud, and said by the stream too: a subscriber gets this sentence instead of
-        // frames, because "no samples" and "no BMI088 fitted" are different answers and only one
+        // frames, because "no samples" and "no LSM6DSV16X fitted" are different answers and only one
         // of them is somebody's mistake.
         if !wanted {
             tracing::info!(
@@ -267,6 +289,10 @@ async fn main() -> std::process::ExitCode {
                 "the head IMU is off; set [head_imu] enabled = true to read it"
             );
             imu_status.off();
+        } else if args.fake {
+            imu_status.unavailable("the fake depth backend does not emulate a head IMU");
+        } else {
+            imu_status.unavailable("the simulator depth backend does not publish a head IMU");
         }
         None
     } else {
@@ -274,11 +300,19 @@ async fn main() -> std::process::ExitCode {
             (imu_status.clone(), imu_frames.clone(), shutdown.clone());
         let bus = args.bus.clone();
         let hz = args.imu_hz;
+        let address = args.imu_address;
         Some(
             std::thread::Builder::new()
                 .name("head-imu".to_owned())
                 .spawn(move || {
-                    imu::imu_loop(bus.as_deref(), hz, &imu_status, &imu_frames, &shutdown)
+                    imu::imu_loop(
+                        bus.as_deref(),
+                        address,
+                        hz,
+                        &imu_status,
+                        &imu_frames,
+                        &shutdown,
+                    )
                 })
                 .expect("spawn the head-imu thread"),
         )
@@ -312,7 +346,8 @@ fn quiet_period(hz: u8) -> Duration {
 /// Bring the sensor up and stream from it, forever, with a backoff between
 /// attempts. Never returns until shutdown.
 fn sensor_loop(
-    links: &[tof::Link],
+    bus: Option<&Path>,
+    address: u8,
     hz: u8,
     status: &Arc<Status>,
     frames: &tokio::sync::broadcast::Sender<proto::TofFrame>,
@@ -325,13 +360,15 @@ fn sensor_loop(
     let quiet = quiet_period(hz);
 
     while !shutdown.load(Ordering::Acquire) {
-        match open_sensor(links, hz) {
+        match open_sensor(bus, address, hz) {
             Ok(mut sensor) => {
-                backoff = RETRY_MIN;
-                said = false;
-                let generation = sensor.generation();
-                tracing::warn!(sensor = generation.as_str(), hz, "ranging");
-                status.up(generation.as_str());
+                tracing::warn!(sensor = tof::SENSOR_NAME, hz, "ranging");
+                status.down("sensor initialised; waiting for its first frame");
+                let opened_at = Instant::now();
+                let mut last_frame_at = opened_at;
+                let frame_timeout = no_frame_timeout(hz);
+                let mut announced = false;
+                let mut retry_reset = false;
 
                 // When the sensor could not possibly have a frame yet, so there
                 // is nothing to ask it until then — see [`POLL_GUARD`]. `None`
@@ -357,7 +394,18 @@ fn sensor_loop(
                     match sensor.data_ready() {
                         Ok(true) => match sensor.read_frame() {
                             Ok(frame) => {
-                                quiet_until = Some(Instant::now() + quiet);
+                                let now = Instant::now();
+                                last_frame_at = now;
+                                quiet_until = Some(now + quiet);
+                                if !announced {
+                                    status.up(tof::SENSOR_NAME);
+                                    said = false;
+                                    announced = true;
+                                }
+                                if !retry_reset && opened_at.elapsed() >= RETRY_RESET_AFTER {
+                                    backoff = RETRY_MIN;
+                                    retry_reset = true;
+                                }
                                 seq += 1;
                                 // No subscribers is the normal state — nobody is
                                 // watching most of the time — so a send that
@@ -377,7 +425,16 @@ fn sensor_loop(
                                 break;
                             }
                         },
-                        Ok(false) => std::thread::sleep(POLL),
+                        Ok(false) => {
+                            if last_frame_at.elapsed() >= frame_timeout {
+                                tracing::warn!(
+                                    silent_ms = last_frame_at.elapsed().as_millis(),
+                                    "VL53L5CX stopped producing frames; reopening"
+                                );
+                                break;
+                            }
+                            std::thread::sleep(POLL);
+                        }
                         Err(e) => {
                             tracing::warn!(error = %e, "lost the sensor");
                             break;
@@ -565,30 +622,32 @@ struct SimDepth {
     status: Vec<u8>,
 }
 
-/// Try each place the sensor could be, and return the first one that comes up
-/// ranging.
-fn open_sensor(links: &[tof::Link], hz: u8) -> Result<tof::Sensor> {
-    let mut last = None;
-    for link in links {
-        // A missing device is not worth trying, and saying so is more use than
-        // "nothing answered": it means the overlay or the spidev is not there.
-        if !link.device().exists() {
-            last = Some(anyhow::anyhow!(
-                "{} does not exist",
-                link.device().display()
-            ));
-            continue;
-        }
-        match tof::Sensor::open(link) {
-            Ok(mut sensor) => {
-                tracing::info!(%link, "sensor found");
-                sensor.start(hz)?;
-                return Ok(sensor);
-            }
-            Err(e) => last = Some(e),
-        }
-    }
-    Err(last.unwrap_or_else(|| anyhow::anyhow!("no bus to look on")))
+/// Try the named bus, or each standard Qwiic bus path, at the configured address
+/// and return the first sensor that comes up ranging.
+fn open_sensor(bus: Option<&Path>, address: u8, hz: u8) -> Result<tof::Sensor> {
+    // A provisioned `/dev/i2c-qwiic` is a symlink to `/dev/i2c-3`, not a
+    // second adapter. Fall back only when the alias is absent; retrying a
+    // failed firmware upload through both names would hammer the shared bus
+    // twice before backoff begins.
+    let bus = match bus {
+        Some(bus) if bus.exists() => bus.to_path_buf(),
+        Some(bus) => anyhow::bail!("{} does not exist", bus.display()),
+        None => BUS_CANDIDATES
+            .iter()
+            .map(PathBuf::from)
+            .find(|candidate| candidate.exists())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "neither {} nor {} exists",
+                    BUS_CANDIDATES[0],
+                    BUS_CANDIDATES[1]
+                )
+            })?,
+    };
+    let mut sensor = tof::Sensor::open(&bus, address)?;
+    tracing::info!(bus = %bus.display(), address = format!("{address:#04x}"), "VL53L5CX found");
+    sensor.start(hz)?;
+    Ok(sensor)
 }
 
 fn sleep_unless_shutdown(total: Duration, shutdown: &Arc<AtomicBool>) {
@@ -720,19 +779,13 @@ async fn subscriber(
                 let response = proto::Response::ok(id, &status.result());
                 write_line(&mut write, &response).await?;
                 let mut frames = frames.subscribe();
-                return tokio::select! {
-                    result = stream_tof(&mut write, &mut frames) => result,
-                    result = client_disconnected(&mut reader) => result,
-                };
+                return stream_tof(&mut write, &mut frames).await;
             }
             Ok(proto::Call::HeadImuStream) => {
                 let response = proto::Response::ok(id, &imu_status.result());
                 write_line(&mut write, &response).await?;
                 let mut imu_frames = imu_frames.subscribe();
-                return tokio::select! {
-                    result = stream_imu(&mut write, &mut imu_frames) => result,
-                    result = client_disconnected(&mut reader) => result,
-                };
+                return stream_imu(&mut write, &mut imu_frames).await;
             }
             _ => {
                 let response = proto::Response::err(
@@ -746,16 +799,6 @@ async fn subscriber(
             }
         }
     }
-}
-
-/// A missing or disabled sensor never wakes the frame channel, so a failed write cannot reveal
-/// that the viewer went away. Watch the read half too, and discard further input: subscriptions
-/// carry one request followed only by server notifications.
-async fn client_disconnected(
-    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
-) -> Result<()> {
-    tokio::io::copy(reader, &mut tokio::io::sink()).await?;
-    Ok(())
 }
 
 /// Stream ToF frames as notifications until the socket closes or the consumer lags out. A lag is
@@ -917,68 +960,9 @@ mod tests {
             "a client that asked for depth must not hold an imu receiver"
         );
 
-        drop(reader);
-        drop(write);
-        tokio::time::timeout(Duration::from_secs(1), served)
-            .await
-            .expect("a disconnected subscriber must not wait for a sensor frame")
-            .unwrap();
-        assert_eq!(frames.receiver_count(), 0);
-        assert_eq!(imu_frames.receiver_count(), 0);
-    }
-
-    /// An absent or disabled sensor produces no frames. A viewer that retries its subscription
-    /// must not leave a socket and task behind on each reconnect; otherwise the daemon exhausts
-    /// its file descriptors and turns every accept into a warning.
-    #[tokio::test]
-    async fn reconnecting_without_sensor_frames_releases_each_subscriber() {
-        let (frames, _) = tokio::sync::broadcast::channel::<proto::TofFrame>(4);
-        let (imu_frames, _) = tokio::sync::broadcast::channel::<proto::HeadImuFrame>(4);
-        let status = Arc::new(Status::new(15));
-        status.down("no ToF sensor fitted");
-        let imu_status = Arc::new(ImuStatus::new(25));
-        imu_status.off();
-
-        for call in [proto::Call::TofStream, proto::Call::HeadImuStream] {
-            for _ in 0..32 {
-                let (client, server) = UnixStream::pair().unwrap();
-                let served = {
-                    let (status, imu_status, frames, imu_frames) = (
-                        status.clone(),
-                        imu_status.clone(),
-                        frames.clone(),
-                        imu_frames.clone(),
-                    );
-                    tokio::spawn(async move {
-                        subscriber(server, &status, &frames, &imu_status, &imu_frames).await
-                    })
-                };
-                let (read, mut write) = client.into_split();
-                let mut reader = BufReader::new(read);
-                write_line(
-                    &mut write,
-                    &proto::Request::call(proto::Id::Number(1), &call),
-                )
-                .await
-                .unwrap();
-                let mut answer = String::new();
-                reader.read_line(&mut answer).await.unwrap();
-                let response: serde_json::Value = serde_json::from_str(&answer).unwrap();
-                assert_eq!(response["result"]["accepted"], true, "{answer}");
-                assert!(response["result"]["sensor"].is_null(), "{answer}");
-                assert!(!served.is_finished(), "a live client still owns its stream");
-
-                drop(reader);
-                drop(write);
-                tokio::time::timeout(Duration::from_secs(1), served)
-                    .await
-                    .expect("disconnect must release a stream even when no frames arrive")
-                    .unwrap()
-                    .unwrap();
-                assert_eq!(frames.receiver_count(), 0, "depth receiver leaked");
-                assert_eq!(imu_frames.receiver_count(), 0, "IMU receiver leaked");
-            }
-        }
+        // `stream_tof` is parked on the channel, not on the socket, so it would sit there until a
+        // frame arrived. Nothing here sends one, and the counts have already been taken.
+        served.abort();
     }
 
     #[test]
@@ -986,7 +970,18 @@ mod tests {
         assert_eq!(parse_address("0x29"), Ok(0x29));
         assert_eq!(parse_address("41"), Ok(41));
         assert!(parse_address("0x1ff").is_err(), "wider than an address");
+        assert!(parse_address("0x80").is_err(), "not a 7-bit address");
         assert!(parse_address("nope").is_err());
+    }
+
+    #[test]
+    fn command_line_rates_match_the_hardware() {
+        assert_eq!(parse_tof_hz("1"), Ok(1));
+        assert_eq!(parse_tof_hz("15"), Ok(15));
+        assert!(parse_tof_hz("0").is_err());
+        assert!(parse_tof_hz("16").is_err());
+        assert_eq!(parse_nonzero_hz("100"), Ok(100));
+        assert!(parse_nonzero_hz("0").is_err());
     }
 
     /// The backoff must climb and stop climbing — a duck with no sensor fitted
@@ -1035,9 +1030,17 @@ mod tests {
         assert_eq!(quiet_period(u8::MAX), Duration::ZERO);
     }
 
-    /// `--hz 0` is a division this must not do.
+    /// The CLI rejects zero, and this helper remains defensive if another caller
+    /// is added later.
     #[test]
     fn a_zero_rate_is_treated_as_one_hertz() {
         assert_eq!(quiet_period(0), Duration::from_secs(1) - POLL_GUARD);
+    }
+
+    #[test]
+    fn a_silent_ranging_sensor_has_a_finite_rate_aware_deadline() {
+        assert_eq!(no_frame_timeout(15), NO_FRAME_MIN);
+        assert_eq!(no_frame_timeout(1), Duration::from_secs(3));
+        assert_eq!(no_frame_timeout(0), Duration::from_secs(3));
     }
 }

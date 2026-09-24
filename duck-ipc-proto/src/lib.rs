@@ -952,10 +952,9 @@ pub mod method {
     /// One 8×8 depth frame, pushed after [`TOF_STREAM`].
     pub const TOF_FRAME: &str = "tof.frame";
 
-    /// Subscribe to the head IMU. Served by `tofd` on `zero3` (the BMI088 on the HAT, same I²C
-    /// bus as the ToF) and by `robotd` on `beta` (the face board's LSM6DSV16X); the other daemon
-    /// answers with `unavailable` naming the right one. The answer describes the sensor, then
-    /// [`HEAD_IMU_FRAME`] notifications arrive until the connection closes.
+    /// Subscribe to the head IMU. `tofd` serves the Qwiic LSM6DSV16X, while `robotd` serves
+    /// the beta face-board IMU. The answer describes the sensor, then [`HEAD_IMU_FRAME`]
+    /// notifications arrive until the connection closes.
     pub const HEAD_IMU_STREAM: &str = "head_imu.stream";
 
     /// One head-IMU sample, pushed after [`HEAD_IMU_STREAM`].
@@ -1166,8 +1165,7 @@ pub enum Call {
     PadInput,
     /// Subscribe to the ToF depth stream. Answered by `tofd`.
     TofStream,
-    /// Subscribe to the head IMU (`tofd` on zero3, `robotd` on beta); see
-    /// [`method::HEAD_IMU_STREAM`].
+    /// Subscribe to the head IMU; see [`method::HEAD_IMU_STREAM`].
     HeadImuStream,
 }
 
@@ -3611,8 +3609,8 @@ pub struct HealthResult {
     /// rather than overrunning work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_loop: Option<LoopHealth>,
-    /// What the motor bus is doing. Present on every answer; the zero values are meaningful
-    /// ("no failures"), not missing data.
+    /// What the control loop's required hardware reads are doing: the Dynamixel servo burst and
+    /// the body-IMU poll. Present on every answer; zero means "no failures", not missing data.
     #[serde(default)]
     pub bus: BusHealth,
     /// Orientation source. Absent from an older `robotd`.
@@ -3639,7 +3637,7 @@ pub struct LoopHealth {
     pub last_tick_age_ms: u64,
 }
 
-/// The motor bus, as the loop sees it.
+/// Required control-hardware I/O, as the loop sees it.
 ///
 /// `#[serde(default)]` for the reason spelled out on [`ImuHealth`], and it applies here even more
 /// plainly: these are failure counters whose zero the doc comments below already call meaningful.
@@ -3647,12 +3645,13 @@ pub struct LoopHealth {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BusHealth {
-    /// Consecutive failed reads; any success resets it. One is ordinary on a serial bus,
-    /// which is why the cumulative count is not what is reported.
+    /// Consecutive failed complete reads; any successful servo-plus-IMU sample resets it. One
+    /// transient on either physical bus is tolerated, which is why the cumulative count is not
+    /// what is reported.
     pub consecutive_errors: u32,
-    /// Failed attempts to bring the bus up at all. Non-zero means the loop has never
-    /// commanded anything and is still waiting for a robot to answer — the signature of
-    /// servo power being off.
+    /// Failed attempts to obtain the first complete servo-plus-IMU sample. Non-zero means the
+    /// loop has never commanded anything and is still waiting for the robot hardware; common
+    /// causes are servo power being off or the Qwiic body IMU being absent.
     pub startup_failures: u32,
     /// While waiting: the expected servo IDs ([`JOINT_IDS`]) that did not answer the last ping
     /// round, in that table's order. Empty once the bus is up, before the first round, and when
@@ -3682,7 +3681,7 @@ impl BusHealth {
     }
 }
 
-/// The IMU board, which rides the motor bus.
+/// The required body IMU on the Qwiic bus.
 ///
 /// `#[serde(default)]` on the struct, not on each field, and for the same reason the parent
 /// [`HealthResult`] carries `Default`: **a field added here must not make a newer reader reject
@@ -3703,19 +3702,19 @@ impl BusHealth {
 pub struct ImuHealth {
     /// Has the orientation filter converged?
     pub ready: bool,
-    /// Reads that returned the previous sample unchanged, cumulative since startup.
+    /// Successful polls with no new SFLP FIFO record, cumulative since startup.
     ///
     /// Sporadic hits are ordinary and say nothing about whether orientation is live *now*: the
-    /// control loop and the board keep their own clocks, so a tick landing inside one board
-    /// refresh legitimately sees the same bytes twice. Useful for scale — a handful over an
+    /// control loop and the sensor keep their own clocks, so a tick can legitimately arrive
+    /// before the next fused record. The last sample is held for that tick. Useful for scale — a handful over an
     /// hour is a healthy board — and misleading on its own, which is why it travels with the
     /// run below rather than being reported alone.
     pub stale_blocks: u64,
     /// Length of the current unbroken run of stale reads; any fresh block resets it to zero.
     ///
-    /// This is the one worth alarming on. A board that has stopped fusing keeps answering the
-    /// `sync_read` — so the bus reports no error and `ready` stays true — and repeats itself on
-    /// every tick, which makes the run climb without bound. See [`ImuHealth::frozen`].
+    /// This is the one worth alarming on. A sensor that has stopped fusing can keep answering
+    /// I²C while producing no FIFO record, which makes the run climb. At [`Self::FROZEN_RUN`]
+    /// the hardware layer also turns the condition into a required-sensor read failure.
     pub consecutive_stale_blocks: u64,
     /// While the bus is coming up: every servo answered its ping and the IMU board did not.
     /// `robotd` waits rather than run without orientation, so this is also why it is not
@@ -3728,12 +3727,13 @@ pub struct ImuHealth {
 impl ImuHealth {
     /// Run length at which orientation is called frozen rather than hiccuping.
     ///
-    /// 25 reads is half a second at 50 Hz: long enough that no ordinary hiccup reaches it, short
-    /// enough to be prompt, and the same span `SflpDecoder::ready` waits for before it will
-    /// treat the chip's output as a measurement. `duck-control`'s journal warning uses the same
-    /// number — deliberately, so the log and the report agree about what "frozen" means — but
-    /// keeps its own copy, because the hardware layer does not depend on this IPC vocabulary.
-    pub const FROZEN_RUN: u64 = 25;
+    /// Three misses is about 60 ms at the shipped 50 Hz loop, whose configured SFLP rate is
+    /// 60 Hz. One phase miss is ordinary there. At the allowed 1 kHz control-rate ceiling the
+    /// sensor tops out at 480 Hz, but normal phase still produces at most two consecutive empty
+    /// polls, so three in a row means fusion is no longer delivering live policy input.
+    /// `duck-control` uses the same number for the required-sensor failure, but keeps its own copy
+    /// because the hardware layer does not depend on this IPC vocabulary.
+    pub const FROZEN_RUN: u64 = 3;
 
     /// Is orientation frozen *now*, as opposed to having hiccuped at some point?
     ///
@@ -3972,7 +3972,7 @@ pub struct PoseState {
 ///
 /// Conventions, stated once: `camera` is the OpenCV camera frame (+x right, +y down, +z along
 /// the optical axis) — the frame intrinsics and a pixel's ray are expressed in. `tof` is the
-/// VL53L5CX/L8CX integration frame (+x along the optical axis, +y left, +z up), the frame
+/// VL53L5CX integration frame (+x along the optical axis, +y left, +z up), the frame
 /// [`ModelResult::tof_beams`] is stated in. Both come from `kinematics::head::HeadFk`.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -3983,9 +3983,8 @@ pub struct FramesState {
     /// tilted axes; this pose (sensor→trunk, from the same head FK) is how a consumer rotates
     /// them into the trunk/camera frame. Absent from a daemon predating it. (v24)
     ///
-    /// **The mount is the `zero3` HAT's BMI088.** The kinematic model has no `beta` face board
-    /// yet, so on a `beta` this pose does not describe its LSM6DSV16X until the model gains that
-    /// mount.
+    /// The pose describes the Qwiic head mount. A beta face board needs its own mount in the
+    /// kinematic model before this pose describes its IMU.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_imu: Option<PoseState>,
 }
@@ -4904,11 +4903,11 @@ pub struct PadInputResult {
 #[serde(default)]
 pub struct TofStreamResult {
     pub accepted: bool,
-    /// The sensor generation that answered, e.g. `VL53L8CX`. `None` when there is
+    /// The sensor model that answered, e.g. `VL53L5CX`. `None` when there is
     /// none — see `unavailable`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sensor: Option<String>,
-    /// Why there is no sensor: not fitted, wrong generation, bus unreadable.
+    /// Why there is no sensor: not fitted, wrong model, bus unreadable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unavailable: Option<String>,
     /// Frame geometry, so a viewer can lay out before the first frame lands.
@@ -4953,8 +4952,7 @@ pub struct TofFrame {
 #[serde(default)]
 pub struct HeadImuStreamResult {
     pub accepted: bool,
-    /// The IMU that answered: `BMI088` (zero3) or `LSM6DSV16X` (beta). `None` when there is
-    /// none — see `unavailable`, which also names the daemon to ask when it is not this one.
+    /// The IMU that answered, e.g. `LSM6DSV16X`. `None` when there is none — see `unavailable`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sensor: Option<String>,
     /// Why there is no IMU: not fitted, bus unreadable, chip-id mismatch.
@@ -4966,13 +4964,13 @@ pub struct HeadImuStreamResult {
 
 /// One head-IMU sample — a [`method::HEAD_IMU_FRAME`] notification.
 ///
-/// Which chip and which daemon is the board's: on `zero3` the BMI088 on the HAT, read by `tofd`
-/// (it owns that I²C bus) with a Madgwick fusion; on `beta` the face board's LSM6DSV16X, read by
-/// `robotd`, its quaternion fused on the chip (SFLP game vector). All values are in the IMU's own
+/// The Qwiic LSM6DSV16X is read by `tofd`; a beta face-board IMU may be read by `robotd`.
+/// All values are in the IMU's own
 /// axes, which are tilted relative to the head/camera — the mount is not axis-aligned. To place a
 /// sample in the trunk/camera frame, rotate it by [`FramesState::head_imu`] (the sensor→trunk
 /// pose the kinematics compute for this tick). This is the head IMU, distinct from the body IMU
-/// that [`RobotState::imu`] carries on the motor bus. Units: rad/s, m/s², unitless quaternion.
+/// that [`RobotState::imu`] carries from address `0x6b` on the same Qwiic adapter. Units: rad/s,
+/// m/s², unitless quaternion.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HeadImuFrame {
@@ -4982,11 +4980,10 @@ pub struct HeadImuFrame {
     pub at_us: u64,
     /// `CLOCK_MONOTONIC` when the sample was read, ns — the clock [`RobotState::t_ns`] shares.
     pub t_ns: u64,
-    /// Angular velocity, rad/s, in the chip's own (tilted) sensor axes — NOT the head or
-    /// camera frame. Combine with [`FramesState::head_imu`] (the sensor→trunk pose from the
-    /// kinematics) to place it. See that field.
+    /// Angular velocity, rad/s, in the chip's own (tilted) sensor axes. Combine with
+    /// [`FramesState::head_imu`] to place it in the trunk frame.
     pub gyro: [f32; 3],
-    /// Specific force, m/s², the chip's sensor axes.
+    /// Specific force, m/s², in the chip's sensor axes.
     pub accel: [f32; 3],
     /// Orientation, scalar-first `[w, x, y, z]`, sensor→world (gravity down, yaw
     /// arbitrary). The world here is the IMU's own; relate it to the trunk via the mount pose.

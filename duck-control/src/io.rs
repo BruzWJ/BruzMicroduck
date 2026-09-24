@@ -3,10 +3,9 @@
 //! Everything between [`RobotIo::read`] and [`RobotIo::write`] is pure computation over
 //! plain data, which is what makes the loop testable without a robot.
 //!
-//! [`Sensors`] carries joints *and* IMU together because that is what the hardware does:
-//! the IMU board sits on the Dynamixel bus and is fetched in the same transaction as the
-//! servos. A trait that split them would invent a distinction the bus does not have, and
-//! would double the bus traffic to honour it.
+//! [`Sensors`] carries joints and body IMU together because a policy needs one observation per
+//! control tick. The physical backend reads the servos over Dynamixel and the IMU over Qwiic,
+//! then either returns the complete observation or fails the tick.
 
 use crate::imu::ImuData;
 use crate::model::NUM_JOINTS;
@@ -82,7 +81,7 @@ pub type Result<T> = std::result::Result<T, IoError>;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SlowSensors {
     /// Mean supply voltage across the servos, in volts — the only battery measurement the
-    /// robot has, since there is no fuel gauge anywhere on the hat.
+    /// robot has, since this build has no fuel gauge.
     pub volts: f64,
     /// Per-joint case temperature in °C, indexed as [`crate::model::JOINT_NAMES`].
     ///
@@ -92,15 +91,14 @@ pub struct SlowSensors {
     pub temps_c: [f64; NUM_JOINTS],
 }
 
-/// IMU reads that came back byte-for-byte identical to their predecessor.
+/// IMU polls that did not produce a new fused quaternion.
 ///
 /// Two numbers, because they answer two different questions and only one of them is worth
 /// waking someone for. The *total* says how often the board has repeated itself over the whole
-/// run: sporadic hits are ordinary, since the loop and the board keep their own clocks and a
-/// tick landing inside one board refresh legitimately sees the same bytes twice. The *run* says
-/// whether orientation is frozen right now — a board that has stopped fusing repeats on every
-/// single tick, so its run climbs without bound while a total on its own looks the same as a
-/// handful of hiccups.
+/// run: sporadic hits are ordinary, since the loop and the sensor keep their own clocks and a
+/// tick can land before the next FIFO record. The *run* says whether orientation is frozen right
+/// now — a board that has stopped fusing yields no fresh record on every tick, so its run climbs
+/// without bound while a total on its own looks the same as a handful of hiccups.
 ///
 /// Reported together so no backend can offer one without the other; a run with no total to
 /// scale it against is how the count came to be read as an alarm in the first place.
@@ -108,12 +106,12 @@ pub struct SlowSensors {
 pub struct ImuStale {
     /// Stale reads since startup, cumulative and never reset.
     pub total: u64,
-    /// Length of the current unbroken run of stale reads. Any fresh block resets it to zero.
+    /// Length of the current unbroken run of stale reads. Any fresh sample resets it to zero.
     pub run: u64,
 }
 
 pub trait RobotIo {
-    /// One transaction: joints and IMU together.
+    /// One complete control sample: joints and IMU, or an error from either bus.
     fn read(&mut self) -> Result<Sensors>;
     fn write(&mut self, targets: &JointTargets) -> Result<()>;
 
@@ -174,9 +172,8 @@ pub trait RobotIo {
     /// Diagnostics the bus keeps about itself. Default to "nothing to report" so a fake or a
     /// future backend is not obliged to invent them.
     ///
-    /// `sync_read` blocks identical to their predecessor: the board answered but did not
-    /// refresh, which means the policy would be fed dead orientation. Invisible unless
-    /// someone counts it, which is why it is counted.
+    /// Successful IMU polls that produced no new SFLP record. The last orientation is held for
+    /// that tick, which is invisible unless someone counts it.
     fn imu_stale(&self) -> ImuStale {
         ImuStale::default()
     }

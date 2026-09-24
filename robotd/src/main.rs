@@ -75,7 +75,7 @@ const LOOP_SUMMARY_INTERVAL: Duration = Duration::from_secs(300);
 
 /// How often an *isolated* dropped bus transaction is worth a line.
 ///
-/// One drop is ordinary on a serial bus and a run of them is a fault, so the loop logs the first
+/// One transient on either required hardware bus is ordinary and a run is a fault, so the loop logs the first
 /// of a run and every tenth after it. That rule reads `consecutive_errors`, which resets on the
 /// next good read — so it never fired on the case a board actually produces: one drop, one good
 /// read, one drop, at about a hertz, forever `consecutive=1`. Every one of them was logged.
@@ -551,7 +551,7 @@ struct RobotState {
     /// While waiting: the servo IDs the last ping round found silent. Empty once the bus is up,
     /// and when the port would not open at all — then nothing was asked.
     startup_missing: ArcSwap<Vec<u8>>,
-    /// While waiting: every servo answered and the IMU board did not. False once the bus is up.
+    /// While waiting: the required Qwiic body IMU could not be opened. False once the bus is up.
     startup_imu_missing: AtomicBool,
     /// Motor-bus voltage, EMA-smoothed, as `f64::to_bits`. Zero means *not read yet* — a
     /// distinction that has to survive to the wire, since zero volts and unknown volts look
@@ -843,17 +843,16 @@ impl RobotState {
                         },
                     ));
                 }
-                // Every servo answering is a robot, whatever the first read went on to do.
+                // A Qwiic failure is distinct from missing servo power.
                 if self.startup_imu_missing.load(Ordering::Relaxed) {
                     return degraded(format!(
-                        "the IMU board (id {}) is not answering on the motor bus after \
-                         {waiting} attempts; is it plugged in?",
-                        duck_control::model::IMU_DXL_ID,
+                        "the required body IMU is not available on Qwiic after \
+                         {waiting} attempts; is the sensor chain connected?",
                     ));
                 }
                 return degraded(format!(
-                    "no robot on the motor bus after {waiting} attempts; \
-                     is servo power on and the bus wired?"
+                    "robot hardware buses have not opened after {waiting} attempts; \
+                     is servo power on, and are the Dynamixel and Qwiic buses wired?"
                 ));
             }
             return unhealthy("control loop has not completed a cycle yet".into());
@@ -1123,7 +1122,15 @@ fn run_init(params: &Params, duration: Duration) -> ExitCode {
     // The same open as the daemon's, replacement adoption included: `init` is what someone
     // reaches for right after a motor swap, and it must not be the one path that refuses the
     // new servo.
-    let Some(mut io) = open_bus(&params.bus, params.board.version, 0, &mut Vec::new()) else {
+    let Some(mut io) = open_bus(
+        &params.bus,
+        &params.body_imu,
+        params.control.hz,
+        params.board.version,
+        0,
+        &mut Vec::new(),
+        &mut false,
+    ) else {
         return ExitCode::FAILURE;
     };
     if let Err(e) = io.set_torque(true) {
@@ -1174,6 +1181,8 @@ fn spawn_control_thread(
     let fake = args.fake;
     let sim = args.sim.clone();
     let bus = params.bus.clone();
+    let body_imu = params.body_imu.clone();
+    let control_hz = params.control.hz;
     let params = params.clone();
     // So a reload can re-read `[policy]` without a restart. The path rather than the loaded
     // params, because the point is to pick up what has been written since.
@@ -1238,7 +1247,7 @@ fn spawn_control_thread(
                 // The voice works while the bus does not: a robot waiting on unplugged servos
                 // still quacks. Stopped before the loop starts, which then owns the speaker.
                 let waiting_voice = WaitingVoice::start(&params, Arc::clone(&intents));
-                let io = open_bus_waiting(&bus, &state).await;
+                let io = open_bus_waiting(&bus, &body_imu, control_hz, &state).await;
                 drop(waiting_voice);
                 if let Some(io) = io {
                     control_loop(io, state, intents, params, params_path, period, poweroff).await;
@@ -1324,7 +1333,12 @@ type BusIo = FakeIo;
 /// one to abandon the control loop over.
 ///
 /// Returns `None` only if shutdown is requested while waiting.
-async fn open_bus_waiting(bus: &params::Bus, state: &RobotState) -> Option<BusIo> {
+async fn open_bus_waiting(
+    bus: &params::Bus,
+    body_imu: &params::BodyImuParams,
+    control_hz: u32,
+    state: &RobotState,
+) -> Option<BusIo> {
     let mut attempt = 0u32;
 
     while !state.shutdown.load(Ordering::Relaxed) {
@@ -1332,23 +1346,23 @@ async fn open_bus_waiting(bus: &params::Bus, state: &RobotState) -> Option<BusIo
         // quiet thereafter — a board waiting overnight must not fill the journal.
         let mut missing = Vec::new();
         let mut imu_missing = false;
-        if let Some(mut io) = open_bus(bus, state.board, attempt, &mut missing) {
-            match imu_answers(&mut io, attempt) {
-                Some(true) => {
-                    state.startup_bus_failures.store(0, Ordering::Relaxed);
-                    state.startup_missing.store(Arc::new(Vec::new()));
-                    state.startup_imu_missing.store(false, Ordering::Relaxed);
-                    return Some(io);
-                }
-                Some(false) => imu_missing = true,
-                // The ping itself failed: a bus fault, not an answer, so health keeps the
-                // generic wording rather than send someone looking for an unplugged board.
-                None => {}
-            }
+        if let Some(io) = open_bus(
+            bus,
+            body_imu,
+            control_hz,
+            state.board,
+            attempt,
+            &mut missing,
+            &mut imu_missing,
+        ) {
+            state.startup_bus_failures.store(0, Ordering::Relaxed);
+            state.startup_missing.store(Arc::new(Vec::new()));
+            state.startup_imu_missing.store(false, Ordering::Relaxed);
+            return Some(io);
         }
         attempt += 1;
-        // Published before sleeping, so `robot.health` can name the cause immediately — and
-        // which servos, when some answered and these did not, or that it is the IMU board.
+        // Published before sleeping, so `robot.health` can name silent servos or the
+        // unavailable Qwiic body IMU immediately.
         state.startup_missing.store(Arc::new(missing));
         state
             .startup_imu_missing
@@ -1365,7 +1379,6 @@ async fn open_bus_waiting(bus: &params::Bus, state: &RobotState) -> Option<BusIo
     None
 }
 
-/// Open and verify the bus, or explain why not.
 /// The body IMU's sensor→trunk mount on `board`: the power board stands on edge in a `zero3`
 /// and lies flat in a `beta`.
 fn body_imu_mount(board: robotd_params::board::Board) -> [f64; 4] {
@@ -1379,17 +1392,31 @@ fn body_imu_mount(board: robotd_params::board::Board) -> [f64; 4] {
 #[cfg(target_os = "linux")]
 fn open_bus(
     bus: &params::Bus,
+    body_imu: &params::BodyImuParams,
+    control_hz: u32,
     board: robotd_params::board::Board,
     attempt: u32,
     missing: &mut Vec<u8>,
+    imu_missing: &mut bool,
 ) -> Option<BusIo> {
     // First attempt and every thirtieth — about one line per 30 s while waiting.
     let loud = attempt == 0 || attempt.is_multiple_of(STARTUP_READ_LOG_EVERY);
     let port = bus.port.as_str();
 
-    let mut io = match duck_control::bus::DynamixelIo::open(port, bus.fast_sync_read) {
+    let mut io = match duck_control::bus::DynamixelIo::open(
+        port,
+        bus.fast_sync_read,
+        Path::new(&body_imu.bus),
+        body_imu.address,
+        control_hz as u16,
+    ) {
         Ok(io) => io,
         Err(e) => {
+            // The motor port opens first; only this error means the required Qwiic sensor
+            // failed to open. Keep health from blaming servo power for a missing IMU.
+            if let duck_control::io::IoError::Bus(ref message) = e {
+                *imu_missing = message.starts_with("open body IMU on ");
+            }
             if loud {
                 tracing::error!(error = %e, port, attempt, "cannot open the bus; waiting");
             }
@@ -1397,6 +1424,14 @@ fn open_bus(
         }
     };
     io.set_imu_mount(body_imu_mount(board));
+    if loud {
+        tracing::info!(
+            bus = %body_imu.bus,
+            address = %format_args!("{:#04x}", body_imu.address),
+            rate_hz = io.body_imu_rate_hz(),
+            "body LSM6DSV16X ready"
+        );
+    }
     // Under the same `loud` rule as everything else here — a board waiting on servo power
     // retries this forever. Worth saying at all because the whole tick budget hangs off it,
     // and "turned off in robotd.toml" is otherwise indistinguishable from "this board is slow".
@@ -1407,7 +1442,7 @@ fn open_bus(
         return None;
     }
     match io.check_registers() {
-        // Gated too: a board waiting on its IMU board gets this far every attempt.
+        // Gated too: an unpowered board can get this far every attempt.
         Ok(0) if loud => tracing::info!("motor registers already correct"),
         Ok(0) => {}
         Ok(n) => tracing::warn!(corrected = n, "motor registers corrected"),
@@ -1423,44 +1458,6 @@ fn open_bus(
         }
     }
     Some(io)
-}
-
-/// Does the IMU board answer, now that every servo has?
-///
-/// Outside [`open_bus`] because `init` shares that and has no use for orientation: ramping to
-/// the home pose must keep working on a robot with its IMU unplugged. The daemon does need it,
-/// and without this ping the first combined read is what fails — and health, with nothing more
-/// specific to go on, blames the whole bus.
-///
-/// `None` when the ping could not be made at all, which says nothing about the board.
-#[cfg(target_os = "linux")]
-fn imu_answers(io: &mut BusIo, attempt: u32) -> Option<bool> {
-    let loud = attempt == 0 || attempt.is_multiple_of(STARTUP_READ_LOG_EVERY);
-    let id = duck_control::model::IMU_DXL_ID;
-    match io.imu_answers() {
-        Ok(true) => Some(true),
-        Ok(false) => {
-            if loud {
-                tracing::error!(
-                    attempt,
-                    id,
-                    "every servo answered and the IMU board did not; waiting, is it plugged in?"
-                );
-            }
-            Some(false)
-        }
-        Err(e) => {
-            if loud {
-                tracing::error!(error = %e, attempt, id, "cannot ping the IMU board; waiting");
-            }
-            None
-        }
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn imu_answers(_io: &mut BusIo, _attempt: u32) -> Option<bool> {
-    Some(true)
 }
 
 /// The motor-swap path: if exactly one expected servo is silent and a factory-fresh one
@@ -1530,9 +1527,12 @@ fn adopt_missing_servo(io: &mut BusIo, loud: bool, silent: &mut Vec<u8>) -> bool
 #[cfg(not(target_os = "linux"))]
 fn open_bus(
     _bus: &params::Bus,
+    _body_imu: &params::BodyImuParams,
+    _control_hz: u32,
     _board: robotd_params::board::Board,
     _attempt: u32,
     _missing: &mut Vec<u8>,
+    _imu_missing: &mut bool,
 ) -> Option<BusIo> {
     tracing::error!("no bus on this platform; use --fake");
     None
@@ -1677,7 +1677,7 @@ async fn adopt_startup_pose<T: RobotIo>(
                     tracing::warn!(
                         attempt,
                         hz = 1.0 / period.as_secs_f64(),
-                        "the motor bus answered; holding the pose found at startup"
+                        "the servo and body-IMU buses answered; holding the pose found at startup"
                     );
                 }
                 return Some(sensors.positions);
@@ -1691,7 +1691,7 @@ async fn adopt_startup_pose<T: RobotIo>(
                     tracing::warn!(
                         error = %e,
                         attempt,
-                        "no answer from the motor bus; waiting, not commanding anything"
+                        "no complete servo and body-IMU sample; waiting, not commanding anything"
                     );
                 }
                 tokio::time::sleep(STARTUP_RETRY_INTERVAL).await;
@@ -4085,7 +4085,7 @@ async fn claim_socket(socket_path: &Path) -> std::io::Result<(std::fs::File, Uni
 
 /// Read the head IMU on its own thread, if this board's head IMU is robotd's and it is on.
 ///
-/// Only the `beta`'s is: on `zero3` the BMI088 is tofd's (it shares the HAT's bus with the ToF),
+/// Only the `beta`'s is: on `zero3` the Qwiic head sensor is tofd's,
 /// and a subscriber here is told so rather than handed silence.
 fn start_head_imu(state: &Arc<RobotState>, params: &Params, no_hardware: bool) {
     use robotd_params::board::Board;
@@ -7888,7 +7888,9 @@ mod tests {
         assert!(!health.healthy);
         let reason = health.reason.unwrap();
         assert!(
-            reason.contains("motor bus") && reason.contains("servo power"),
+            reason.contains("hardware buses")
+                && reason.contains("servo power")
+                && reason.contains("Qwiic"),
             "unactionable reason: {reason}"
         );
     }
@@ -7928,11 +7930,9 @@ mod tests {
         assert!(reason.contains("is it plugged in?"), "{reason}");
     }
 
-    /// Every servo answering and the IMU board silent is a robot with its IMU unplugged, not "no
-    /// robot on the motor bus" — which is what this said, because the first combined read was the
-    /// only thing that ever asked the IMU anything.
+    /// A missing required body IMU is a Qwiic sensor fault, not missing servo power.
     #[test]
-    fn health_names_a_silent_imu_board_rather_than_the_whole_bus() {
+    fn health_names_an_unavailable_qwiic_body_imu() {
         let s = RobotState::new(
             &Params::default(),
             std::path::Path::new("/test/robotd.toml"),
@@ -7950,10 +7950,10 @@ mod tests {
         assert!(health.imu.expect("always attached").missing);
         let reason = health.reason.unwrap();
         assert!(
-            reason.starts_with("the IMU board (id 200) is not answering"),
+            reason.starts_with("the required body IMU is not available on Qwiic"),
             "{reason}"
         );
-        assert!(!reason.contains("no robot"), "{reason}");
+        assert!(!reason.contains("servo power"), "{reason}");
     }
 
     /// **The regression.** A bus that cannot be *opened* — or whose register check fails,
@@ -7975,8 +7975,12 @@ mod tests {
             port: "/dev/definitely-not-a-bus".into(),
             ..Default::default()
         };
-        let handle =
-            tokio::spawn(async move { open_bus_waiting(&nowhere, &waiter_state).await.is_none() });
+        let body_imu = params::BodyImuParams::default();
+        let handle = tokio::spawn(async move {
+            open_bus_waiting(&nowhere, &body_imu, 50, &waiter_state)
+                .await
+                .is_none()
+        });
 
         // Bounded, so a regression fails rather than hanging CI.
         for _ in 0..10_000 {

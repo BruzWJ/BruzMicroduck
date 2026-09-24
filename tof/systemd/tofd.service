@@ -1,28 +1,29 @@
 # The head ToF sensor daemon.
 #
 # Perception, deliberately not inside `robotd`: bringing this sensor up uploads
-# ~90 KB of firmware over I²C taking seconds, the bus is shared with the audio
-# codec, and most ducks have no sensor fitted at all — none of which belongs in
-# the process that owns the motors (architecture.md §1).
+# ~90 KB of firmware over I²C taking seconds. The Qwiic adapter is shared with
+# robotd's body IMU (and the optional audio codec), but this process owns only
+# the VL53L5CX at 0x29 and head LSM6DSV16X at 0x6a — none of their startup work
+# belongs in the process that owns the motors (architecture.md §1).
 #
 # Nothing depends on this unit. `robotd` does not read depth, and `robotctl
 # monitor` says "no depth stream" and carries on when the socket is absent, so a
-# board with no ToF simply runs one more quiet daemon.
+# disconnected head chain is reported without taking motor control down.
 [Unit]
 Description=Robot head ToF sensor daemon
 Documentation=file:///opt/robot/daemon/current/docs/architecture.md
 After=local-fs.target
-# The i2c3 bus arrives with the device-tree overlay, so there is nothing to wait
-# for at the unit level — the daemon retries the bus with a backoff instead,
-# which also covers a sensor plugged in later.
+# The i2c3 bus arrives as /dev/i2c-qwiic with the device-tree overlay, so there
+# is nothing to wait for at the unit level — the daemon retries the bus with a
+# backoff instead, which also covers a sensor plugged in later.
 
 [Service]
 Type=exec
 ExecStart=/opt/robot/daemon/current/bin/tofd
 User=tofd
 Group=tofd
-# i2c  — /dev/i2c-* is root:i2c mode 0660, which is the whole of this daemon's
-#        privileged access
+# i2c  — /dev/i2c-qwiic is root:i2c mode 0660, which is the whole of this
+#        daemon's privileged access
 # robot — so the depth socket can be handed to the group that may watch the
 #        robot, exactly as padd does with its pad tap
 SupplementaryGroups=i2c robot
