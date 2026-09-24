@@ -96,9 +96,9 @@ It also sits, kicks a ball, rolls forward on command, and quacks in a voice that
 Rust, no framework, one workspace. `robotd` owns the control loop and the motor bus; `updaterd`
 installs signed releases and rolls them back when a robot comes up unhealthy; `configd` owns wifi
 and identity; `btd` is the Bluetooth path a phone uses; `padd` reads the gamepad; `mediad` streams
-the camera over WebRTC; `tofd` serves the depth sensor. They talk over one JSON-RPC contract on
-Unix sockets, and every client — the app, the console, the gamepad, your script — sends exactly the
-same calls.
+the camera over WebRTC; `tofd` serves the head depth and optional head-IMU streams. They talk over
+one JSON-RPC contract on Unix sockets, and every client — the app, the console, the gamepad, your
+script — sends exactly the same calls.
 
 The interesting decisions are written down: [`docs/design/`](docs/design/) is why things are the
 way they are, and [`docs/project/`](docs/project/) is what has gone wrong and what would close it.

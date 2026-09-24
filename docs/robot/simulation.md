@@ -9,11 +9,12 @@ not a twin of, and why it is built the way it is.
 
 ## What it is
 
-`robotd --sim host:port` runs the daemon with `duck_control::sim::RemoteIo` in place of the servo
-bus: every tick, joint positions, velocities and the IMU come in over a TCP socket from a MuJoCo
-process, and the policy's targets go back out. Everything above that seam — the control loop, the
-policy, safety, fall detection, kinematics, odometry, the whole IPC surface — is the code a robot
-runs, unchanged and unable to tell. `tofd --sim` gets its 8×8 depth frames from the same simulator;
+`robotd --sim host:port` runs the daemon with `duck_control::sim::RemoteIo` in place of the real
+hardware I/O — the servo UART and the body LSM6DSV16X on Qwiic. Every tick, joint positions,
+velocities and the IMU come in over a TCP socket from a MuJoCo process, and the policy's targets go
+back out. Everything above that seam — the control loop, the policy, safety, fall detection,
+kinematics, odometry, the whole IPC surface — is the code a robot runs, unchanged and unable to
+tell. `tofd --sim` gets its 8×8 depth frames from the same simulator;
 `mediad --sim-camera` gets a rendered head-camera image, mounted a quarter turn off like the real one.
 `configd` and `updaterd` run too, unchanged, which is what gives a simulated duck a serial, a name
 and a Hugging Face account it can be reached through from off this network.
@@ -24,8 +25,8 @@ policies were trained against.
 
 **What it is good for:** anything in the daemons and their clients — IPC, `robotctl`, the console,
 the updater, the chorale, policies standing and walking, mapping. **What it cannot tell you:**
-anything in a driver. The Dynamixel bus, the BLE radio, the camera ISP, the NPU and the hardware
-encoder are absent, not modelled; a bug in one of those is only visible on a robot.
+anything in a driver. The Dynamixel UART, Qwiic/I2C sensor drivers, BLE radio, camera ISP, NPU and
+hardware encoder are absent, not modelled; a bug in one of those is only visible on a robot.
 
 ## What you need
 
