@@ -44,7 +44,8 @@ LSM6DSV16X stays at its factory `0x6b` address on the Radxa's Qwiic adapter:
 
 The shared `qwiic-imu` crate configures the chip's SFLP engine and returns gyro, acceleration,
 temperature and a fused quaternion. `duck-control::imu` owns only the robot-specific body mount,
-spike rejection and readiness gate. The head carries the same chip at `0x6a`, but `tofd` owns
+spike rejection and readiness gate. The body breakout is mounted +X forward, +Y left, +Z up, so
+its sensor-to-trunk mount is identity. The head carries the same chip at `0x6a`, but `tofd` owns
 that address and publishes it separately; roles are fixed by address and are never inferred from
 probe order.
 
@@ -316,8 +317,9 @@ nothing wants in between — so they are sampled together once a second in their
 transaction (~1 ms) rather than widening the tick's read to 22 bytes per servo at 50 Hz. The
 sampling interval is the same window the achieved rate is measured over, so one clock drives both.
 
-The body sensor opens from `[body_imu]`: `/dev/i2c-qwiic`, address `0x6b`, with its SFLP rate
-rounded up from the control rate (50 Hz therefore selects 60 Hz). It is required. An open error
+The body sensor opens from `[body_imu]`: `/dev/i2c-qwiic`, address `0x6b`, with its +X-forward,
++Y-left, +Z-up axes equal to the trunk frame and its SFLP rate rounded up from the control rate
+(50 Hz therefore selects 60 Hz). It is required. An open error
 keeps startup in the existing retry loop; an I2C error fails that tick through the same runtime
 counter as a servo read. A successful poll with no new FIFO quaternion is different: it holds the
 last good `ImuData`, increments `imu_stale`, and waits for the sensor's independent clock. A run of

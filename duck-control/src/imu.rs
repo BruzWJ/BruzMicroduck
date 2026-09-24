@@ -51,14 +51,9 @@ impl Default for SflpDecoder {
 }
 
 impl SflpDecoder {
-    /// The board is mounted so that trunk = `[+raw_z, +raw_y, −raw_x]`, a +90° rotation
-    /// about Y.
-    pub const DEFAULT_MOUNT: [f64; 4] = [
-        std::f64::consts::FRAC_1_SQRT_2,
-        0.0,
-        std::f64::consts::FRAC_1_SQRT_2,
-        0.0,
-    ];
+    /// The SparkFun Micro board is mounted in the trunk convention: +X forward, +Y left,
+    /// +Z up. Sensor and trunk axes therefore coincide.
+    pub const DEFAULT_MOUNT: [f64; 4] = [1.0, 0.0, 0.0, 0.0];
 
     pub fn new(mount: [f64; 4]) -> Self {
         Self {
@@ -212,8 +207,8 @@ mod tests {
         assert!(d.ready());
     }
 
-    /// The physical mounting convention is part of the trained robot, not a property of the
-    /// SparkFun board. Changing breakouts must not rotate the policy's gyro axes.
+    /// The physical mounting convention is part of the trained robot. The SparkFun breakout's
+    /// +X-forward, +Z-up axes must reach the policy unchanged.
     #[test]
     fn body_mount_maps_sensor_axes_into_the_trunk() {
         let mut d = SflpDecoder::default();
@@ -223,13 +218,36 @@ mod tests {
         d.decode(s);
         d.decode(s);
         let out = d.decode(s);
-        assert!((out.gyro[0] - 3.0).abs() < 1e-6);
+        assert!((out.gyro[0] - 1.0).abs() < 1e-6);
         assert!((out.gyro[1] - 2.0).abs() < 1e-6);
-        assert!((out.gyro[2] + 1.0).abs() < 1e-6);
+        assert!((out.gyro[2] - 3.0).abs() < 1e-6);
         assert!(out.gravity[0].abs() < 1e-6);
         assert!(out.gravity[1].abs() < 1e-6);
         assert!((out.gravity[2] + 1.0).abs() < 1e-6);
         assert!((out.quat[0] - 1.0).abs() < 1e-6);
+    }
+
+    /// Identity mounting must preserve rotation direction as well as gyro axes. A sign error in
+    /// the sensor→world quaternion composition would still leave upright gravity and its norm
+    /// looking correct, but would make the policy lean into a fall.
+    #[test]
+    fn body_mount_preserves_roll_and_pitch_direction() {
+        let gravity = |quat: [f32; 4]| {
+            let mut d = SflpDecoder::default();
+            let s = sample(1, [0.0; 3], quat);
+            d.decode(s);
+            d.decode(s);
+            d.decode(s).gravity
+        };
+        let half = std::f64::consts::FRAC_1_SQRT_2 as f32;
+        let roll = gravity([half, half, 0.0, 0.0]);
+        let pitch = gravity([half, 0.0, half, 0.0]);
+        for (actual, expected) in roll.into_iter().zip([0.0, -1.0, 0.0]) {
+            assert!((actual - expected).abs() < 1e-6, "roll gravity: {roll:?}");
+        }
+        for (actual, expected) in pitch.into_iter().zip([1.0, 0.0, 0.0]) {
+            assert!((actual - expected).abs() < 1e-6, "pitch gravity: {pitch:?}");
+        }
     }
 
     /// In steady state gravity must be a unit vector at any orientation — the policy
@@ -281,6 +299,8 @@ mod tests {
         d.decode(s);
         d.decode(s);
         let out = d.decode(s);
-        assert!((out.gyro[2] - 1.25).abs() < 1e-9);
+        assert!((out.gyro[0] + 1.25).abs() < 1e-9);
+        assert!(out.gyro[1].abs() < 1e-9);
+        assert!(out.gyro[2].abs() < 1e-9);
     }
 }

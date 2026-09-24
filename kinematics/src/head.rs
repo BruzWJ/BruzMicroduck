@@ -31,8 +31,8 @@ pub struct HeadFk {
     /// true position, a couple of centimetres from the camera it would
     /// otherwise borrow.
     tof: Option<SiteId>,
-    /// The MJCF's `head_imu` site (the head LSM6DSV16X), when the asset carries one. Tilted
-    /// relative to the camera — the mount is not axis-aligned.
+    /// The MJCF's `head_imu` site (the head LSM6DSV16X), when the asset carries one. Its
+    /// +X-forward, +Y-left, +Z-up axes follow the articulated head.
     head_imu: Option<SiteId>,
     joints: [usize; 4],
 }
@@ -90,10 +90,10 @@ impl HeadFk {
 
     /// Head LSM6DSV16X pose in the trunk frame, when the asset has a `head_imu` site.
     ///
-    /// The site frame is the sensor's own axes as mounted — tilted, not aligned with the camera.
-    /// Rotating a sensor-frame vector by the result's quat expresses it in the trunk, which is how
-    /// a consumer places `head_imu.stream` samples in the robot frame. `None` for an asset with no
-    /// such site (the caller then has no mount and must skip the transform).
+    /// The site frame is the sensor's own +X-forward, +Y-left, +Z-up axes. At the neutral head
+    /// pose they coincide with the trunk axes; rotating a sensor-frame vector by the result's quat
+    /// follows the head joints and expresses it in the trunk. `None` for an asset with no such site
+    /// (the caller then has no mount and must skip the transform).
     pub fn head_imu_in_trunk(&self, joints: [f64; 4]) -> Option<Pose> {
         self.head_imu.map(|site| self.site_in_trunk(site, joints))
     }
@@ -259,6 +259,46 @@ mod tests {
         assert!(forward([0.0, 0.0, 0.3, 0.0])[1] > 0.1);
         // +head_pitch looks DOWN (-z) on alpha.
         assert!(forward([0.0, 0.3, 0.0, 0.0])[2] < -0.1);
+    }
+
+    /// Both SparkFun sensors are installed with +X forward and +Z up. The head site's local
+    /// quaternion cancels the shell asset's frame rotation at neutral, and must remain parallel
+    /// to the ToF frame as the four head joints move.
+    #[test]
+    fn head_imu_uses_forward_left_up_axes() {
+        let fk = HeadFk::alpha();
+        let imu = fk
+            .head_imu_in_trunk([0.0; 4])
+            .expect("alpha model has a head_imu site");
+        for (axis, expected) in [
+            ([1.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+            ([0.0, 1.0, 0.0], [0.0, 1.0, 0.0]),
+            ([0.0, 0.0, 1.0], [0.0, 0.0, 1.0]),
+        ] {
+            let actual = imu.quat.rotate(axis);
+            assert!(
+                actual
+                    .iter()
+                    .zip(expected)
+                    .all(|(actual, expected)| (actual - expected).abs() < 1e-9),
+                "neutral head IMU axis {axis:?} became {actual:?}"
+            );
+        }
+
+        let joints = [0.1, 0.2, -0.1, 0.05];
+        let imu = fk.head_imu_in_trunk(joints).expect("head IMU pose");
+        let tof = fk.tof_in_trunk(joints);
+        for axis in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]] {
+            let imu_axis = imu.quat.rotate(axis);
+            let tof_axis = tof.quat.rotate(axis);
+            assert!(
+                imu_axis
+                    .iter()
+                    .zip(tof_axis)
+                    .all(|(imu, tof)| (imu - tof).abs() < 1e-9),
+                "head IMU and ToF axes diverged: {imu_axis:?} vs {tof_axis:?}"
+            );
+        }
     }
 
     /// The IK's contract, checked by its own FK: after `look_at`, the camera's

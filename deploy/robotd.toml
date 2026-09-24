@@ -32,8 +32,9 @@ port = "/dev/ttyS2"
 # fast_sync_read = true
 
 [body_imu]
-# Required SparkFun LSM6DSV16X in the trunk. setup-board.sh installs this stable alias for
-# the Radxa header's Qwiic adapter; changing it needs a robotd restart.
+# Required SparkFun LSM6DSV16X in the trunk, mounted +X forward, +Y left, +Z up. setup-board.sh
+# installs this stable alias for the Radxa header's Qwiic adapter; changing it needs a robotd
+# restart. Mount direction is a fixed robot/model contract, not an address setting.
 bus = "/dev/i2c-qwiic"
 
 # Seven-bit address. The body Micro breakout keeps the factory 0x6b address; the head board
@@ -399,8 +400,8 @@ mode = "walk"
 # threshold = 0.35
 
 [head_imu]
-# The LSM6DSV16X in the head, read by tofd and served as `head_imu.stream` — gyro,
-# acceleration and the chip's SFLP game rotation, for the mapping work.
+# The LSM6DSV16X in the head, mounted +X forward, +Y left, +Z up in the neutral head pose and
+# served by tofd as `head_imu.stream` — gyro, acceleration and the chip's SFLP game rotation.
 #
 # **Off by default, and this is the whole section.** Nothing subscribes to the stream yet, so
 # a duck that is not mapping should not spend shared-Qwiic bandwidth and CPU wakeups reading it.

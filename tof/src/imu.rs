@@ -7,7 +7,8 @@
 //!
 //! Orientation comes from the LSM6DSV16X's on-chip SFLP game-rotation vector.
 //! Gyroscope, accelerometer and quaternion values remain in the sensor's own
-//! axes; consumers use the kinematic `head_imu` mount pose to place them.
+//! +X-forward, +Y-left, +Z-up axes; consumers use the kinematic `head_imu`
+//! pose to follow the articulated head and place them in the trunk.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
