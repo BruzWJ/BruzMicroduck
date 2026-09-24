@@ -371,6 +371,7 @@ cargo run -p xtask -- package \
     --include "updater/systemd/sysusers.d/robot.conf=systemd/sysusers.d/robot.conf" \
     --include "robotd/systemd/robotd.service=systemd/robotd.service" \
     --include "hooks/postinstall=hooks/postinstall" \
+    --include "scripts/setup-openrb.sh=scripts/setup-openrb.sh" \
     --include "scripts/setup-gstreamer.sh=scripts/setup-gstreamer.sh" \
     --include "scripts/setup-npu.sh=scripts/setup-npu.sh" \
     --include "deploy/overlays/rk3568-npu-enable.dts=deploy/overlays/rk3568-npu-enable.dts" \
