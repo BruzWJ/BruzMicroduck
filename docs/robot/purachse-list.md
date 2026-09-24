@@ -15,8 +15,8 @@ and [control-loop design](../design/robotd-design.md).
 | Servos | [DYNAMIXEL XL330-M288-T](https://robotis.us/products/dynamixel-xl330-m288-t?variant=51033242960012) | 15 |
 | Servo idler components | [ROBOTIS FPX330-H101, 4-piece set](https://robotis.us/products/fpx330-h101-4pcs-set?variant=51033243549836) | 1 set (4 pieces) |
 | Side frames | [ROBOTIS FPX330-S102, 4-piece set](https://robotis.us/products/fpx330-s102-4pcs-set?variant=51033242501260) | 1 set (4 pieces) |
-| Ball bearings | [McMaster-Carr 6656K181 — 15 mm ID × 22 mm OD × 4 mm thick](https://www.mcmaster.com/6656K181/) | 2 |
-| Ball bearings | [McMaster-Carr 6656K68 — 10 mm ID × 15 mm OD × 3 mm thick](https://www.mcmaster.com/6656K68/) | 3 |
+| Head Ball bearings | [McMaster-Carr 6656K181 — 15 mm ID × 22 mm OD × 4 mm thick](https://www.mcmaster.com/6656K181/) | 2 |
+| Feet&Mouth Ball bearings | [McMaster-Carr 6656K68 — 10 mm ID × 15 mm OD × 3 mm thick](https://www.mcmaster.com/6656K68/) | 3 |
 | Head 6DoF IMU | [SparkFun 6DoF IMU Breakout — LSM6DSV16X (Qwiic)](https://www.sparkfun.com/sparkfun-6dof-imu-breakout-lsm6dsv16x-qwiic.html) | 1 |
 | Body 6DoF IMU | [SparkFun Micro 6DoF IMU Breakout — LSM6DSV16X (Qwiic)](https://www.sparkfun.com/sparkfun-micro-6dof-imu-breakout-lsm6dsv16x-qwiic.html) | 1 |
 | 8×8 ToF sensor | [SparkFun Qwiic Mini ToF Imager — VL53L5CX](https://www.sparkfun.com/sparkfun-qwiic-mini-tof-imager-vl53l5cx.html) | 1 |
@@ -43,21 +43,22 @@ That order is structural, not cosmetic. The ToF and standard IMU each have two Q
 and pass the bus onward. The Micro IMU has only one connector, so it must be the endpoint; it
 cannot be the first board in a connector-only daisy chain.
 
-The electrical migration preserves the existing model's mount transforms. Mount the body Micro
-board so the trunk axes are `[+sensor Z, +sensor Y, -sensor X]`, and align the head board's sensor
-axes with the model's `head_imu` site. A bracket that rotates either breakout also requires the
-matching transform change in `duck-control/src/imu.rs` or the head MJCF site; wiring alone cannot
-correct a rotated sensor.
+Mount both SparkFun IMUs with their labelled axes in the robot convention: **+X forward, +Y left,
++Z up**. The body board's sensor axes then equal the trunk axes directly. The head board uses the
+same convention in the neutral head pose; its MJCF site follows those axes through the articulated
+head. A bracket that rotates either breakout also requires the matching transform change in
+`duck-control/src/imu.rs` or the head MJCF site; wiring alone cannot correct a rotated sensor.
 
 The replacement bracket has not been measured in this repository, so the current alpha MJCF poses
 remain the mechanical contract rather than a claim that the SparkFun hole pattern lands there
 automatically: `tof` is at `pos="0.0143 0.0225 -0.0735"` with
 `quat="0.707107 0 0.707107 0"`, and `head_imu` is at
-`pos="0.0114823 0.000202447 -0.05126"` with an identity quaternion, both in the
-`bottom_head_shell` frame. The depth convention is +X optical-forward, +Y sensor-left, +Z up;
-wire zone 0 is the top-left return. If the bracket differs, update
-`kinematics/assets/alpha/robot_walk.xml` before mapping and verify all four grid corners against a
-flat target on hardware.
+`pos="0.0114823 0.000202447 -0.05126"` with the same quaternion, both in the
+`bottom_head_shell` frame. That local rotation cancels the shell asset's frame rotation, making
+the neutral sensor frame +X forward, +Y left, +Z up. The depth convention is likewise +X
+optical-forward, +Y sensor-left, +Z up; wire zone 0 is the top-left return. If the bracket differs,
+update `kinematics/assets/alpha/robot_walk.xml` before mapping and verify all four grid corners
+against a flat target on hardware.
 
 Prepare the addresses before assembly:
 

@@ -7,10 +7,11 @@ Implements the `robotd` row of [`architecture.md`](architecture.md) §1 and cove
 [`apirrone/microduck_runtime`](https://github.com/apirrone/microduck_runtime), referred to
 throughout as *the runtime*.
 
-**Only the alpha variant, only the Radxa, only the SparkFun LSM6DSV16X body IMU.** The custom
-`imu_to_dxl` board, v1/v1.5/v1.6, the other IMUs, the three cameras and the Pi are dropped, and
-every shipped policy is `alpha_*`. The wheeled configuration survives as one params switch —
-`policy.mode = "roller"` (§4.2) — because what it selects is a policy set and a tuning preset,
+**The policy path uses the alpha model and the SparkFun LSM6DSV16X body IMU.** The custom
+`imu_to_dxl` body board, v1/v1.5/v1.6 variants, legacy BMI088 head path and Pi path are retired.
+The beta face board's LSM6DSV16X remains a separate head stream owned by `robotd`; it is not a
+policy input. Every shipped policy is `alpha_*`. The wheeled configuration survives as one params
+switch — `policy.mode = "roller"` (§4.2) — because it selects a policy set and a tuning preset,
 not a hardware variant.
 
 ## 1. The shape of it
@@ -44,9 +45,10 @@ LSM6DSV16X stays at its factory `0x6b` address on the Radxa's Qwiic adapter:
 
 The shared `qwiic-imu` crate configures the chip's SFLP engine and returns gyro, acceleration,
 temperature and a fused quaternion. `duck-control::imu` owns only the robot-specific body mount,
-spike rejection and readiness gate. The head carries the same chip at `0x6a`, but `tofd` owns
-that address and publishes it separately; roles are fixed by address and are never inferred from
-probe order.
+spike rejection and readiness gate. The body breakout is mounted +X forward, +Y left, +Z up, so
+its sensor-to-trunk mount is identity. The head carries the same chip at `0x6a`, but `tofd` owns
+that address and publishes it separately on zero3; beta's face-board head IMU is served by
+`robotd`. Roles are fixed by board and address, never inferred from probe order.
 
 The I2C *adapter* is shared, not the sensor addresses. `tofd` also opens `/dev/i2c-qwiic` for the
 head IMU at `0x6a` and VL53L5CX at `0x29`; Linux serialises their transactions with `robotd`'s
@@ -319,8 +321,9 @@ nothing wants in between — so they are sampled together once a second in their
 transaction (~1 ms) rather than widening the tick's read to 22 bytes per servo at 50 Hz. The
 sampling interval is the same window the achieved rate is measured over, so one clock drives both.
 
-The body sensor opens from `[body_imu]`: `/dev/i2c-qwiic`, address `0x6b`, with its SFLP rate
-rounded up from the control rate (50 Hz therefore selects 60 Hz). It is required. An open error
+The body sensor opens from `[body_imu]`: `/dev/i2c-qwiic`, address `0x6b`, with its +X-forward,
++Y-left, +Z-up axes equal to the trunk frame and its SFLP rate rounded up from the control rate
+(50 Hz therefore selects 60 Hz). It is required. An open error
 keeps startup in the existing retry loop; an I2C error fails that tick through the same runtime
 counter as a servo read. A successful poll with no new FIFO quaternion is different: it holds the
 last good `ImuData`, increments `imu_stale`, and waits for the sensor's independent clock. A run of

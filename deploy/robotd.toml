@@ -41,8 +41,9 @@ port = "/dev/ttyS2"
 # fast_sync_read = true
 
 [body_imu]
-# Required SparkFun LSM6DSV16X in the trunk. setup-board.sh installs this stable alias for
-# the Radxa header's Qwiic adapter; changing it needs a robotd restart.
+# Required SparkFun LSM6DSV16X in the trunk, mounted +X forward, +Y left, +Z up. setup-board.sh
+# installs this stable alias for the Radxa header's Qwiic adapter; changing it needs a robotd
+# restart. Mount direction is a fixed robot/model contract, not an address setting.
 bus = "/dev/i2c-qwiic"
 
 # Seven-bit address. The body Micro breakout keeps the factory 0x6b address; the head board
@@ -432,13 +433,14 @@ mode = "walk"
 
 [head_imu]
 # The IMU in the robot's head, served as `head_imu.stream`: gyro, acceleration and an
-# orientation. Unset, the board decides:
+# on-chip SFLP orientation. Unset, the board decides:
 #
-# - zero3: the Qwiic LSM6DSV16X at 0x6a, read by tofd. **Off.** Nothing subscribes to the
-#   stream yet, so idle mapping hardware should not spend shared-Qwiic bandwidth and CPU wakeups.
+# - zero3: the Qwiic LSM6DSV16X at 0x6a, mounted +X forward, +Y left, +Z up in the neutral
+#   head pose and read by tofd. **Off.** Nothing subscribes to the stream yet, so idle mapping
+#   hardware should not spend shared-Qwiic bandwidth and CPU wakeups.
 #   `tofd --imu-hz 50` also controls the rate when enabled.
-# - beta: the face board's LSM6DSV16X, read by robotd. **On.** It fuses the orientation on
-#   the chip and batches gyro, accel and quaternion in its FIFO.
+# - beta: the face board's LSM6DSV16X, read by robotd. **On.** Its physical axes are rotated
+#   into the head frame in robotd; it fuses orientation on the chip and batches samples.
 #
 # Ask the daemon that does not read it on this board and the answer names the one that does.
 # While it is off, the answer names this key rather than giving the silence of a board with no
