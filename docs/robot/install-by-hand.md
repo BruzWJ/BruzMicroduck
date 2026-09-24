@@ -28,8 +28,9 @@ sudo groupadd --system robot
 sudo usermod -aG robot "$USER"
 ```
 
-`setup-board.sh` fetches the repository-owned Qwiic overlay. Export the repository ref and, while
-the repository is private, a contents-read token before running it; `sudo -E` carries those values
+`setup-board.sh` fetches the repository-owned Qwiic overlay and installs the stable
+`/dev/openrb-dxl` rule for the USB motor controller. Export the repository ref and, while the
+repository is private, a contents-read token before running it; `sudo -E` carries those values
 through:
 
 ```bash
@@ -37,8 +38,8 @@ export DUCK_TOKEN=github_pat_replace_with_your_token
 export DUCK_REF=main
 ```
 
-Board bring-up — device-tree overlay, kernel console off the motor UART, the getty mask,
-`Privacy = device`, onnxruntime:
+Board bring-up — OpenRB USB rule, Qwiic device-tree overlay, Bluetooth compatibility setting,
+onnxruntime:
 
 ```bash
 sudo -E sh ~/setup-board.sh
@@ -82,6 +83,11 @@ export DUCK_DEV_KEY=$HOME/team.dev.pub
 ```bash
 sudo -E sh ~/install.sh
 ```
+
+For a live motor bus, connect the SBC to an OpenRB-150 running ROBOTIS's factory
+`usb_to_dynamixel` firmware and confirm `readlink -f /dev/openrb-dxl` resolves. Servo branches,
+terminal-block power and the `VIN(DXL)` jumper are documented once in
+[`robotd-design.md` §1.1](../design/robotd-design.md#11-the-two-buses-and-who-owns-them).
 
 Drop `DUCK_DEV_KEY` for a board that should only take releases. Set `DUCK_REF` to a branch to
 install what that branch last built.

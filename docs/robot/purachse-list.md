@@ -12,6 +12,8 @@ and [control-loop design](../design/robotd-design.md).
 | Purpose | Component / product link | Quantity |
 | --- | --- | --- |
 | Servo communication | [ROBOTIS OpenRB-150](https://robotis.us/products/openrb-150) | 1 |
+| Host-to-OpenRB data | USB-C data cable | 1 |
+| Servo-bus fan-out | [ROBOTIS 3P JST Expansion Board](https://robotis.us/products/3p-jst-expansion-board) | 1 |
 | Servos | [DYNAMIXEL XL330-M288-T](https://robotis.us/products/dynamixel-xl330-m288-t?variant=51033242960012) | 15 |
 | Servo idler components | [ROBOTIS FPX330-H101, 4-piece set](https://robotis.us/products/fpx330-h101-4pcs-set?variant=51033243549836) | 1 set (4 pieces) |
 | Side frames | [ROBOTIS FPX330-S102, 4-piece set](https://robotis.us/products/fpx330-s102-4pcs-set?variant=51033242501260) | 1 set (4 pieces) |
@@ -26,6 +28,9 @@ and [control-loop design](../design/robotd-design.md).
 | NP-F battery | [Amazon battery listing](https://www.amazon.com/dp/B0007Q9PWQ?ref=ppx_yo2ov_dt_b_fed_asin_title) — requested as NP-F500; see note below | 1 |
 | NP-F battery adapter plate | [Accsoon Toprig NP-F Battery Adapter Mount Plate](https://www.amazon.com/dp/B0BR6JLLFC?ref=ppx_yo2ov_dt_b_fed_asin_title) | 1 |
 | Main computer | [Radxa ZERO 3W](https://radxa.com/products/zeros/zero3w/) | 1 |
+
+The complete OpenRB firmware, power, wiring and servo-ID contract is in
+[`robotd-design.md` §1.1](../design/robotd-design.md#11-the-two-buses-and-who-owns-them).
 
 ## Qwiic assembly
 
@@ -54,11 +59,12 @@ remain the mechanical contract rather than a claim that the SparkFun hole patter
 automatically: `tof` is at `pos="0.0143 0.0225 -0.0735"` with
 `quat="0.707107 0 0.707107 0"`, and `head_imu` is at
 `pos="0.0114823 0.000202447 -0.05126"` with the same quaternion, both in the
-`bottom_head_shell` frame. That local rotation cancels the shell asset's frame rotation, making
-the neutral sensor frame +X forward, +Y left, +Z up. The depth convention is likewise +X
-optical-forward, +Y sensor-left, +Z up; wire zone 0 is the top-left return. If the bracket differs,
-update `kinematics/assets/alpha/robot_walk.xml` before mapping and verify all four grid corners
-against a flat target on hardware.
+`bottom_head_shell` frame. The shell body's own asset transform remains unchanged; the site-local
+quaternion expresses the physically forward/up sensor mounting in that parent frame. Their
+composition makes the neutral sensor frame +X forward, +Y left, +Z up. The depth convention is
+likewise +X optical-forward, +Y sensor-left, +Z up; wire zone 0 is the top-left return. If the
+bracket differs, update `kinematics/assets/alpha/robot_walk.xml` before mapping and verify all four
+grid corners against a flat target on hardware.
 
 Prepare the addresses before assembly:
 

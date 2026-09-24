@@ -34,9 +34,9 @@ ExecStart=/opt/robot/daemon/current/bin/robotd --socket /run/robotd.sock
 # rollback path on a bench robot and are added by hand for that, never shipped: a robot
 # started with --unhealthy reverts every update it is offered.
 
-# Root for now, because motor control needs the i2c/spi/gpio character devices. This
-# should tighten to a dedicated user plus device ACLs once M4 establishes which devices
-# are actually touched — a narrower user written today would be a guess.
+# Root for now, because motor control opens the OpenRB tty and Qwiic I2C character device.
+# This should tighten to a dedicated user plus device ACLs once M4 establishes the complete
+# device set — a narrower user written today would be a guess.
 #
 # `Group=robot` is load-bearing: the socket inherits the process's primary group, so this
 # is what makes robotd's 0660 socket mean "the robot group" rather than "root only".

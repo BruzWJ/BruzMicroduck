@@ -11,7 +11,7 @@ next to their service (`updater/systemd/`, `robotd/systemd/`); anything robot-wi
 | `trusted_keys/` | release public keys — the trust anchor, installed to `/etc/robot/trusted_keys/` |
 | `journald.conf.d/10-robot.conf` | journal persistence and size caps |
 | `overlays/i2c3-qwiic.dts` | Radxa I2C3-M0 on header pins 3/5 for the SparkFun Qwiic sensor chain |
-| `audio/` | optional legacy audio-HAT overlay, driver and mixer setup; not a sensor prerequisite |
+| `audio/` | optional audio-HAT overlay, driver and mixer setup; not a sensor prerequisite |
 
 Note on that last one, now **measured** rather than assumed: `/var/log` on this image is a zram
 device, so `Storage=persistent` really is a directory in memory. It survives a clean reboot and
@@ -192,11 +192,20 @@ the one `updaterd` needs to reach release assets — [that one](#-while-the-repo
 is a systemd drop-in and outlives the shell. The two meet when `provision.sh` reaches
 `install.sh`: passing `DUCK_TOKEN` through is what writes the drop-in.
 
-**`setup-board.sh`** is idempotent and never reboots on its own. The one thing it fixes that is
-otherwise very hard to diagnose: Armbian ships `overlay_prefix=rk35xx`, but the RK3566 shares
-device-tree overlays with the RK3568 and they are named `rk3568-*.dtbo`. With the wrong prefix
-the loader finds nothing, the board boots happily, and there is simply no `/dev/ttyS2`.
-`armbian-config`'s overlay editor crashes for the same reason, so the file is patched directly.
+**`setup-board.sh`** is idempotent and never reboots on its own. Armbian ships
+`overlay_prefix=rk35xx`, but the RK3566 shares device-tree overlays with the RK3568 and the
+repository-owned overlays are named `rk3568-*.dtbo`. With the wrong prefix the loader skips them
+without failing the boot. `armbian-config`'s overlay editor crashes for the same reason, so the
+file is patched directly.
+
+The servo link is the OpenRB-150's USB CDC device, not a Radxa header UART. `setup-board.sh`
+delegates its host setup to `scripts/setup-openrb.sh`, which installs the ROBOTIS `2f5d:2202`
+udev rule, excludes that port from ModemManager probing, and creates the stable
+`/dev/openrb-dxl` name. Every signed release carries the same helper, and `hooks/postinstall`
+runs it before robotd restarts so already-provisioned boards receive the rule during an update.
+`setup-board.sh` also removes the retired `uart2-m0` overlay word from upgraded boards. The
+physical servo wiring, OpenRB firmware and power path are owned by
+[`robotd-design.md` §1.1](../docs/design/robotd-design.md#11-the-two-buses-and-who-owns-them).
 
 It also provisions the sensor bus independently of the optional audio HAT: installs `i2c-tools`
 and the `i2c` group, compiles [`overlays/i2c3-qwiic.dts`](overlays/i2c3-qwiic.dts), and gives the
@@ -226,12 +235,18 @@ unattended stable rollout to stage the daemon before the body IMU exists: missin
 is deliberately reported as *degraded* (so an unpowered bench robot is not rolled back forever),
 and the updater therefore cannot certify that the physical retrofit happened.
 
-⚠ A kernel upgrade that repoints `/boot/{Image,dtb,uInitrd}` can undo it. A board that stops
-seeing its motors or `/dev/i2c-qwiic` after an `apt upgrade` needs this re-run.
+The same cutover replaces the custom HAT's half-duplex motor interface with the OpenRB. A robot
+whose existing `/etc/robot/robotd.toml` still contains the exact old shipped line
+`port = "/dev/ttyS2"` is migrated once to `/dev/openrb-dxl` by the shared release setup script;
+fresh installs and ordinary updates use the same migration, and any other custom port is
+preserved. There is no `/dev/ttyS2` or custom-HAT fallback in this release. Complete the physical
+retrofit in the same maintenance session; without it, the software still installs but health
+reports no motor bus.
 
-⚠ Its `kernel console` status line reads `until the reboot` when the script has already fixed it
-and only the running kernel is stale — `/proc/cmdline` cannot change without a reboot. Anything
-else on that line is a real finding.
+⚠ A kernel upgrade that repoints `/boot/{Image,dtb,uInitrd}` can undo it. A board that stops
+seeing `/dev/i2c-qwiic` after an `apt upgrade` needs this re-run. The USB motor link is independent
+of kernel device-tree overlays; its operator checks are in the
+[`robotctl` cheat sheet](../docs/robot/cheatsheet.md#power-to-the-joints-robotd).
 
 **`migrate-network.sh`** runs **twice**, either side of the reboot — `provision.sh` does both,
 and it is worth knowing why the second matters. The first run arms a
