@@ -261,9 +261,10 @@ mod tests {
         assert!(forward([0.0, 0.3, 0.0, 0.0])[2] < -0.1);
     }
 
-    /// Both SparkFun sensors are installed with +X forward and +Z up. The head site's local
-    /// quaternion cancels the shell asset's frame rotation at neutral, and must remain parallel
-    /// to the ToF frame as the four head joints move.
+    /// Both SparkFun sensors are installed with +X forward and +Z up. The shell body's asset
+    /// transform stays intact; the child site's local quaternion expresses that physical sensor
+    /// mounting in the shell frame. Its composed neutral axes must be forward/left/up, and it must
+    /// remain parallel to the ToF frame as the four head joints move.
     #[test]
     fn head_imu_uses_forward_left_up_axes() {
         let fk = HeadFk::alpha();

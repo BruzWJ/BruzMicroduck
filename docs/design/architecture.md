@@ -40,10 +40,10 @@ and the rest are transports and sensors that own nothing.
   │ loop      │        │ wifi, name, │           │ swap        │
   │ safety    │        │ pad bonding │           │ health gate │
   └─────┬─────┘        └──────┬──────┘           └──────┬──────┘
-        │ UART + Qwiic        │ D-Bus                   │ systemctl restart,
+        │ USB + Qwiic         │ D-Bus                   │ systemctl restart,
         ▼                     ▼                         │ then robot.health
-  15 servos on UART;    BlueZ · NetworkManager           ▼
-  body IMU on I2C3                               /opt/robot/daemon/current
+  15 servos through      BlueZ · NetworkManager           ▼
+  OpenRB; body IMU I2C3                         /opt/robot/daemon/current
 
   ┌ publishes, answers nothing ───────────────────────────────────────┐
   │  tofd — head 8×8 depth + head IMU, on /run/tofd/tof.sock.         │
@@ -52,8 +52,9 @@ and the rest are transports and sensors that own nothing.
 ```
 
 **`robotd` is the only thing that can actuate the robot.** Its 50 Hz loop owns two separate
-hardware endpoints: the UART carrying the fifteen servos, and the body LSM6DSV16X at address
-`0x6b` on the Qwiic/I2C3 adapter. `tofd` shares that Linux I2C3 adapter but owns different
+hardware endpoints: `/dev/openrb-dxl`, the USB-connected OpenRB-150 bridge to the fifteen-servo
+TTL bus, and the body LSM6DSV16X at address `0x6b` on the Qwiic/I2C3 adapter. `tofd` shares that
+Linux I2C3 adapter but owns different
 addresses: the VL53L5CX at `0x29` and the head LSM6DSV16X at `0x6a`.
 Clients send *intents* — "go this fast", "look there", "stand up" — and the safety layer inside
 `robotd` decides what is actually executable. Nothing else in the system can command a motor
@@ -81,7 +82,7 @@ counter ([`updater-design.md`](updater-design.md)).
 
 | service | owns | listens on | reaches out to |
 |---|---|---|---|
-| `robotd` | motor control, body sensing, policies, safety, `robot.health` | `/run/robotd.sock` | the Dynamixel UART and body IMU `0x6b` on `/dev/i2c-qwiic` |
+| `robotd` | motor control, body sensing, policies, safety, `robot.health` | `/run/robotd.sock` | `/dev/openrb-dxl` and body IMU `0x6b` on `/dev/i2c-qwiic` |
 | `configd` | wifi, robot identity and name, pairing PIN, gamepad bonding, reboot | `/run/configd.sock` | BlueZ and NetworkManager over D-Bus |
 | `updaterd` | releases: verify, install, swap, health-gate, roll back | `/run/updaterd.sock` | GitHub releases, `systemctl`, `robotd` |
 | `btd` | nothing — BLE transport for a subset of the API | a BLE GATT service | `robotd`, `configd`, `updaterd` — not `padd` or `tofd`, whose streams a radio this narrow cannot carry |

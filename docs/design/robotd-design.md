@@ -7,6 +7,16 @@ Implements the `robotd` row of [`architecture.md`](architecture.md) §1 and cove
 [`apirrone/microduck_runtime`](https://github.com/apirrone/microduck_runtime), referred to
 throughout as *the runtime*.
 
+The OpenRB host and wiring reference is
+[`AI-FanGe/Microduck-build-tutorial`](https://github.com/AI-FanGe/Microduck-build-tutorial/tree/49678215d0b40529522772a40c06c216390449dd): its
+[`RobotController`](https://github.com/AI-FanGe/Microduck-build-tutorial/blob/49678215d0b40529522772a40c06c216390449dd/microduck/src/robot_controller.py#L13-L35)
+opens the OpenRB USB serial device with `rustypot` at 1 Mbps, and its
+[wiring](https://github.com/AI-FanGe/Microduck-build-tutorial/blob/49678215d0b40529522772a40c06c216390449dd/README.md#L655-L694)
+is `SBC -> USB -> OpenRB -> splitter -> leg/head chains`. That is the transport precedent,
+not a second robot contract: the tutorial uses a Raspberry Pi, a BNO08x, fourteen required
+servo IDs `1–14` and an optional mouth at `15`. This daemon retains the alpha model, both
+LSM6DSV16X IMUs, and all fifteen required IDs `20–24 / 30–34 / 10–14`.
+
 **Only the alpha variant, only the Radxa, only the SparkFun LSM6DSV16X body IMU.** The custom
 `imu_to_dxl` board, v1/v1.5/v1.6, the other IMUs, the three cameras and the Pi are dropped, and
 every shipped policy is `alpha_*`. The wheeled configuration survives as one params switch —
@@ -15,32 +25,77 @@ not a hardware variant.
 
 ## 1. The shape of it
 
-One process, one servo UART, one body IMU on Qwiic, one 50 Hz loop. Each tick reads all fifteen
-servos, polls the IMU, decides fifteen joint targets, and writes them back. Everything else —
-clients, health, telemetry — hangs off that loop without ever being able to block it.
+One process, one USB-to-Dynamixel link, one body IMU on Qwiic, one 50 Hz loop. Each tick reads all
+fifteen servos, polls the IMU, decides fifteen joint targets, and writes them back. Everything
+else — clients, health, telemetry — hangs off that loop without ever being able to block it.
 
 ### 1.1 The two buses, and who owns them
 
-The custom bridge is gone. Fifteen servos remain on the exclusive UART; the body Micro
-LSM6DSV16X stays at its factory `0x6b` address on the Radxa's Qwiic adapter:
+The custom HAT and the direct SBC motor UART are gone. The SBC opens the OpenRB-150's USB CDC
+device through the stable `/dev/openrb-dxl` name. The OpenRB runs ROBOTIS's unmodified factory
+[`usb_to_dynamixel`](https://github.com/ROBOTIS-GIT/OpenRB-150/blob/master/libraries/OpenRB-150/examples/usb_to_dynamixel/usb_to_dynamixel.ino)
+sketch: it copies raw bytes between USB and `Serial1`, changes the TTL baud rate when the host's
+CDC line rate changes, and enables the board's DYNAMIXEL power FET. It does **not** run the ONNX
+policy, the 50 Hz loop, joint mapping or safety; all of those remain in `robotd` on Linux.
+
+The body Micro LSM6DSV16X stays at its factory `0x6b` address on the SBC's Qwiic adapter:
 
 ```text
-                     robotd — control thread
-                              │
-                              │  duck_control::bus::DynamixelIo
-              ┌───────────────┴────────────────┐
-              │                                │
-              │ serialport · TIOCEXCL          │ qwiic-imu
-              ▼                                ▼
- /dev/ttyS2 · 1 Mbps                  /dev/i2c-qwiic · 400 kHz
- Dynamixel protocol v2                        │
-              │                               └── 0x6b body LSM6DSV16X
-   ┌──────────┼──────────────┐
-   │          │              │
- 20–24      30–34          10–14
- left leg   neck/head/     right leg
- 5 servos   mouth, 5       5 servos
+                    robotd — control thread
+                             │
+                             │ duck_control::bus::DynamixelIo
+             ┌───────────────┴───────────────────────┐
+             │                                       │
+             │ serialport · TIOCEXCL                 │ qwiic-imu
+             ▼                                       ▼
+ /dev/openrb-dxl · USB CDC                  /dev/i2c-qwiic · 400 kHz
+             │                                       │
+             │ USB-C data                            └── Qwiic SHIM
+             ▼                                            │
+ OpenRB-150 · factory usb_to_dynamixel                      ├── 0x29 VL53L5CX ToF
+             │ Serial1 · 1 Mbps TTL · protocol v2           ├── 0x6a head LSM6DSV16X
+             │ one DYNAMIXEL socket                         └── 0x6b body LSM6DSV16X
+             ▼
+ 30–34 neck/head/mouth chain · 5 servos
+             │ free DYNAMIXEL connector on the last head servo
+             ▼
+ ROBOTIS 3P JST expansion board · five parallel GND/VDD/DATA taps
+             ├── 20–24 left-leg chain · 5 servos
+             └── 10–14 right-leg chain · 5 servos
 ```
+
+The reference implementation's generic splitter is concretely the ROBOTIS
+[3P JST Expansion Board](https://robotis.us/products/3p-jst-expansion-board) in this build. The
+OpenRB's four DYNAMIXEL connectors, both pass-through connectors on each XL330, and all five
+expansion-board connectors are physical taps on that **one** half-duplex TTL bus, not independently
+addressable controllers. Use exactly one OpenRB DYNAMIXEL socket: connect it to the first servo in
+the neck/head/mouth chain (`30–34`), daisy-chain those five servos, and connect the free connector
+on the last physical head servo to any expansion-board socket. Two other board sockets feed the
+left-leg (`20–24`) and right-leg (`10–14`) chains; leave the remaining two sockets spare. The
+head-to-board connection is the second connector on a servo, **not** a second OpenRB port. Do not
+connect another OpenRB socket or any downstream servo back to the board, because that would make a
+power/data loop. Physical order may follow the mechanism, but IDs and names may not. In particular,
+the tutorial's optional mouth does not apply here: ID `34` is present in every fifteen-servo read
+and write.
+
+Power follows the selected robot wiring, not the USB cable: the NP-F/2S rail enters the OpenRB
+terminal block, the power-source jumper is on **`VIN(DXL)`**, and the OpenRB supplies VDD through
+the neck/head chain and onward to the expansion board. USB-C between the SBC and OpenRB is the data
+connection and must not be treated as motor power. The passive splitter does not regulate the
+terminal voltage or add current capacity. ROBOTIS publishes a 3,000 mA total rating for the
+DYNAMIXEL ports and no separate current rating for the expansion-board traces. In this topology,
+the OpenRB-to-head cable carries the aggregate current of all fifteen servos; each upstream head
+pass-through carries the remaining downstream load, and the head-to-board cable carries both leg
+chains. That is a constraint to verify under the real gait, not 3 A per connector or an invitation
+to add servos. The AI-FanGe build uses a ready-made 6 V rechargeable pack, so it supports the
+topology but does not validate this build's NP-F rail.
+The jumper position, polarity and no-hot-plug rules are shown in the official
+[OpenRB-150 power documentation](https://emanual.robotis.com/docs/en/parts/controller/openrb-150/#connecting-power).
+
+The sensor path remains direct to the SBC and completely outside the OpenRB:
+`Qwiic SHIM -> VL53L5CX ToF -> head LSM6DSV16X -> body Micro LSM6DSV16X`. The optional audio
+HAT remains on its existing codec/overlay path and is unchanged; replacing the motor HAT does
+not remove audio support.
 
 The shared `qwiic-imu` crate configures the chip's SFLP engine and returns gyro, acceleration,
 temperature and a fused quaternion. `duck-control::imu` owns only the robot-specific body mount,
@@ -55,11 +110,13 @@ body polls. A failed body poll makes the tick's complete sensor read fail exactl
 servo read does. A cold ToF firmware upload can therefore add Qwiic latency, and the loop-rate
 health counters are the backstop rather than an invented second adapter.
 
-**One owner at a time; tty exclusivity alone does not enforce it.** `serialport` sets `TIOCEXCL`, which
-turns a second *unprivileged* open into `EBUSY` — but `robotd.service` runs as root, because
-motor control needs the character devices, and root is not stopped by that flag. The daemon
-and standalone `init` therefore share an advisory lock, and other claimants are kept off the
-port separately:
+**One owner at a time; tty exclusivity alone does not enforce it.** `setup-board.sh` matches the
+OpenRB's ROBOTIS USB identity (`2f5d:2202`), creates `/dev/openrb-dxl`, and tells ModemManager not
+to probe it. A `/dev/ttyACM*` number is enumeration order and is never configuration. `serialport`
+sets `TIOCEXCL`, which turns a second *unprivileged* open into `EBUSY` — but `robotd.service` runs
+as root, because motor control needs the character devices, and root is not stopped by that flag.
+The daemon and standalone `init` therefore share an advisory lock, and other claimants are kept
+off the port separately:
 
 - **The control loop** owns it for as long as the daemon runs.
 - **`robotd init`** opens the port itself, but must first take the daemon's endpoint lock.
@@ -67,10 +124,9 @@ port separately:
   already moving the robot refuses a daemon startup or another `init`. `robot.init` and
   `robot.relax` remain the IPC methods (§3.3) for a running daemon; standalone `init` is the
   escape hatch for a robot whose daemon is not running.
-- **`serial-getty@ttyS2`** — Armbian runs a login console on UART2 by default, and an `agetty`
-  holding the port makes every servo invisible to everything else. `scripts/setup-board.sh`
-  masks the unit; `fuser -v /dev/ttyS2` naming `agetty` is how that was found, and it is still
-  the command that answers "who has the bus".
+- **DYNAMIXEL Wizard and Arduino tools** use the same OpenRB USB device and therefore run only
+  while `robotd` is stopped. Uploading any other sketch replaces the transparent bridge; restore
+  the official `usb_to_dynamixel` example before starting `robotd` again.
 - **The runtime**, at a coarser grain: it drives the same bus, so a board runs the runtime or
   `robotd` and never both, and the units say so with `Conflicts=` (§5.2).
 
@@ -174,7 +230,7 @@ every 1 s       slow_sensors()     · registers 144–146 · voltage + temperatu
 Where the data goes, once per period:
 
 ```text
-  Dynamixel UART ── fast sync_read: 15 servos ──┐
+  OpenRB USB/TTL ── fast sync_read: 15 servos ──┐
                                                 ├─ complete read or error
   Qwiic I2C3 ──── body SFLP FIFO poll ──────────┘
                                                 │
@@ -277,11 +333,13 @@ intended:
 
 ### 2.1 The bus layer and `RobotIo`
 
-A thin hardware backend over two libraries: `rustypot` owns the fifteen-servo UART, and
-`qwiic-imu` owns the body LSM6DSV16X's Linux I2C/FIFO/SFLP mechanics. `DynamixelIo` composes
-them behind `RobotIo` so callers receive a complete joint-plus-body sample or an error, never
-half of an observation. The servo layer was written fresh rather than lifted, but **the numbers
-are borrowed from the runtime**, each with a comment saying so:
+A thin hardware backend over two libraries: `rustypot` owns the raw Dynamixel byte stream through
+the OpenRB bridge, and `qwiic-imu` owns the body LSM6DSV16X's Linux I2C/FIFO/SFLP mechanics.
+`DynamixelIo` composes them behind `RobotIo` so callers receive a complete joint-plus-body sample
+or an error, never half of an observation. The OpenRB does not terminate or reinterpret protocol
+2.0 packets, so servo discovery, register provisioning, sync reads and sync writes remain the same
+host code. The servo layer was written fresh rather than lifted, but **the numbers are borrowed
+from the runtime**, each with a comment saying so:
 
 - `RAD_PER_SEC_PER_COUNT = 0.229 × 2π/60`, and the position count↔radian conversion.
 - The EEPROM registers from `check_and_fix_config`, asserted *and corrected* at startup:
@@ -304,16 +362,20 @@ are borrowed from the runtime**, each with a comment saying so:
   until someone pulled the battery. A complete bus pays fifteen pings for this and nothing
   else — the 57 600 probe never runs unless a servo is missing. Two missing servos are left
   alone: there is no telling which one a fresh servo replaces, and the journal says so.
+- **Every host-port open leaves 20 ms with no payload.** The factory bridge applies a changed
+  USB CDC line rate to its TTL UART after forwarding bytes already waiting in that loop pass.
+  The one-time quiet window lets it observe 1 Mbps before the first packet, and is repeated when
+  adoption temporarily reopens at 57 600 and then returns to 1 Mbps. It is never paid per tick.
 - The position P gain is written with I and D at **zero**, the runtime's `--ki`/`--kd`
   defaults. These are RAM registers, so a power cycle restores the servo's factory values, and
   the factory D is not zero: left in place it damps the servo's internal PID and the robot runs
   measurably softer at the *same* kP. Not a tuning choice anyone made, so it is pinned rather
   than exposed.
 
-**One servo read and one body-IMU poll before every decision, then one servo write.** The UART
+**One servo read and one body-IMU poll before every decision, then one servo write.** The servo
 read covers a contiguous block at 124–136 (pwm, current, velocity, position). Voltage and
 temperature sit at 144–146, eight bytes past its end, with twelve bytes of trajectory registers
-nothing wants in between — so they are sampled together once a second in their own UART
+nothing wants in between — so they are sampled together once a second in their own Dynamixel
 transaction (~1 ms) rather than widening the tick's read to 22 bytes per servo at 50 Hz. The
 sampling interval is the same window the achieved rate is measured over, so one clock drives both.
 
@@ -346,7 +408,7 @@ controller so the tick's servo read, the slow read and the startup position read
 without naming it. The instruction packet is a plain sync read's; what changes is the answer.
 Instead of fifteen status packets, each with its ten-byte protocol 2.0 header and each preceded
 by that device's turnaround, the devices append their blocks to **one** status packet from the
-broadcast id. The UART turns around once per tick rather than fifteen times, which is the same
+broadcast id. The TTL bus turns around once per tick rather than fifteen times, which is the same
 cost `return_delay_time = 0` above exists to hold down — the register check still matters,
 because every other transaction on this bus is an ordinary one that pays it per device.
 
@@ -369,6 +431,22 @@ it rolls itself back. A robot that predates the firmware needs one key set, once
 notices; there is no version negotiation here and no probe at startup, because a device that does
 not answer looks exactly like one that is unpowered and a probe would have to tell those apart
 before it could say anything useful.
+
+**USB recovery preserves read-before-write.** A host-port error, or a send timeout while the
+stable udev link is absent, arms a reopen for the beginning of the next servo read. An ordinary
+servo response timeout while `/dev/openrb-dxl` is still present does not churn the USB device.
+After a reopen, torque-on, gain, reboot and position commands remain refused until one complete
+fifteen-servo read *and* the required body-IMU poll succeed; only then does the usual tick write a
+target. Once the servo port itself has reopened, torque-off remains available as the fail-safe
+action even if the required IMU is down.
+Reopening inside the failed transaction would allow that coasted tick's stale target onto the new
+handle, which is why recovery waits for the next read boundary. That automatic path is only for USB
+re-enumeration while terminal power preserves the OpenRB and servo RAM. Resetting, reflashing or
+power-cycling the OpenRB is different because it cycles the servo-side power FET, and neither a
+successful read nor health can prove that RAM torque/gains survived. Support the robot, run
+`sudo robotctl robot relax --yes` and then `sudo robotctl robot init` before driving again.
+After the all-servo torque-off succeeds, `Safety` forgets its last-gain cache; the next apply
+therefore rewrites P/I/D instead of mistaking the pre-reset cached value for live servo RAM.
 
 **Board temperature is a third source, and not on the bus at all.** The hottest of the SoC's
 thermal zones, read from `sysfs` in the same once-a-second sample (`robotd/src/soc.rs`). It
@@ -1017,7 +1095,7 @@ arrived on top of that shape rather than changing it.
 
 ### 5.4 Not regressing is the acceptance criterion
 
-`bench_dynamixel_bus` remains the servo-UART baseline, but it no longer measures the body IMU.
+`bench_dynamixel_bus` remains the servo-link baseline, but it no longer measures the body IMU.
 Acceptance therefore also runs `robotd` while `tofd` cold-starts the VL53L5CX and then streams
 depth plus the head IMU on the shared adapter; the loop's achieved-rate, deadline and IMU-staleness
 counters are the measurement. This is deliberately not an RT engineering project — no

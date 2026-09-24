@@ -29,8 +29,8 @@
 # the two scripts already decided or parsing their output, and both drift. A reboot on a board
 # being provisioned costs thirty seconds. What it buys is worth more than that:
 #
-#   - Phase 2 runs against live boot config, so the motor UART exists by the time `robotd`
-#     starts and a bench board's health report is about its servos rather than its overlays.
+#   - Phase 2 runs against live boot config, so the Qwiic sensor bus exists by the time the
+#     daemons start and a bench board's health report is about its sensors rather than overlays.
 #   - Your shell after the reboot is a *new login session*, which is what makes the `robot`
 #     group live without `newgrp`. See `create_group`.
 #
@@ -322,8 +322,8 @@ boot_id() {
 # Is this still the boot that ran phase 1?
 #
 # Phase 2 installs the daemon, and until the reboot the overlay is staged rather than live, so
-# there is no /dev/ttyS2 — `robotd` would start, see no bus, and report a hardware fault that
-# is really an operator who skipped a step. Answers no when the id is unavailable, which fails
+# there is no /dev/i2c-qwiic — robotd and tofd would report a hardware fault that is really an
+# operator who skipped a step. Answers no when the id is unavailable, which fails
 # towards letting provisioning continue: refusing on a board that cannot tell us would strand
 # it with no way forward at all.
 same_boot_as_phase_one() {
@@ -793,8 +793,8 @@ main() {
         if same_boot_as_phase_one; then
             die "phase 1 has run but this board has not rebooted since.
   Phase 2 installs the daemon, and until the reboot the overlay is staged rather than live —
-  so there is no /dev/ttyS2, and robotd would start and report a hardware fault that is
-  really a missing reboot.
+  so there is no /dev/i2c-qwiic, and the daemons would report a hardware fault that is really
+  a missing reboot.
     sudo reboot
   Then this finishes on its own, unless DUCK_NO_REBOOT was set — in which case:
     sudo ${SELF}"

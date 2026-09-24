@@ -138,6 +138,13 @@ releases.
 robotctl health
 ```
 
+If the motor controller is attached, its stable path must resolve regardless of which
+`/dev/ttyACM*` number Linux assigned:
+
+```bash
+readlink -f /dev/openrb-dxl
+```
+
 The board only counts as a dev board if the key really installed, and that is a thing you can
 check rather than a thing you have to remember:
 

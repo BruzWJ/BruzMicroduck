@@ -452,11 +452,26 @@ is the only way back to limp short of pulling the plug: pressing Start again sto
 keeps the robot standing, and `robot.stop` zeroes the velocity while still standing.
 
 Both go through `robotd`, which owns the motor bus. `robotd init` — the subcommand — still exists for
-a robot whose daemon is not running, and it needs the daemon stopped, because two writers on one UART
-corrupt each other's replies:
+a robot whose daemon is not running, and it needs the daemon stopped, because two writers through
+one OpenRB bridge corrupt each other's replies:
 
 ```
 sudo systemctl stop robotd && sudo /opt/robot/daemon/current/bin/robotd init && sudo systemctl start robotd
+```
+
+The normal motor device is `/dev/openrb-dxl`; if health says the hardware buses did not open,
+`readlink -f /dev/openrb-dxl` and `lsusb -d 2f5d:2202` distinguish a missing udev link from a
+missing USB controller. The OpenRB must run the factory `usb_to_dynamixel` sketch. Stop `robotd`
+before opening it in DYNAMIXEL Wizard or an Arduino uploader; the wiring, power and bus IDs are
+owned by [`robotd-design.md` §1.1](../design/robotd-design.md#11-the-two-buses-and-who-owns-them).
+
+A USB data reconnect recovers automatically only while terminal power kept the OpenRB and servo
+RAM alive. After resetting, reflashing or power-cycling the OpenRB, support the robot and re-arm
+the RAM state explicitly:
+
+```
+sudo robotctl robot relax --yes
+sudo robotctl robot init
 ```
 
 `reboot-motors` is also reachable over Bluetooth, as `duckctl reboot-motors`
@@ -786,9 +801,9 @@ journalctl -u tofd -b
 The scan should contain exactly the sensor addresses `29`, `6a`, and `6b` (plus `18` only when
 the optional audio HAT is fitted). `0x52` in some ST ToF material is the shifted 8-bit write
 address, not the Linux address. `setup-board.sh` provisions I2C3 on Radxa header pins 3/5 and
-the stable `/dev/i2c-qwiic` name independently of audio; `tofd` tries that name first and
-`/dev/i2c-3` only for a board provisioned before the rule existed. Physical order, the head
-address jumper, and the required pull-up cuts are in the
+the stable `/dev/i2c-qwiic` name independently of audio; that is the bus `tofd` uses in service.
+Its explicit `--bus` option is only for bench overrides, not a fallback for an unprovisioned
+board. Physical order, the head address jumper, and the required pull-up cuts are in the
 [purchase list](purachse-list.md#qwiic-assembly).
 
 #### The head IMU (`head_imu.stream`)

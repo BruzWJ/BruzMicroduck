@@ -87,8 +87,8 @@ fn slow_sensors(&mut self) -> Result<SlowSensors>;   // volts, per-joint tempera
 
 Above it, nothing changes: the 50 Hz loop, the ONNX policies, `Safety`, fall detection, odometry,
 kinematics, maploc, every IPC call, all of `robotctl` and `duckctl`. Below it, `DynamixelIo`
-composes two physical drivers: the fifteen-servo UART burst and the body LSM6DSV16X poll on
-Qwiic. The simulator returns their logical result together, so it exercises the policy-facing
+composes two physical drivers: the fifteen-servo OpenRB/Dynamixel burst and the body LSM6DSV16X
+poll on Qwiic. The simulator returns their logical result together, so it exercises the policy-facing
 complete-sample contract without pretending to exercise either driver.
 
 `FakeIo` was already a full implementation of this trait, which is why `cargo test` needs no

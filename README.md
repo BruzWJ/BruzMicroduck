@@ -93,7 +93,9 @@ It also sits, kicks a ball, rolls forward on command, and quacks in a voice that
 
 ## Under the hood
 
-Rust, no framework, one workspace. `robotd` owns the control loop and the motor bus; `updaterd`
+Rust, no framework, one workspace. `robotd` owns the control loop and reaches the fifteen-servo
+TTL bus through a USB-connected OpenRB-150
+([wiring and transport](docs/design/robotd-design.md#11-the-two-buses-and-who-owns-them)); `updaterd`
 installs signed releases and rolls them back when a robot comes up unhealthy; `configd` owns wifi
 and identity; `btd` is the Bluetooth path a phone uses; `padd` reads the gamepad; `mediad` streams
 the camera over WebRTC; `tofd` serves the head depth and optional head-IMU streams. They talk over
