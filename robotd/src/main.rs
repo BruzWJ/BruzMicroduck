@@ -232,7 +232,7 @@ struct Args {
     #[arg(long)]
     params: Option<PathBuf>,
 
-    /// Serial port override, for a board wired differently from the shipped default.
+    /// OpenRB USB device override, for development without the provisioned stable link.
     #[arg(long)]
     port: Option<String>,
 

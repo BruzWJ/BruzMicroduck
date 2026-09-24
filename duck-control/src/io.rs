@@ -202,6 +202,9 @@ pub struct FakeIo {
     pub writes: usize,
     /// Last gain commanded, so a test can tell "went limp" from "stopped commanding".
     pub last_gain: Option<u16>,
+    /// How many gain writes were issued. The value alone cannot prove a RAM-restoring rewrite
+    /// happened after a servo reboot or torque-off because the requested value may be unchanged.
+    pub gain_writes: usize,
     /// Whether the orientation filter reports converged. False models the first seconds after
     /// startup, when projected gravity is not yet a measurement.
     pub imu_ready: bool,
@@ -242,6 +245,7 @@ impl FakeIo {
             reads: 0,
             writes: 0,
             last_gain: None,
+            gain_writes: 0,
             imu_ready: true,
             slow: Some(SlowSensors {
                 volts: 7.4,
@@ -328,6 +332,7 @@ impl RobotIo for FakeIo {
 
     fn set_gain(&mut self, kp: u16) -> Result<()> {
         self.last_gain = Some(kp);
+        self.gain_writes += 1;
         Ok(())
     }
 

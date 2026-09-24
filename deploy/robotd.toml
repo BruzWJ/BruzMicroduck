@@ -16,10 +16,12 @@
 # is far easier to diagnose remotely than a daemon that will not run.
 
 [bus]
-# Serial port for the 15 servos. /dev/ttyS2 is the Radxa Zero 3W's wiring; a board wired
-# differently can also be overridden per-invocation with
+# Stable link to the OpenRB-150 running ROBOTIS's factory `usb_to_dynamixel` sketch. The
+# provisioning udev rule points this name at the board's current /dev/ttyACM* node, so a USB
+# disconnect/re-enumeration does not change the configured path. A development setup can also
+# override it per-invocation with
 # `robotd --port`, which is the dev escape hatch rather than the thing to edit here.
-port = "/dev/ttyS2"
+port = "/dev/openrb-dxl"
 
 # Read the bus with fast sync read (protocol 2.0 instruction 0x8A) instead of a plain sync
 # read. The 15 servos append their answers to one status packet rather than each sending

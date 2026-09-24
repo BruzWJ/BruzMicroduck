@@ -1,7 +1,10 @@
-//! The Dynamixel bus.
+//! The Dynamixel bus through an OpenRB-150 USB bridge.
 //!
 //! One servo `sync_read`, one body-IMU I²C poll, and one servo `sync_write` per tick. The
 //! LSM6DSV16X shares the Radxa's Qwiic bus with the head sensors, not the Dynamixel wire.
+//! The OpenRB runs ROBOTIS's factory `usb_to_dynamixel` sketch: it forwards the host's raw
+//! Protocol 2 packets rather than owning the control loop, so servo configuration, sensing,
+//! safety, and policy execution remain here on the Linux host.
 //!
 //! Every sync read here is a **fast** sync read (protocol 2.0 instruction 0x8A): the devices
 //! append their answers to one status packet from the broadcast id instead of each sending
@@ -17,7 +20,9 @@
 //! registers asserted at startup — come from `microduck_runtime`, where they were arrived
 //! at against real hardware. See [`crate::model`].
 
+use std::error::Error;
 use std::f64::consts::PI;
+use std::io;
 use std::path::Path;
 use std::time::Duration;
 
@@ -55,6 +60,15 @@ const VOLTS_PER_COUNT: f64 = 0.1;
 /// A healthy 15-device read completes well inside this. Capping it means a missing device
 /// costs a bounded hiccup rather than stalling the loop on the serial driver's default.
 const READ_TIMEOUT: Duration = Duration::from_millis(30);
+
+/// Let the OpenRB factory bridge apply USB CDC line coding before sending a packet.
+///
+/// Its sketch forwards available USB bytes *before* checking whether `USB.baud()` changed. A
+/// packet written immediately after open could therefore leave the DXL UART at the previous
+/// physical baud. This short, one-time pause gives the otherwise tight firmware loop a pass with
+/// no payload first. It applies to normal startup, USB recovery, and the 1 Mbaud/57,600 baud
+/// switches used to adopt a factory-fresh servo; it is never paid per control tick.
+const OPENRB_LINE_CODING_SETTLE: Duration = Duration::from_millis(20);
 
 /// How long a servo is off the bus after a REBOOT before it answers again — "a few hundred
 /// milliseconds" per [`RobotIo::reboot`], with margin. Pinging too early would read a servo
@@ -104,6 +118,118 @@ impl StaleImuTracker {
     }
 }
 
+/// Recovery state for the host USB link while the terminal-powered OpenRB itself stays running.
+///
+/// Reopening is deliberately deferred until the next complete read. Reopening inside the
+/// failing transaction would let the rest of that same coasted tick write an old target through
+/// the new handle. After a reopen, motion-capable commands remain blocked until one complete
+/// servo + body-IMU sample has landed; only then can the ordinary read-before-write tick resume.
+/// Torque-off stays available once the replacement handle itself is live.
+///
+/// This is intentionally not MCU-reset recovery. Resetting/reflashing the OpenRB cycles its DXL
+/// power FET, which resets servo RAM (including torque and gains). This layer never silently
+/// re-enables either; after such a reset the operator explicitly relaxes and initializes the
+/// robot so the high-level bring-up state and the servo RAM agree again.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum PortRecovery {
+    #[default]
+    Ready,
+    ReopenBeforeRead,
+    AwaitingCompleteRead,
+}
+
+impl PortRecovery {
+    /// Remember a real host-port failure. A servo response timeout, checksum error, or wrong id
+    /// is a bus/device miss and must not churn the USB device.
+    fn observe(&mut self, error: &(dyn Error + 'static), port_present: bool) -> bool {
+        if !should_recover_port(error, port_present) {
+            return false;
+        }
+        let newly_armed = *self != Self::ReopenBeforeRead;
+        *self = Self::ReopenBeforeRead;
+        newly_armed
+    }
+
+    fn needs_reopen(self) -> bool {
+        self == Self::ReopenBeforeRead
+    }
+
+    fn reopened(&mut self) {
+        *self = Self::AwaitingCompleteRead;
+    }
+
+    fn complete_read(&mut self) {
+        *self = Self::Ready;
+    }
+
+    fn may_command(self) -> bool {
+        self == Self::Ready
+    }
+
+    /// Torque-off may bypass the complete-sample gate once a real controller handle has been
+    /// reopened. It must not run in `ReopenBeforeRead`: [`DynamixelIo::reopen`] has already
+    /// dropped the dead handle before an open failure returns, so no serial controller exists in
+    /// that state.
+    fn may_disable_torque(self) -> bool {
+        self != Self::ReopenBeforeRead
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PortErrorClass {
+    Host,
+    Timeout,
+    Other,
+}
+
+/// Classify a boxed `rustypot` error once, preserving host-device failures separately from a
+/// servo that simply missed its response deadline.
+fn classify_port_error(error: &(dyn Error + 'static)) -> PortErrorClass {
+    let mut current = Some(error);
+    let mut saw_timeout = false;
+    while let Some(error) = current {
+        if let Some(error) = error.downcast_ref::<io::Error>() {
+            match error.kind() {
+                io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => saw_timeout = true,
+                io::ErrorKind::Interrupted => {}
+                _ => return PortErrorClass::Host,
+            }
+        } else if let Some(error) = error.downcast_ref::<serialport::Error>() {
+            match error.kind() {
+                serialport::ErrorKind::NoDevice => return PortErrorClass::Host,
+                serialport::ErrorKind::Io(io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) => {
+                    saw_timeout = true
+                }
+                serialport::ErrorKind::Io(io::ErrorKind::Interrupted)
+                | serialport::ErrorKind::InvalidInput
+                | serialport::ErrorKind::Unknown => {}
+                serialport::ErrorKind::Io(_) => return PortErrorClass::Host,
+            }
+        } else if matches!(
+            error.downcast_ref::<rustypot::CommunicationErrorKind>(),
+            Some(rustypot::CommunicationErrorKind::TimeoutError)
+        ) {
+            saw_timeout = true;
+        }
+        current = error.source();
+    }
+    if saw_timeout {
+        PortErrorClass::Timeout
+    } else {
+        PortErrorClass::Other
+    }
+}
+
+/// `rustypot` reduces a failed packet send to a timeout. The stable udev link supplies the missing
+/// distinction: a timeout while the link resolves is a servo miss; one after it vanished reopens.
+fn should_recover_port(error: &(dyn Error + 'static), port_present: bool) -> bool {
+    match classify_port_error(error) {
+        PortErrorClass::Host => true,
+        PortErrorClass::Timeout => !port_present,
+        PortErrorClass::Other => false,
+    }
+}
+
 pub struct DynamixelIo {
     controller: Xl330Controller,
     /// Kept so the port can be reopened at the factory baud rate: `rustypot` owns the serial
@@ -113,6 +239,9 @@ pub struct DynamixelIo {
     /// built without this would silently drop back to a plain sync read for the rest of the
     /// process — a motor swap quietly halving the tick's bus budget.
     fast_sync_read: bool,
+    /// Live USB disconnects are reopened through `port`, but no command is admitted until a
+    /// complete read through that new handle has succeeded.
+    port_recovery: PortRecovery,
     body_imu: qwiic_imu::Sensor,
     imu: SflpDecoder,
     last_imu: ImuData,
@@ -139,6 +268,7 @@ impl DynamixelIo {
             controller,
             port: port.to_owned(),
             fast_sync_read,
+            port_recovery: PortRecovery::default(),
             body_imu,
             imu: SflpDecoder::default(),
             last_imu: ImuData::default(),
@@ -149,6 +279,56 @@ impl DynamixelIo {
     /// Effective SFLP rate after rounding the control rate to a supported sensor rung.
     pub fn body_imu_rate_hz(&self) -> u16 {
         self.body_imu.rate_hz()
+    }
+
+    /// Turn a `rustypot` failure into this crate's error while retaining the one distinction a
+    /// hot-pluggable USB bridge needs: host-port loss versus a servo/protocol miss.
+    fn observe_port_error(&mut self, error: &(dyn Error + 'static)) {
+        if self
+            .port_recovery
+            .observe(error, Path::new(&self.port).exists())
+        {
+            tracing::warn!(
+                port = %self.port,
+                "OpenRB USB link disappeared; will reopen it before the next servo read"
+            );
+        }
+    }
+
+    fn servo_error(&mut self, what: &str, error: Box<dyn Error>) -> IoError {
+        self.observe_port_error(error.as_ref());
+        IoError::Bus(format!("{what}: {error}"))
+    }
+
+    /// Reopen a re-enumerated OpenRB only at the start of a read-before-write tick.
+    fn recover_port_before_read(&mut self) -> Result<()> {
+        if !self.port_recovery.needs_reopen() {
+            return Ok(());
+        }
+        self.reopen(BAUD_RATE)?;
+        self.port_recovery.reopened();
+        tracing::warn!(
+            port = %self.port,
+            "OpenRB USB link reopened; waiting for a complete sensor sample before commanding"
+        );
+        Ok(())
+    }
+
+    /// Motion-capable commands through a newly reopened bridge are refused until the tick has
+    /// fresh joint and body-IMU data. Torque-off is deliberately exempt: losing the required IMU
+    /// must never prevent an operator or shutdown path from relaxing otherwise reachable servos.
+    /// This makes recovery follow the same read-before-write invariant as startup without
+    /// turning a sensor failure into a torque-off interlock.
+    fn require_complete_read(&self) -> Result<()> {
+        if self.port_recovery.may_command() {
+            Ok(())
+        } else {
+            Err(IoError::Bus(
+                "OpenRB USB link is recovering; refusing a servo command until a complete sensor \
+                 read succeeds"
+                    .to_owned(),
+            ))
+        }
     }
 
     /// Assert — and correct — the EEPROM registers the control loop depends on.
@@ -328,9 +508,8 @@ impl DynamixelIo {
 
     /// Does anything answer at the factory ID, at whatever speed the port is open at?
     fn ping_fresh(&mut self) -> Result<bool> {
-        self.controller
-            .ping(FACTORY_ID)
-            .map_err(|e| IoError::Bus(format!("ping factory id {FACTORY_ID}: {e}")))
+        let result = self.controller.ping(FACTORY_ID);
+        result.map_err(|e| self.servo_error(&format!("ping factory id {FACTORY_ID}"), e))
     }
 
     /// Close the port and open it again at `baud`.
@@ -347,10 +526,8 @@ impl DynamixelIo {
     /// Present positions only — a lighter read than [`RobotIo::read`], used once at startup
     /// to adopt the pose the robot is already in.
     pub fn present_positions(&mut self) -> Result<[f64; NUM_JOINTS]> {
-        let values = self
-            .controller
-            .sync_read_present_position(&JOINT_IDS)
-            .map_err(|e| IoError::Bus(format!("read present positions: {e}")))?;
+        let result = self.controller.sync_read_present_position(&JOINT_IDS);
+        let values = result.map_err(|e| self.servo_error("read present positions", e))?;
         if values.len() != NUM_JOINTS {
             return Err(IoError::ShortRead {
                 what: "present positions",
@@ -376,9 +553,20 @@ impl DynamixelIo {
     /// Writing the rest costs the same as it would have, and the error names every joint that
     /// did not answer so the caller can decide whether to ask again.
     pub fn set_torque(&mut self, on: bool) -> Result<()> {
+        // Energising joints is a motion-capable command and needs a fresh complete observation.
+        // De-energising them is the fail-safe path and must remain available even when the body
+        // IMU is what kept recovery from completing.
+        if on {
+            self.require_complete_read()?;
+        } else if !self.port_recovery.may_disable_torque() {
+            return Err(IoError::Bus(
+                "OpenRB USB link is absent; retry torque-off after the port reopens".to_owned(),
+            ));
+        }
         let mut failed = Vec::new();
         for &id in &JOINT_IDS {
             if let Err(e) = self.controller.write_torque_enable(id, on) {
+                self.observe_port_error(e.as_ref());
                 failed.push(format!("torque {on} on {id}: {e}"));
             }
         }
@@ -417,7 +605,7 @@ impl DynamixelIo {
     }
 }
 
-/// The serial port at `baud`, wrapped in a Protocol 2 controller.
+/// The OpenRB factory USB bridge at `baud`, wrapped in a Protocol 2 controller.
 ///
 /// `with_fast_sync_read` routes every `sync_read_*` through instruction 0x8A, so it covers
 /// the tick's motor read, [`RobotIo::slow_sensors`] and [`DynamixelIo::present_positions`]
@@ -443,6 +631,10 @@ fn open_controller(port: &str, baud: u32, fast_sync_read: bool) -> Result<Xl330C
             path: port.to_owned(),
             source: std::io::Error::other(e),
         })?;
+    // The factory `usb_to_dynamixel` loop forwards pending bytes before applying a changed USB
+    // line-coding baud to Serial1. Give it an empty pass so the first real packet is never sent
+    // at the bridge's previous physical baud.
+    std::thread::sleep(OPENRB_LINE_CODING_SETTLE);
     let controller = Xl330Controller::new().with_protocol_v2();
     let controller = if fast_sync_read {
         controller.with_fast_sync_read()
@@ -466,10 +658,11 @@ pub fn replacement_target(missing: &[u8]) -> Option<u8> {
 
 impl RobotIo for DynamixelIo {
     fn read(&mut self) -> Result<Sensors> {
-        let blocks = self
+        self.recover_port_before_read()?;
+        let result = self
             .controller
-            .sync_read_raw_data(&JOINT_IDS, READ_ADDR, READ_LEN)
-            .map_err(|e| IoError::Bus(format!("motor sync_read: {e}")))?;
+            .sync_read_raw_data(&JOINT_IDS, READ_ADDR, READ_LEN);
+        let blocks = result.map_err(|e| self.servo_error("motor sync_read", e))?;
 
         if blocks.len() != NUM_JOINTS {
             return Err(IoError::ShortRead {
@@ -524,13 +717,20 @@ impl RobotIo for DynamixelIo {
         }
         sensors.imu = self.last_imu;
 
+        // This is intentionally the last state change in the method. After USB-link recovery,
+        // neither a partial servo answer nor a failed/frozen required IMU may unlock a motion
+        // command. It does not restore torque or gains after an OpenRB reset; that is an explicit
+        // relax/init operation at the daemon layer.
+        self.port_recovery.complete_read();
+
         Ok(sensors)
     }
 
     fn write(&mut self, targets: &JointTargets) -> Result<()> {
+        self.require_complete_read()?;
         self.controller
             .sync_write_goal_position(&JOINT_IDS, &targets.positions)
-            .map_err(|e| IoError::Bus(format!("sync_write goal positions: {e}")))
+            .map_err(|e| self.servo_error("sync_write goal positions", e))
     }
 
     fn set_torque(&mut self, on: bool) -> Result<()> {
@@ -539,15 +739,17 @@ impl RobotIo for DynamixelIo {
     }
 
     fn reboot(&mut self, id: u8) -> Result<()> {
+        self.require_complete_read()?;
         // The status packet is a courtesy the servo may not manage before it resets, so only a
         // failure to send is an error here.
-        self.controller
-            .reboot(id)
+        let result = self.controller.reboot(id);
+        result
             .map(|_| ())
-            .map_err(|e| IoError::Bus(format!("reboot {id}: {e}")))
+            .map_err(|e| self.servo_error(&format!("reboot {id}"), e))
     }
 
     fn set_gain(&mut self, kp: u16) -> Result<()> {
+        self.require_complete_read()?;
         // I and D are written too, at zero — the prototype's `--ki`/`--kd` defaults, which
         // its startup writes to every motor. These are RAM registers, so every power-up
         // restores the servo's factory values, and the factory D gain is not zero: left in
@@ -557,15 +759,12 @@ impl RobotIo for DynamixelIo {
         const KI: u16 = 0;
         const KD: u16 = 0;
         for &id in &JOINT_IDS {
-            self.controller
-                .write_position_p_gain(id, kp)
-                .map_err(|e| IoError::Bus(format!("position_p_gain {kp} on {id}: {e}")))?;
-            self.controller
-                .write_position_i_gain(id, KI)
-                .map_err(|e| IoError::Bus(format!("position_i_gain {KI} on {id}: {e}")))?;
-            self.controller
-                .write_position_d_gain(id, KD)
-                .map_err(|e| IoError::Bus(format!("position_d_gain {KD} on {id}: {e}")))?;
+            let result = self.controller.write_position_p_gain(id, kp);
+            result.map_err(|e| self.servo_error(&format!("position_p_gain {kp} on {id}"), e))?;
+            let result = self.controller.write_position_i_gain(id, KI);
+            result.map_err(|e| self.servo_error(&format!("position_i_gain {KI} on {id}"), e))?;
+            let result = self.controller.write_position_d_gain(id, KD);
+            result.map_err(|e| self.servo_error(&format!("position_d_gain {KD} on {id}"), e))?;
         }
         Ok(())
     }
@@ -583,10 +782,10 @@ impl RobotIo for DynamixelIo {
     /// treat one miss as news. The zero filter on voltage guards a device that answers with a
     /// nonsense value, which must not be averaged in as if the pack were half flat.
     fn slow_sensors(&mut self) -> Result<SlowSensors> {
-        let blocks = self
+        let result = self
             .controller
-            .sync_read_raw_data(&JOINT_IDS, SLOW_READ_ADDR, SLOW_READ_LEN)
-            .map_err(|e| IoError::Bus(format!("voltage+temperature sync_read: {e}")))?;
+            .sync_read_raw_data(&JOINT_IDS, SLOW_READ_ADDR, SLOW_READ_LEN);
+        let blocks = result.map_err(|e| self.servo_error("voltage+temperature sync_read", e))?;
 
         if blocks.len() != NUM_JOINTS {
             return Err(IoError::ShortRead {
@@ -650,6 +849,72 @@ mod tests {
         assert_eq!(replacement_target(&[23]), Some(23));
         assert_eq!(replacement_target(&[23, 31]), None);
         assert_eq!(replacement_target(&JOINT_IDS), None);
+    }
+
+    /// A servo that simply misses its response deadline is still attached to a valid host port.
+    /// Reopening the USB bridge for that case would turn an ordinary dropped packet into a much
+    /// longer outage and could hide the actual servo fault.
+    #[test]
+    fn a_servo_timeout_does_not_arm_usb_recovery() {
+        let mut recovery = PortRecovery::default();
+        let io_timeout = io::Error::new(io::ErrorKind::TimedOut, "servo did not answer");
+        assert!(!recovery.observe(&io_timeout, true));
+        assert_eq!(recovery, PortRecovery::Ready);
+
+        let protocol_timeout = rustypot::CommunicationErrorKind::TimeoutError;
+        assert!(!recovery.observe(&protocol_timeout, true));
+        assert_eq!(recovery, PortRecovery::Ready);
+    }
+
+    /// The dependency maps a failed packet send to the same timeout as a silent servo. A missing
+    /// stable udev link is the extra fact that makes that otherwise ambiguous error recoverable.
+    #[test]
+    fn a_send_timeout_arms_recovery_only_when_the_openrb_link_is_gone() {
+        let timeout = rustypot::CommunicationErrorKind::TimeoutError;
+        assert!(!should_recover_port(&timeout, true));
+        assert!(should_recover_port(&timeout, false));
+    }
+
+    /// USB removal is different: remember it, reopen only before a read, and keep commands
+    /// blocked until that read has produced a complete sample.
+    #[test]
+    fn an_openrb_disconnect_requires_reopen_then_a_complete_read() {
+        let mut recovery = PortRecovery::default();
+        let gone = serialport::Error::new(serialport::ErrorKind::NoDevice, "USB device removed");
+
+        assert!(recovery.observe(&gone, false));
+        assert!(recovery.needs_reopen());
+        assert!(!recovery.may_command());
+
+        recovery.reopened();
+        assert!(!recovery.needs_reopen());
+        assert!(!recovery.may_command());
+        assert!(
+            recovery.may_disable_torque(),
+            "a live reopened bridge must allow the fail-safe torque-off even before the IMU recovers"
+        );
+
+        recovery.complete_read();
+        assert!(recovery.may_command());
+    }
+
+    /// Linux commonly reports a detached CDC ACM endpoint as `EIO`/`Other` or a broken pipe,
+    /// both of which need the same stable-symlink reopen as `serialport::NoDevice`.
+    #[test]
+    fn host_io_failure_arms_usb_recovery() {
+        for kind in [io::ErrorKind::BrokenPipe, io::ErrorKind::Other] {
+            let mut recovery = PortRecovery::default();
+            let error = io::Error::new(kind, "OpenRB endpoint vanished");
+            assert!(
+                recovery.observe(&error, true),
+                "{kind:?} did not arm recovery"
+            );
+            assert!(recovery.needs_reopen());
+            assert!(
+                !recovery.may_disable_torque(),
+                "torque-off must not call a controller whose failed reopen left no serial handle"
+            );
+        }
     }
 
     /// The block parsed per servo must cover current, velocity and position without

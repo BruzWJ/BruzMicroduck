@@ -1780,7 +1780,10 @@ impl Default for SafetyParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Bus {
-    /// Serial port for the servos. The Radxa Zero 3W wires them to `/dev/ttyS2`.
+    /// Stable device link for the OpenRB-150's factory USB-to-Dynamixel bridge.
+    ///
+    /// Provisioning installs `/dev/openrb-dxl` from the board's USB identity so a reconnect
+    /// may enumerate as a different `/dev/ttyACM*` node without changing this setting.
     pub port: String,
     /// Read the bus with fast sync read (protocol 2.0 instruction 0x8A) rather than a plain
     /// sync read: the fifteen servos append their blocks to one status packet instead of
@@ -1882,7 +1885,7 @@ pub struct UpdateGate {
 impl Default for Bus {
     fn default() -> Self {
         Self {
-            port: "/dev/ttyS2".into(),
+            port: "/dev/openrb-dxl".into(),
             fast_sync_read: true,
         }
     }
@@ -2883,13 +2886,13 @@ mod tests {
         assert!(Params::load(&dir.path().join("absent.toml"), true).is_err());
     }
 
-    /// Partial files are the normal case — a board overrides the port and nothing else.
+    /// Partial files are the normal case — one setting may override its default and nothing else.
     #[test]
     fn absent_sections_take_their_defaults() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write(dir.path(), "[bus]\nport = \"/dev/ttyUSB0\"\n");
+        let path = write(dir.path(), "[bus]\nport = \"/dev/openrb-test\"\n");
         let p = Params::load(&path, true).unwrap();
-        assert_eq!(p.bus.port, "/dev/ttyUSB0");
+        assert_eq!(p.bus.port, "/dev/openrb-test");
         assert_eq!(p.control.hz, 50);
         assert_eq!(p.update_gate.stall_periods, 25);
     }

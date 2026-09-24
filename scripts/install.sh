@@ -982,33 +982,11 @@ EOF
 }
 
 
-# The hardware buses, checked but never configured here.
-#
-# Board bring-up is `setup-board.sh`'s job — device-tree overlays need a reboot and belong to
-# the board, not to a daemon release. But installing a robot daemon onto a board with either bus
-# missing is worth saying out loud: the install will succeed, the affected daemons will report
-# degraded/unhealthy, and the physical Qwiic retrofit cannot be certified by the update gate.
-MOTOR_PORT="${MOTOR_PORT:-/dev/ttyS2}"
+# The Qwiic device-tree overlay needs a reboot and remains `setup-board.sh` work. Warn before
+# downloading a release when it is absent, but keep bench and recovery installs possible.
 QWIIC_BUS="${QWIIC_BUS:-/dev/i2c-qwiic}"
 
 check_board() {
-    if [ -e "$MOTOR_PORT" ]; then
-        # Existing is not the same as usable. Armbian runs a login console on this UART by
-        # default, and a getty *reads* the port — so it eats servo replies and every motor
-        # looks absent. Identical symptoms to unwired hardware, and far harder to guess.
-        tty="$(basename "$MOTOR_PORT")"
-        if systemctl is-active --quiet "serial-getty@${tty}.service" 2>/dev/null; then
-            warn "a login console (serial-getty@${tty}) is running on ${MOTOR_PORT}.
-  It will consume servo replies and robotd will report every motor missing. Run
-  scripts/setup-board.sh, which masks it."
-        fi
-    else
-        warn "${MOTOR_PORT} does not exist, so robotd will have no motor bus.
-  Run scripts/setup-board.sh (then reboot) to enable it. Installing anyway: the update
-  system is worth testing on a board whose bus is not wired yet, and robotd reports itself
-  unhealthy rather than pretending."
-    fi
-
     if [ ! -e "$QWIIC_BUS" ]; then
         warn "${QWIIC_BUS} does not exist, so robotd cannot read the required body IMU and
   tofd cannot read the head IMU or ToF. Fit the Qwiic chain, run scripts/setup-board.sh,
