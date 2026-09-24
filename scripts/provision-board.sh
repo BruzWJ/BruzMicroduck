@@ -4,6 +4,11 @@
 #   export DUCK_TOKEN=...              # only while the repository is private
 #   ./scripts/provision-board.sh radxa@192.168.1.42
 #
+# This clone provisions from BruzWJ/BruzMicroduck. `DUCK_REPO=org/name` is the deliberate
+# escape hatch for a fork: it changes both the first script fetched here and every fetch the
+# board performs after its reboot, so a run can never start from one repository and finish from
+# another.
+#
 # The target is `[user@]host`, and the host can be a name or an address. An address is the
 # normal case on this hardware: mDNS on the Radxa image is unreliable, so `radxa-zero3.local`
 # resolves when it feels like it and a DHCP lease is the thing you can count on.
@@ -102,6 +107,11 @@ set -eu
 # Committed, so a new developer needs nothing from anybody to provision a dev board. `--dev-key`
 # overrides it for a key handed over out of band.
 DEV_KEY_DEFAULT="$(dirname "$0")/../deploy/dev-key/team.dev.pub"
+
+# One source for the whole two-phase install. `provision.sh` persists this value across the
+# reboot and passes it to setup-board.sh and install.sh; forwarding it below is therefore as
+# important as using it for the initial provision.sh URL.
+REPO="${DUCK_REPO:-BruzWJ/BruzMicroduck}"
 
 HOST=""
 # The host without any `user@`, which is what known_hosts is keyed on.
@@ -596,9 +606,8 @@ ${_probe}" ;;
 fi
 
 if [ -z "${DUCK_TOKEN:-}" ]; then
-    warn "DUCK_TOKEN is not set. While the repository is private every fetch on the board
-  needs it, and GitHub answers 404 rather than 401, so it will look like a wrong URL.
-  Continuing in case the repository is public by now."
+    say "DUCK_TOKEN is not set — using anonymous GitHub access to ${REPO}.
+  This is sufficient while the repository and its release assets are public."
 fi
 
 if [ -n "$NO_DEV_KEY" ]; then
@@ -675,13 +684,13 @@ if [ -n "$USE_LOCAL" ]; then
     say "sending this clone's provision.sh"
     scp -q "$_local" "$(scp_target /tmp/provision.sh)" || die "could not copy provision.sh"
 else
-    _raw="https://raw.githubusercontent.com/pollen-robotics/microduck/${REF:-main}/scripts/provision.sh"
-    say "having the board fetch provision.sh from ${REF:-main}"
+    _raw="https://raw.githubusercontent.com/${REPO}/${REF:-main}/scripts/provision.sh"
+    say "having the board fetch provision.sh from ${REPO}@${REF:-main}"
     # Fetched by the board rather than by this machine and copied over: the board is the one
     # that has to be able to reach GitHub with that token, and finding out here would prove
     # the wrong thing.
     rsh "curl -fsSL ${DUCK_TOKEN:+-H \"Authorization: Bearer ${DUCK_TOKEN}\"} '${_raw}' -o /tmp/provision.sh" \
-        || die "the board could not fetch provision.sh from ${REF:-main}.
+        || die "the board could not fetch provision.sh from ${REPO}@${REF:-main}.
   A private repository answers 404 rather than 401, so this is either a missing DUCK_TOKEN, a
   token without Contents:Read on the repository, or a branch name that does not exist."
 fi
@@ -691,7 +700,7 @@ fi
 say "starting provisioning — the board will reboot and this will wait for it"
 echo
 
-_env="DUCK_TOKEN='${DUCK_TOKEN:-}'"
+_env="DUCK_REPO='${REPO}' DUCK_TOKEN='${DUCK_TOKEN:-}'"
 [ -z "$REF" ]     || _env="${_env} DUCK_REF='${REF}'"
 [ -z "$DEV_KEY" ] || _env="${_env} DUCK_DEV_KEY=/tmp/team.dev.pub"
 [ -z "$WEIRD_BLE" ] || _env="${_env} DUCK_WEIRD_BLE=1"

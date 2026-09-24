@@ -2312,4 +2312,31 @@ mod tests {
             }
         }
     }
+
+    /// A blank-board run must use one repository from its first download through phase 2.
+    ///
+    /// The wrapper once fetched `provision.sh` from upstream and omitted `DUCK_REPO` from the
+    /// environment handed to it. Running the wrapper from a fork therefore installed upstream's
+    /// board setup and release while appearing to exercise the fork. Both uses are pinned here:
+    /// changing only the URL or only the forwarded environment recreates the mixed install.
+    #[test]
+    fn provision_wrapper_uses_and_forwards_its_repository() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let script = std::fs::read_to_string(root.join("scripts/provision-board.sh")).unwrap();
+
+        assert!(
+            script.contains(r#"REPO="${DUCK_REPO:-BruzWJ/BruzMicroduck}""#),
+            "provision-board.sh must default to this repository while allowing an explicit fork"
+        );
+        assert!(
+            script.contains(
+                r#"_raw="https://raw.githubusercontent.com/${REPO}/${REF:-main}/scripts/provision.sh""#
+            ),
+            "the first board-side script must come from the selected repository"
+        );
+        assert!(
+            script.contains(r#"_env="DUCK_REPO='${REPO}' DUCK_TOKEN='${DUCK_TOKEN:-}'""#),
+            "the selected repository must reach provision.sh and survive its reboot"
+        );
+    }
 }
