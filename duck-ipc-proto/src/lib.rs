@@ -3979,9 +3979,9 @@ pub struct PoseState {
 pub struct FramesState {
     pub camera: PoseState,
     pub tof: PoseState,
-    /// The head IMU in the trunk frame. The `head_imu.stream` samples are in the IMU's own
-    /// tilted axes; this pose (sensor→trunk, from the same head FK) is how a consumer rotates
-    /// them into the trunk/camera frame. Absent from a daemon predating it. (v24)
+    /// The head IMU in the trunk frame. Qwiic samples use the sensor's +X-forward, +Y-left,
+    /// +Z-up axes; this pose (sensor→trunk, from the same head FK) follows the articulated head
+    /// and rotates them into the trunk/camera frame. Absent from a daemon predating it. (v24)
     ///
     /// The pose describes the Qwiic head mount. A beta face board needs its own mount in the
     /// kinematic model before this pose describes its IMU.
@@ -4965,12 +4965,11 @@ pub struct HeadImuStreamResult {
 /// One head-IMU sample — a [`method::HEAD_IMU_FRAME`] notification.
 ///
 /// The Qwiic LSM6DSV16X is read by `tofd`; a beta face-board IMU may be read by `robotd`.
-/// All values are in the IMU's own
-/// axes, which are tilted relative to the head/camera — the mount is not axis-aligned. To place a
-/// sample in the trunk/camera frame, rotate it by [`FramesState::head_imu`] (the sensor→trunk
-/// pose the kinematics compute for this tick). This is the head IMU, distinct from the body IMU
-/// that [`RobotState::imu`] carries from address `0x6b` on the same Qwiic adapter. Units: rad/s,
-/// m/s², unitless quaternion.
+/// Samples use each chip's sensor axes. On the Qwiic board these are +X forward, +Y left, +Z up
+/// and coincide with the neutral head/trunk convention. The head articulates; use
+/// [`FramesState::head_imu`] to place a sample in the trunk/camera frame when its mount matches
+/// the board. This is distinct from the body IMU at address `0x6b` on the Qwiic adapter.
+/// Units: rad/s, m/s², unitless quaternion.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HeadImuFrame {
@@ -4980,8 +4979,9 @@ pub struct HeadImuFrame {
     pub at_us: u64,
     /// `CLOCK_MONOTONIC` when the sample was read, ns — the clock [`RobotState::t_ns`] shares.
     pub t_ns: u64,
-    /// Angular velocity, rad/s, in the chip's own (tilted) sensor axes. Combine with
-    /// [`FramesState::head_imu`] to place it in the trunk frame.
+    /// Angular velocity, rad/s, in the chip's sensor axes. The Qwiic LSM6DSV16X uses +X
+    /// forward, +Y left, +Z up. Combine with [`FramesState::head_imu`] to follow the moving
+    /// head and place it in the trunk or camera frame.
     pub gyro: [f32; 3],
     /// Specific force, m/s², in the chip's sensor axes.
     pub accel: [f32; 3],

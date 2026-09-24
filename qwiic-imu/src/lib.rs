@@ -5,8 +5,8 @@
 //! Micro board stays at its factory `0x6b`, while the head board's address
 //! jumper selects `0x6a`. [`Sensor`] configures ST's on-chip Sensor Fusion Low
 //! Power (SFLP) algorithm and returns SI-unit samples in the chip's own axes.
-//! Mounting transforms remain with the consumers because the body and head are
-//! physically different frames.
+//! Both boards are installed +X forward, +Y left, +Z up; consumers still own
+//! frame placement because the head articulates while the trunk does not.
 //!
 //! The hardware implementation is Linux-only (`/dev/i2c-*`). Off Linux the
 //! same API refuses to open, so fake/simulated daemons still compile without a
