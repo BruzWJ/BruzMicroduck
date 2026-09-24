@@ -78,7 +78,7 @@ Four ducks in a chorale should not be four copies of one voice.
 `duck_control::io::RobotIo` — six methods, and the only place a simulator is allowed to exist:
 
 ```rust
-fn read(&mut self) -> Result<Sensors>;          // joints and IMU, one transaction
+fn read(&mut self) -> Result<Sensors>;          // complete joints + body IMU sample
 fn write(&mut self, targets: &JointTargets) -> Result<()>;
 fn set_gain(&mut self, kp: u16) -> Result<()>;
 fn set_torque(&mut self, on: bool) -> Result<()>;
@@ -86,17 +86,19 @@ fn slow_sensors(&mut self) -> Result<SlowSensors>;   // volts, per-joint tempera
 ```
 
 Above it, nothing changes: the 50 Hz loop, the ONNX policies, `Safety`, fall detection, odometry,
-kinematics, maploc, every IPC call, all of `robotctl` and `duckctl`. Below it there is one thing —
-`DynamixelIo` — and the IMU is not separate from it, because on this robot the IMU is a Dynamixel
-node read in the same `sync_read` as the fifteen servos.
+kinematics, maploc, every IPC call, all of `robotctl` and `duckctl`. Below it, `DynamixelIo`
+composes two physical drivers: the fifteen-servo UART burst and the body LSM6DSV16X poll on
+Qwiic. The simulator returns their logical result together, so it exercises the policy-facing
+complete-sample contract without pretending to exercise either driver.
 
 `FakeIo` was already a full implementation of this trait, which is why `cargo test` needs no
 hardware. `RemoteIo` is the third.
 
 **Where a sensor's daemon *is* its driver, replace neither.** `tofd --fake` already synthesises
 frames at the loop level, and `tof/src/sensor.rs` says in as many words that the off-board `Sensor`
-"is not a fake sensor and must never become one". Simulated depth feeds that existing loop. The same
-reasoning will apply to anything else whose driver cannot be separated from its hardware.
+"is not a fake sensor and must never become one". Simulated depth and head orientation feed that
+existing loop. The same reasoning applies to anything else whose driver cannot be separated from
+its hardware.
 
 ## 3. The body protocol
 
@@ -228,10 +230,12 @@ election and beat, the systemd units with their real `User=`, groups, `RuntimeDi
 hardening, and the updater.
 
 Modelled — the real code path, synthesised input: actuator response (BAM models fitted to the real
-XL330s), the IMU, ToF depth, RSSI, the camera image, and release provenance on an x86 host.
+XL330s), body and head IMU samples, ToF depth, RSSI, the camera image, and release provenance on an
+x86 host.
 
-Absent — not exercised at all: the Dynamixel bus driver, the BLE radio, the camera ISP and rkaiq's
-3A, the NPU, the hardware encoder and its RGA path, thermals and battery.
+Absent — not exercised at all: the Dynamixel bus driver, Linux I2C/Qwiic and both LSM6DSV16X
+drivers, the BLE radio, the camera ISP and rkaiq's 3A, the NPU, the hardware encoder and its RGA
+path, thermals and battery.
 
 **A useful check on that list:** run a week of real bugs past it. A `videoflip` that cost 22 fps by
 breaking the encoder's zero-copy path to the RGA; a 3A engine missing a stream-start event; an

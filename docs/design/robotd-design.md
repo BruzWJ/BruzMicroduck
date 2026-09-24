@@ -7,41 +7,52 @@ Implements the `robotd` row of [`architecture.md`](architecture.md) §1 and cove
 [`apirrone/microduck_runtime`](https://github.com/apirrone/microduck_runtime), referred to
 throughout as *the runtime*.
 
-**Only the alpha variant, only the Radxa, only the v2 `imu_to_dxl` board.** v1/v1.5/v1.6, the
-four other IMUs, the three cameras and the Pi are dropped, and every shipped policy is
-`alpha_*`. The wheeled configuration survives as one params switch — `policy.mode = "roller"`
-(§4.2) — because what it selects is a policy set and a tuning preset, not a hardware variant.
+**Only the alpha variant, only the Radxa, only the SparkFun LSM6DSV16X body IMU.** The custom
+`imu_to_dxl` board, v1/v1.5/v1.6, the other IMUs, the three cameras and the Pi are dropped, and
+every shipped policy is `alpha_*`. The wheeled configuration survives as one params switch —
+`policy.mode = "roller"` (§4.2) — because what it selects is a policy set and a tuning preset,
+not a hardware variant.
 
 ## 1. The shape of it
 
-One process, one serial bus, one 50 Hz loop. The loop reads all sixteen devices on the bus in
-a single transaction, decides fifteen joint targets, and writes them back. Everything else —
+One process, one servo UART, one body IMU on Qwiic, one 50 Hz loop. Each tick reads all fifteen
+servos, polls the IMU, decides fifteen joint targets, and writes them back. Everything else —
 clients, health, telemetry — hangs off that loop without ever being able to block it.
 
-### 1.1 The bus, and who owns the port
+### 1.1 The two buses, and who owns them
 
-Fifteen servos and the `imu_to_dxl` board share one UART. There is no second bus and no
-second port:
+The custom bridge is gone. Fifteen servos remain on the exclusive UART; the body Micro
+LSM6DSV16X stays at its factory `0x6b` address on the Radxa's Qwiic adapter:
 
 ```text
                      robotd — control thread
                               │
                               │  duck_control::bus::DynamixelIo
-                              │  serialport · TIOCEXCL
-                              ▼
-         /dev/ttyS2 · 1 Mbps · Dynamixel protocol v2
-                              │
-    ┌────────────┬────────────┴───────┬──────────────────┐
-    │            │                    │                  │
-  id 200       20–24                30–34             10–14
- imu_to_dxl   left leg        neck · head · mouth     right leg
-  v2 board    5 servos             5 servos           5 servos
+              ┌───────────────┴────────────────┐
+              │                                │
+              │ serialport · TIOCEXCL          │ qwiic-imu
+              ▼                                ▼
+ /dev/ttyS2 · 1 Mbps                  /dev/i2c-qwiic · 400 kHz
+ Dynamixel protocol v2                        │
+              │                               └── 0x6b body LSM6DSV16X
+   ┌──────────┼──────────────┐
+   │          │              │
+ 20–24      30–34          10–14
+ left leg   neck/head/     right leg
+ 5 servos   mouth, 5       5 servos
 ```
 
-The IMU is `id 200` and is read in the *same* `sync_read` as the servos, because that is what
-the hardware does: the v2 board sits on the Dynamixel bus and serves an on-chip SFLP
-quaternion out of the same register block the servos answer at. One board, one code path, no
-IMU abstraction. It is listed first in the id vector so it answers before the servo burst.
+The shared `qwiic-imu` crate configures the chip's SFLP engine and returns gyro, acceleration,
+temperature and a fused quaternion. `duck-control::imu` owns only the robot-specific body mount,
+spike rejection and readiness gate. The head carries the same chip at `0x6a`, but `tofd` owns
+that address and publishes it separately; roles are fixed by address and are never inferred from
+probe order.
+
+The I2C *adapter* is shared, not the sensor addresses. `tofd` also opens `/dev/i2c-qwiic` for the
+head IMU at `0x6a` and VL53L5CX at `0x29`; Linux serialises their transactions with `robotd`'s
+body polls. A failed body poll makes the tick's complete sensor read fail exactly as a failed
+servo read does. A cold ToF firmware upload can therefore add Qwiic latency, and the loop-rate
+health counters are the backstop rather than an invented second adapter.
 
 **One owner at a time; tty exclusivity alone does not enforce it.** `serialport` sets `TIOCEXCL`, which
 turns a second *unprivileged* open into `EBUSY` — but `robotd.service` runs as root, because
@@ -114,6 +125,7 @@ questions: nothing in the update path can command a motor.
 
 ```text
 duck-ipc-proto/  wire contract — serde only; no tokio, no http, no crypto
+qwiic-imu/       Linux LSM6DSV16X driver · SFLP/FIFO · SI-unit samples
 duck-control/    robot model · bus · IMU · RobotIo · obs · policy · safety
                  everything between reading the bus and writing it
                  no tokio, no sockets, no systemd
@@ -144,11 +156,13 @@ targets and none of them can send one. That is the borrow checker, not a convent
 
 ### 1.4 The tick
 
-50 Hz, one `tokio` task on its own runtime so IPC work cannot sit in front of it. Two bus
-transactions per tick, plus a third once a second:
+50 Hz, one `tokio` task on its own runtime so IPC work cannot sit in front of it. The hardware
+read is sequential — servo burst, then body-IMU poll — and the tick is accepted only when both
+halves succeed:
 
 ```text
-read()          one fast sync_read · IMU board + 15 servos · regs 124–136   (§2.1)
+read()          one fast sync_read · 15 servos · regs 124–136
+                then one body LSM6DSV16X FIFO poll · /dev/i2c-qwiic@0x6b   (§2.1)
 decide          observation → policy → targets → clamp                 (§2.2–§2.4)
 write()         one sync_write     · goal positions
 publish         atomics always; a state frame only if someone subscribed     (§4.1)
@@ -159,9 +173,11 @@ every 1 s       slow_sensors()     · registers 144–146 · voltage + temperatu
 Where the data goes, once per period:
 
 ```text
-  Dynamixel bus
-       │  one fast sync_read: IMU board + 15 servos, one transaction
-       ▼
+  Dynamixel UART ── fast sync_read: 15 servos ──┐
+                                                ├─ complete read or error
+  Qwiic I2C3 ──── body SFLP FIFO poll ──────────┘
+                                                │
+                                                ▼
    Sensors ──────────┬──────────────────────► safety.observe ──► fallen? (debounced)
    joints, IMU       │
                      ▼
@@ -260,16 +276,17 @@ intended:
 
 ### 2.1 The bus layer and `RobotIo`
 
-A thin layer over `rustypot`: open, one combined fast `sync_read`, `sync_write` goal positions,
-torque enable, gains, the slow sensor read, and the startup register check. Written fresh
-rather than lifted, but **the numbers are borrowed from the runtime**, each with a comment
-saying so:
+A thin hardware backend over two libraries: `rustypot` owns the fifteen-servo UART, and
+`qwiic-imu` owns the body LSM6DSV16X's Linux I2C/FIFO/SFLP mechanics. `DynamixelIo` composes
+them behind `RobotIo` so callers receive a complete joint-plus-body sample or an error, never
+half of an observation. The servo layer was written fresh rather than lifted, but **the numbers
+are borrowed from the runtime**, each with a comment saying so:
 
 - `RAD_PER_SEC_PER_COUNT = 0.229 × 2π/60`, and the position count↔radian conversion.
 - The EEPROM registers from `check_and_fix_config`, asserted *and corrected* at startup:
   `return_delay_time=0`, `baud_rate=3`, `pwm_slope=255`, `shutdown=52`. The first is
   load-bearing — at the XL330 default of 250 that is 500 µs of turnaround per device, so
-  sixteen devices cost ~8 ms per tick, 40% of the budget. A servo that was factory-reset or
+  fifteen devices cost 7.5 ms per tick, 37.5% of the budget. A servo that was factory-reset or
   swapped in arrives at 250, so the check is what removes a whole class of "why is it slow on
   this robot". `shutdown = 52` is `0b110100` — overload, electrical shock, overheating — with
   the input-voltage bit **clear**, where the factory's 53 sets it. That bit is what clears
@@ -292,12 +309,23 @@ saying so:
   measurably softer at the *same* kP. Not a tuning choice anyone made, so it is pinned rather
   than exposed.
 
-**Two bus transactions per tick, and a third once a second.** The tick reads a contiguous
-block at 124–136 (pwm, current, velocity, position). Voltage and temperature sit at 144–146,
-eight bytes past its end, with twelve bytes of trajectory registers nothing wants in between —
-so they are sampled together once a second in their own transaction (~1 ms) rather than
-widening the tick's read to 22 bytes per servo at 50 Hz. The sampling interval is the same
-window the achieved rate is measured over, so one clock drives both.
+**One servo read and one body-IMU poll before every decision, then one servo write.** The UART
+read covers a contiguous block at 124–136 (pwm, current, velocity, position). Voltage and
+temperature sit at 144–146, eight bytes past its end, with twelve bytes of trajectory registers
+nothing wants in between — so they are sampled together once a second in their own UART
+transaction (~1 ms) rather than widening the tick's read to 22 bytes per servo at 50 Hz. The
+sampling interval is the same window the achieved rate is measured over, so one clock drives both.
+
+The body sensor opens from `[body_imu]`: `/dev/i2c-qwiic`, address `0x6b`, with its SFLP rate
+rounded up from the control rate (50 Hz therefore selects 60 Hz). It is required. An open error
+keeps startup in the existing retry loop; an I2C error fails that tick through the same runtime
+counter as a servo read. A successful poll with no new FIFO quaternion is different: it holds the
+last good `ImuData`, increments `imu_stale`, and waits for the sensor's independent clock. A run of
+three empty polls is no longer a timing difference: it is treated as a failed required-sensor
+read, so the loop takes its bounded coast path rather than walking indefinitely on a frozen
+attitude. The 480 Hz sensor ceiling still permits at most two consecutive empty polls at the
+allowed 1 kHz control-rate ceiling.
+Twenty-five fresh quaternions are still required before `imu_ready` lets fall detection trust it.
 
 Voltage is averaged across the servos: all fifteen sit on one pack, so a single reading is the
 same measurement with more noise, and a device answering zero is filtered out rather than
@@ -307,22 +335,23 @@ above the mouth and a mean over fifteen servos hides the one approaching its ove
 shutdown.
 
 A silent servo does not produce a short answer: `rustypot`'s `sync_read` waits for every id and
-fails the whole transaction if one does not reply. So both reads are all-or-nothing, and the
-caller keeps its previous sample rather than treating one miss as news.
+fails the whole transaction if one does not reply. The once-a-second servo read is likewise
+all-or-nothing. At tick rate, either a failed servo burst or a failed body-IMU poll rejects the
+whole control sample; no policy step combines new joints with an unknown orientation.
 
 **Every sync read is a fast sync read** (protocol 2.0 instruction 0x8A), enabled once on the
-controller so the tick's combined read, the slow read and the startup position read all use it
+controller so the tick's servo read, the slow read and the startup position read all use it
 without naming it. The instruction packet is a plain sync read's; what changes is the answer.
-Instead of sixteen status packets, each with its ten-byte protocol 2.0 header and each preceded
+Instead of fifteen status packets, each with its ten-byte protocol 2.0 header and each preceded
 by that device's turnaround, the devices append their blocks to **one** status packet from the
-broadcast id. The bus turns around once per tick rather than sixteen times, which is the same
+broadcast id. The UART turns around once per tick rather than fifteen times, which is the same
 cost `return_delay_time = 0` above exists to hold down — the register check still matters,
 because every other transaction on this bus is an ordinary one that pays it per device.
 
 It is the same all-or-nothing shape, for a new reason: the blocks arrive in one packet, so a
-device whose firmware does not implement 0x8A simply does not answer and the read times out
-rather than coming back short. **XL330 firmware must be v46 or newer**, and the `imu_to_dxl`
-board — `id 200`, the first block in the tick's read — has to implement it too.
+servo whose firmware does not implement 0x8A simply does not answer and the read times out
+rather than coming back short. **XL330 firmware must be v46 or newer.** The IMU is not a
+Dynamixel participant and places no firmware requirement on this instruction.
 
 That is firmware, not software, and it is the one thing on this bus the daemon cannot talk its
 way out of — so it is `bus.fast_sync_read`, **on by default**, rather than a constant. Off, every
@@ -362,20 +391,20 @@ cooler win, for the same reason the hottest zone does — a big.LITTLE board thr
 cores first, and reporting `policy0` there would show a board running freely while the cores the
 loop is on are halved.
 
-**IMU staleness is tracked, permanently.** "The read succeeded but the board handed back the
-same sample" feeds dead orientation to the policy, is invisible unless someone counts it, and
-is known to happen. The bus layer remembers the last block, counts identical successors, and
-says so in the journal once a run is long enough to mean something — half a second, the same
-span the SFLP decoder waits before it will call the chip's output a measurement. Warning on the
-first repeated block is what teaches everyone to ignore the message; past the threshold it is
-rate-limited, because a board that has stopped refreshing produces one per tick and 50 Hz of
-identical warnings evicts the journal.
+**IMU staleness is tracked, permanently.** The control loop and the LSM6DSV16X keep independent
+clocks, so a successful FIFO poll can legitimately have no new SFLP record. `DynamixelIo` holds
+the last good orientation, counts those polls, and clears the current run on every fresh sample.
+It says so in the journal only once a run is long enough to mean something — three consecutive
+misses (about 60 ms at 50 Hz), where normal loop/sensor clock phase cannot explain it. At that
+threshold the read fails into the same bounded coast path as any required-sensor error; a later
+fresh FIFO record recovers normally. The warning is rate-limited because a sensor that stopped
+refreshing would otherwise emit at 50 Hz and evict the journal.
 
 The seam:
 
 ```rust
 trait RobotIo {
-    fn read(&mut self) -> Result<Sensors>;                 // joints + IMU, one transaction
+    fn read(&mut self) -> Result<Sensors>;                 // complete joints + body IMU sample
     fn write(&mut self, targets: &JointTargets) -> Result<()>;
     fn set_gain(&mut self, kp: u16) -> Result<()>;         // one write per joint, not per tick
     fn set_torque(&mut self, on: bool) -> Result<()>;      // idem
@@ -392,17 +421,15 @@ per-tick call and why bring-up is a state machine rather than a flag the loop ke
 already in) and `interpolate_to` (a blocking linear ramp — deliberately blocking, since
 nothing else should be talking to the bus while it runs).
 
-Two implementations: `DynamixelIo` and `FakeIo` (scripted samples, optionally frozen or
-failing on demand). `FakeIo` is what the test suite runs against, and it is why `cargo test`
-needs no hardware, no network and no Docker.
+Two implementations: `DynamixelIo` (the historical name now composes the servo controller and
+body Qwiic sensor) and `FakeIo` (scripted samples, optionally frozen or failing on demand).
+`FakeIo` is what the test suite runs against, and it is why `cargo test` needs no hardware, no
+network and no Docker.
 
-**Neither is `cfg`-gated off macOS.** The gate was meant to keep `serialport` out of a
-laptop's dependency tree, but `rustypot` and `serialport` both build cleanly there, so it
-bought nothing and cost the ability to type-check the bus layer without a board — which is
-exactly the code most likely to be edited by someone who does not have one. Only the entry
-points that open a real port are gated, so a Mac build still refuses to pretend it has a
-robot: `robotd --fake` is the laptop path, and it must be asked for explicitly rather than
-fallen back to.
+**Neither implementation disappears on macOS.** `rustypot` and `serialport` build there, while
+`qwiic-imu` target-scopes its Linux `i2c-dev` dependencies and makes a real open fail off Linux.
+That preserves type-checking of the complete backend without pretending a laptop has a robot:
+`robotd --fake` is the laptop path, and it must be asked for explicitly rather than fallen back to.
 
 ### 2.2 One observation builder
 
@@ -551,7 +578,8 @@ So `limp_fall` (off by default: the default velstand gait loads no standing netw
 back to) runs a second, separate
 detector — `duck_control::fall` — on the rate rather than the position. Projected gravity
 rotates with the trunk, so `ġ = −ω × g` is exact and comes straight from the gyro in the same
-12-byte IMU block; extrapolating it over ~0.3 s says where gravity is heading. It fires when
+LSM6DSV16X sample as the SFLP quaternion; extrapolating it over ~0.3 s says where gravity is
+heading. It fires when
 the robot is already tilted (≈26°), still tipping over rather than recovering, and predicted
 past the fall threshold — debounced three ticks. Differentiating the SFLP quaternion instead
 would add the filter's lag to the one number whose whole value is being early.
@@ -740,7 +768,7 @@ the same. `init` deliberately needs no policy: standing up is reasonable to ask 
 walking network, and it is what makes the bring-up testable at all, since CI has no ONNX Runtime.
 
 They arrive as a *request* the loop takes once per tick rather than a flag it keeps applying: one
-`set_torque` is a bus transaction per joint, so a level would put sixteen writes into every tick.
+`set_torque` is a bus transaction per joint, so a level would put fifteen writes into every tick.
 The later request replaces an unread earlier one — asked to stand up and then to let go within
 20 ms, the second is what was meant. And `relax` clears `enabled`, or the next tick would see a
 robot that was asked to drive and stand it straight back up.
@@ -987,11 +1015,12 @@ arrived on top of that shape rather than changing it.
 
 ### 5.4 Not regressing is the acceptance criterion
 
-The measurement already exists: `bench_dynamixel_bus` reports achieved rate, jitter, read time, bus
-time, utilisation, errors and IMU sample freshness at 50 and 100 Hz. Record today's numbers as the
-baseline; `robotd` must match them. This is deliberately not an RT engineering project — no
+`bench_dynamixel_bus` remains the servo-UART baseline, but it no longer measures the body IMU.
+Acceptance therefore also runs `robotd` while `tofd` cold-starts the VL53L5CX and then streams
+depth plus the head IMU on the shared adapter; the loop's achieved-rate, deadline and IMU-staleness
+counters are the measurement. This is deliberately not an RT engineering project — no
 `SCHED_FIFO`, no pinning, no `mlockall`. The loop is reliable today and the job is to keep it that
-way while the code around it gets simpler.
+way while the hardware path gets simpler.
 
 ## 6. Testing
 
@@ -1016,7 +1045,7 @@ Each test's comment says which failure it exists to prevent, per the repo conven
 |---|---|
 | `duck-control` as a workspace crate | boundary enforced by the compiler, no second repo |
 | bus layer written fresh, constants borrowed | thin code, but the tuned numbers are not re-derived |
-| the IMU in the motors' `sync_read` | it is a device on the same bus; no IMU abstraction |
+| body IMU poll composed inside `RobotIo::read` | separate physical bus, one complete policy sample; either half failing rejects the tick |
 | Rust consts for the model | one robot exists |
 | params file, not watched | establishes the file and its location; the watcher is later |
 | policy path in params, default = release dir | updates carry the policy; devs override it |
@@ -1068,8 +1097,8 @@ projected gravity, and where the camera and the ToF sensor are. All three are ad
   `mono_ns` and `real_ns` at one instant, so RTP timestamps — which RTCP sender reports state in
   wall-clock — can be put on the same axis.
 - **`imu: {gyro, quat}`** is `ImuData` as the loop read it: the trunk IMU, 50 Hz, nothing above
-  it (`docs/design/robotd-design.md` §IMU). The head IMU on the prototype HAT is not read by
-  anything yet; when it is, it streams beside `tof.frame`, not here.
+  it (`docs/design/robotd-design.md` §2.1). The head LSM6DSV16X is owned by `tofd` at `0x6a`
+  and streams through `head_imu.stream` beside `tof.frame`, not here.
 - **`frames: {camera, tof}`** are trunk-frame poses at this tick's *measured* head joints from
   `kinematics::head::HeadFk` — the same FK `robot.look` solves against — and **`robot.model`**
   answers the static geometry (trunk height, joint order, ToF beam directions, the poses at head

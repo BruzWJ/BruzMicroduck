@@ -10,6 +10,8 @@ next to their service (`updater/systemd/`, `robotd/systemd/`); anything robot-wi
 | `updater.toml` | the config a client robot ships with, installed to `/etc/robot/updater.toml` |
 | `trusted_keys/` | release public keys — the trust anchor, installed to `/etc/robot/trusted_keys/` |
 | `journald.conf.d/10-robot.conf` | journal persistence and size caps |
+| `overlays/i2c3-qwiic.dts` | Radxa I2C3-M0 on header pins 3/5 for the SparkFun Qwiic sensor chain |
+| `audio/` | optional legacy audio-HAT overlay, driver and mixer setup; not a sensor prerequisite |
 
 Note on that last one, now **measured** rather than assumed: `/var/log` on this image is a zram
 device, so `Storage=persistent` really is a directory in memory. It survives a clean reboot and
@@ -196,8 +198,36 @@ device-tree overlays with the RK3568 and they are named `rk3568-*.dtbo`. With th
 the loader finds nothing, the board boots happily, and there is simply no `/dev/ttyS2`.
 `armbian-config`'s overlay editor crashes for the same reason, so the file is patched directly.
 
+It also provisions the sensor bus independently of the optional audio HAT: installs `i2c-tools`
+and the `i2c` group, compiles [`overlays/i2c3-qwiic.dts`](overlays/i2c3-qwiic.dts), and gives the
+RK3566 controller a stable `/dev/i2c-qwiic` udev name. The overlay puts I2C3-M0 at 400 kHz on
+header pins 3/5 for the SparkFun Qwiic SHIM. I2C3 normally uses its M1 pins for the FUSB302, so
+the overlay deliberately disables that USB-C PD controller: USB-C remains a 5 V power input and
+maskrom flashing still works, but PD negotiation does not. Removing the audio HAT does not remove
+that pinmux consequence.
+
+Re-running migrates an older board in place: `i2c3-pihat` becomes `i2c3-qwiic`, the stale
+`99-robot-i2c-pihat.rules` file is removed, and `/dev/i2c-qwiic` replaces `/dev/i2c-pihat`.
+After the requested reboot, the expected Linux 7-bit addresses are `0x29` (VL53L5CX), `0x6a`
+(head LSM6DSV16X, address jumper moved to ground), and `0x6b` (body Micro LSM6DSV16X, factory
+address):
+
+```bash
+sudo i2cdetect -y 3
+```
+
+The connector order and pull-up preparation are in the
+[purchase list](../docs/robot/purachse-list.md#qwiic-assembly).
+
+This is a hard hardware cutover, not a mixed-fleet compatibility mode: the new daemon no longer
+reads the custom Dynamixel IMU, BMI088, or VL53L8CX paths. Fit and provision the Qwiic chain, then
+install/restart the matching release in the same maintenance session. In particular, do not use an
+unattended stable rollout to stage the daemon before the body IMU exists: missing startup hardware
+is deliberately reported as *degraded* (so an unpowered bench robot is not rolled back forever),
+and the updater therefore cannot certify that the physical retrofit happened.
+
 ⚠ A kernel upgrade that repoints `/boot/{Image,dtb,uInitrd}` can undo it. A board that stops
-seeing its motors after an `apt upgrade` needs this re-run.
+seeing its motors or `/dev/i2c-qwiic` after an `apt upgrade` needs this re-run.
 
 ⚠ Its `kernel console` status line reads `until the reboot` when the script has already fixed it
 and only the running kernel is stale — `/proc/cmdline` cannot change without a reboot. Anything

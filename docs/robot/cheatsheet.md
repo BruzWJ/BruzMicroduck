@@ -53,9 +53,9 @@ The last row of the header is the robot's condition rather than its behaviour: t
 volts and as a fraction, the hottest servo and the board's own temperature. It comes from
 `robot.health`, polled every two seconds, because none of it is on the state stream — and it is
 where anything wrong gets named, whether that is `unhealthy: control loop at 43.9 Hz`, `degraded:
-no robot on the motor bus after 3 attempts` or `orientation frozen — 25 stale reads`. That last one
-is on this row and nowhere else on the frame: a board that has stopped fusing keeps answering the
-bus, so nothing errors and the gravity vector above holds a plausible attitude indefinitely.
+robot hardware buses have not opened after 3 attempts` or `orientation frozen — 3 stale reads`.
+That last one is on this row and nowhere else on the frame: a board that has stopped fusing keeps
+answering the bus even though its gravity vector is no longer live.
 
 0% is `BATTERY_EMPTY_V`, which is where `robotd` sits the robot down and cuts power, so the figure
 is a countdown rather than a gauge — yellow at 30%, red at 15%. A reading that has not been taken
@@ -749,7 +749,7 @@ broken; it means it is being pessimistic about numbers it does have.
 An 8×8 depth matrix from the head sensor. `robotctl monitor`, then **`t`**:
 
 ```
-┌ tof VL53L8CX · 15 Hz · 8×8 · 48/64 ranged · 0.12–3.54 m ─────────────┐
+┌ tof VL53L5CX · 15 Hz · 8×8 · 48/64 ranged · 0.12–3.54 m ─────────────┐
 │ 0.12 0.15    x 1.44 1.86    · 2.70 3.12                              │
 └ · nothing in range · x could not measure · near→far ── seq 412 · 6 ms ┘
 ```
@@ -763,7 +763,9 @@ This is the sensor's own frame, not the robot's: there is no reprojection until
 the kinematics exist, which is also what makes the block the right place to check
 a mounting angle.
 
-`tofd` owns the sensor and nothing else reads the bus. It is an ordinary service —
+`tofd` owns the ToF at `0x29` and the head IMU at `0x6a`; `robotd` owns the body IMU at
+`0x6b` on the same Qwiic bus. It is still safe to stop `tofd`: Linux serialises access to the
+shared adapter and no other process opens either of its addresses. It is an ordinary service —
 `sudo systemctl stop tofd` is safe, nothing depends on it, and `monitor` says
 "no depth stream" and carries on. Three things it distinguishes, because they need
 different fixes:
@@ -781,20 +783,22 @@ sudo i2cdetect -y -r 3
 journalctl -u tofd -b
 ```
 
-The sensor shares the codec's I²C bus, so `setup-board.sh`'s audio section already
-provisions the bus itself; the ToF step only adds the stable `/dev/i2c-pihat`
-name. Both sensor generations are supported — a VL53L5CX and a VL53L8CX are
-interchangeable on the board, and the daemon picks the driver from an ID read.
+The scan should contain exactly the sensor addresses `29`, `6a`, and `6b` (plus `18` only when
+the optional audio HAT is fitted). `0x52` in some ST ToF material is the shifted 8-bit write
+address, not the Linux address. `setup-board.sh` provisions I2C3 on Radxa header pins 3/5 and
+the stable `/dev/i2c-qwiic` name independently of audio; `tofd` tries that name first and
+`/dev/i2c-3` only for a board provisioned before the rule existed. Physical order, the head
+address jumper, and the required pull-up cuts are in the
+[purchase list](purachse-list.md#qwiic-assembly).
 
 #### The head IMU (`head_imu.stream`)
 
-`tofd` also serves the head module's BMI088 — gyro, acceleration and a Madgwick
-orientation — and it is **off by default**: `[head_imu] enabled` in `robotd.toml`,
-set with `robotctl configure`, which offers the `tofd` restart. Reading it costs
-~4% of a core at 100 Hz and nothing subscribes yet, so a duck that is not mapping
-was paying that from boot. A subscriber while it is off gets a reason naming the
-key, not the silence an unfitted sensor gives. `tofd --imu` reads it for one
-session without touching the file, and `--imu-hz` trades rate for cost linearly.
+`tofd` also serves the head's LSM6DSV16X — gyro, acceleration and its on-chip SFLP
+orientation — and it is **off by default**: `[head_imu] enabled` in `robotd.toml`, set with
+`robotctl configure`, which offers the `tofd` restart. A subscriber while it is off gets a
+reason naming the key, not the silence an unfitted sensor gives. `tofd --imu` reads it for one
+session without touching the file. `--imu-hz` remains the publication rate (100 Hz by default);
+the LSM6DSV16X is configured at the next supported SFLP rate, 120 Hz for that default.
 
 None of this touches depth: the ToF ranges either way, so the grid above works on
 a duck whose IMU has never been switched on.
@@ -1175,4 +1179,3 @@ eval "$(robotctl completions bash)"
 ```
 
 `zsh`, `fish`, `elvish` and `powershell` work in place of `bash`.
-
