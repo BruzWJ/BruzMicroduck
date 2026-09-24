@@ -1,148 +1,118 @@
-# Cutting a release. **The GitHub UI is the entry point.**
+# One click, one tag, one release.
 #
-# Create a release in the web interface and this decides what that means, from the tag and from what
-# already exists:
-#
-#   pre-release, tag `daemon-staging-v1.2.3`  →  build it, sign it, verify it, publish to STAGING
-#   release,     tag `daemon-v1.2.3`          →  promote staging 1.2.3 if it exists — the same bytes,
-#                                                re-signed — otherwise build 1.2.3 directly
-#
-# Pushing either tag from a terminal does the same thing; the release object is created for you.
-#
-# The two shapes of stable release are not equivalent, and the one you get is recorded in the release
-# notes rather than left to be inferred. Promoted means a canary ran exactly these bytes. Built
-# directly means the artifact was verified through the real update engine here — signature, manifest,
-# a genuine install — but no robot has run it. Both are signed with the key customer robots trust, so
-# the difference is validation, not authenticity.
-#
-# Promotion never rebuilds, which is the property updater-design.md §16.3 exists to protect: what
-# reaches client robots is byte-identical to what was validated.
+# Bump [workspace.package].version in Cargo.toml, push the default branch, then use
+# Actions → release → Run workflow. GitHub freezes that commit, builds, signs, verifies,
+# creates daemon-v<version>, uploads the assets, and publishes the release.
 name: release
 
-# One trigger, deliberately.
-#
-# Publishing a release in the UI creates the tag, so this fires for the UI path as well as for
-# `git push --tags` — verified both ways. There *was* also a `release: published` trigger, and it made
-# every UI release start two identical runs; the concurrency group below cancelled one, and a
-# cancelled run counts as a failed check, so a perfectly good release showed a red ✗ on its tag.
-#
-# What one trigger gives up: publishing a release against a tag that *already exists* does nothing.
-# That tag's push already built it, so there is nothing to do — and if a build genuinely needs
-# repeating, re-run it from the Actions tab.
 on:
-  push:
-    tags:
-      - 'daemon-staging-v*'
-      - 'daemon-v*'
+  workflow_dispatch:
 
 permissions:
   contents: write
 
-# One run per tag, still — a belt to the single trigger's braces. Two runs publishing the same tag
-# would race on the upload, and because each build stamps its own `DUCK_BUILD_TIME` the artifacts are
-# not byte-identical: the release could end up with a manifest from one run and a tarball from
-# another, which is a sha256 mismatch no robot can install and nothing in the release explains.
-#
-# `cancel-in-progress: false`, because a cancelled run reports as a failed check and there is nothing
-# to cancel for anyway: whoever pushed the same tag twice wants the second attempt to wait, not to
-# make the first look broken.
 concurrency:
-  group: release-${{ github.ref_name }}
+  group: daemon-release
   cancel-in-progress: false
 
 jobs:
-  # Which channel, which version, and whether there is anything to promote.
-  #
-  # Its own job because the two workflows it chooses between are `uses:` jobs, and those can only be
-  # conditioned on something computed outside themselves.
-  decide:
+  prepare:
+    name: Validate source
     runs-on: ubuntu-latest
-    # Everything under `daemon-` reaches this job, and the well-formedness check happens *inside* it
-    # rather than here. That is deliberate, and it is the fix for a real waste of time: a release
-    # published as `daemon-staging-0.4.0` — no `v` — skipped every job, and an all-grey run reads as
-    # "nothing has happened yet" rather than "your tag is wrong".
-    #
-    # What still has to skip silently is `daemon-dev-*`: `dev.yml` publishes one on every push to
-    # every branch, and those are not release attempts. Anything else beginning with `daemon-` is
-    # someone trying to cut a release, and deserves a red X with the answer in it.
-    if: >-
-      startsWith(github.ref_name, 'daemon-') &&
-      !startsWith(github.ref_name, 'daemon-dev-')
     outputs:
-      mode: ${{ steps.plan.outputs.mode }}
-      version: ${{ steps.plan.outputs.version }}
-      tag: ${{ steps.plan.outputs.tag }}
+      source_sha: ${{ steps.identity.outputs.source_sha }}
+      tag: ${{ steps.identity.outputs.tag }}
+      version: ${{ steps.identity.outputs.version }}
     steps:
-      - name: Plan
-        id: plan
+      - name: Check out the selected commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Derive release identity
+        id: identity
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          DISPATCH_REF: ${{ github.ref }}
+          DISPATCH_SHA: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import subprocess
+          import tomllib
+          from pathlib import Path
+
+          expected_ref = f"refs/heads/{os.environ['DEFAULT_BRANCH']}"
+          if os.environ["DISPATCH_REF"] != expected_ref:
+              raise SystemExit(
+                  "run releases from the default branch: "
+                  f"expected {expected_ref}, got {os.environ['DISPATCH_REF']}"
+              )
+
+          source_sha = subprocess.run(
+              ["git", "rev-parse", "--verify", "HEAD^{commit}"],
+              check=True,
+              text=True,
+              stdout=subprocess.PIPE,
+          ).stdout.strip()
+          if source_sha != os.environ["DISPATCH_SHA"]:
+              raise SystemExit(
+                  f"checked-out source {source_sha} differs from dispatch {os.environ['DISPATCH_SHA']}"
+              )
+
+          with open("Cargo.toml", "rb") as stream:
+              version = tomllib.load(stream)["workspace"]["package"]["version"]
+          stable_semver = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+          if not isinstance(version, str) or re.fullmatch(stable_semver, version) is None:
+              raise SystemExit(f"workspace version must be stable SemVer X.Y.Z, got {version!r}")
+
+          outputs = Path(os.environ["GITHUB_OUTPUT"])
+          with outputs.open("a", encoding="utf-8") as stream:
+              stream.write(f"source_sha={source_sha}\n")
+              stream.write(f"tag=daemon-v{version}\n")
+              stream.write(f"version={version}\n")
+          PY
+
+      - name: Refuse an existing release version
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
+          SOURCE_SHA: ${{ steps.identity.outputs.source_sha }}
+          TAG: ${{ steps.identity.outputs.tag }}
         run: |
           set -eu
-          case "$TAG" in
-              daemon-staging-v*)
-                  version="${TAG#daemon-staging-v}"
-                  mode=staging
-                  ;;
-              daemon-v*)
-                  version="${TAG#daemon-v}"
-                  # Promote when there is something to promote. `gh release view`, not a tag lookup:
-                  # a tag with no release behind it carries no artifact, so there would be nothing
-                  # to copy.
-                  if gh release view "daemon-staging-v${version}" >/dev/null 2>&1; then
-                      mode=promote
-                  else
-                      mode=stable
-                  fi
-                  ;;
-              *)
-                  echo "::error::$TAG is not a release tag. Use daemon-staging-vX.Y.Z for a candidate, published as a pre-release, or daemon-vX.Y.Z for a release. The v is not optional."
-                  exit 1
-                  ;;
-          esac
 
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          # A failed publish may leave a draft or its tag. They are resumable only when they point
+          # at this exact source; a published version is immutable.
+          if git show-ref --verify --quiet "refs/tags/$TAG"; then
+            tag_sha="$(git rev-parse "$TAG^{commit}")"
+            if [ "$tag_sha" != "$SOURCE_SHA" ]; then
+              echo "::error::$TAG points at $tag_sha, not selected commit $SOURCE_SHA"
+              exit 1
+            fi
+          fi
 
-          # Said out loud, in the run summary, because "which of the three things happened" is the
-          # first question anyone asks when a release looks wrong.
-          case "$mode" in
-              staging) what="build → STAGING (a prerelease; promote it once a canary has run it)" ;;
-              promote) what="promote daemon-staging-v${version} → STABLE (same bytes, re-signed)" ;;
-              stable)  what="build → STABLE directly (no staging release exists; NOT canaried)" ;;
-          esac
-          echo "$TAG: $what" | tee -a "$GITHUB_STEP_SUMMARY"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            state="$(gh release view "$TAG" --json isDraft,targetCommitish --jq '[.isDraft, .targetCommitish] | @tsv')"
+            is_draft="$(printf '%s' "$state" | cut -f1)"
+            release_target="$(printf '%s' "$state" | cut -f2)"
+            if [ "$is_draft" != true ] || [ "$release_target" != "$SOURCE_SHA" ]; then
+              echo "::error::$TAG already exists; bump [workspace.package].version"
+              exit 1
+            fi
+          fi
 
-  staging:
-    needs: decide
-    if: needs.decide.outputs.mode == 'staging'
+          echo "$TAG from $SOURCE_SHA: build → sign → verify → publish" \
+            >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Build, verify, and publish
+    needs: prepare
     uses: ./.github/workflows/_build-release.yml
     with:
-      tag: ${{ needs.decide.outputs.tag }}
-      version: ${{ needs.decide.outputs.version }}
-      prerelease: true
-    secrets: inherit
-
-  promote:
-    needs: decide
-    if: needs.decide.outputs.mode == 'promote'
-    uses: ./.github/workflows/_promote-release.yml
-    with:
-      version: ${{ needs.decide.outputs.version }}
-    secrets: inherit
-
-  # The uncanaried path. Deliberately reachable — a version with no staging release is usually
-  # someone who knows exactly what they are shipping — and deliberately labelled, in the notes the
-  # release itself carries.
-  stable:
-    needs: decide
-    if: needs.decide.outputs.mode == 'stable'
-    uses: ./.github/workflows/_build-release.yml
-    with:
-      tag: ${{ needs.decide.outputs.tag }}
-      version: ${{ needs.decide.outputs.version }}
-      prerelease: false
+      source_sha: ${{ needs.prepare.outputs.source_sha }}
+      tag: ${{ needs.prepare.outputs.tag }}
+      version: ${{ needs.prepare.outputs.version }}
     secrets: inherit
