@@ -21,8 +21,8 @@ Companion to [`architecture.md`](../design/architecture.md) (what we're building
 | `duckctl/` | the robot from a laptop. BLE today; named for the robot rather than the radio |
 | `mediad/` | camera, mic, encode and the WebRTC gateway, plus the console it serves. **Streaming to a browser on the LAN from a Radxa Zero 3W**, hardware H.264 through `mpph264enc`, `control` datachannel alongside |
 | `tof/` | `tofd`: the head's 8×8 ToF matrix on its own socket at 15 Hz. A board with no sensor fitted runs it anyway and says so |
-| `xtask/` | package · sign · promote — byte-identical promotion verified |
-| `.github/` | ci · release · promote · dev — all four run for real; every release since `0.2.0` reached a board through them |
+| `xtask/` | package · sign — release artifacts use the updater's own formats |
+| `.github/` | ci · release · dev — a manual release run builds, verifies, and publishes one stable release |
 | bootstrap | `updaterd install` + `scripts/install.sh` — a robot installs its first release through the **ordinary engine**, so there is no bootstrap-only code path to drift |
 | recovery | `robot-boot-check.timer` + `robot-rescue` + the `golden` symlink ship and are enabled. **Never exercised on a board** ([`boot-recovery-net.md`](../design/boot-recovery-net.md)) |
 | tests | **942 passing** on a Mac with nothing excluded, a few more on Linux — including the health gate, the battery and thermal readout and the policy/safety path against a real `robotd` process, and `configd`'s authorisation over real sockets in `board-test.sh` |

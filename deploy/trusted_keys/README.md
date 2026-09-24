@@ -7,7 +7,7 @@ against **any** key here.
 
 | | |
 |---|---|
-| `release-1.pub` | signs every release and promotion today |
+| `release-1.pub` | signs every stable release today |
 | `release-2.pub` | first rotation target if CI or `release-1` is compromised |
 | `release-3.pub` | last resort; its private half should never touch a networked machine |
 

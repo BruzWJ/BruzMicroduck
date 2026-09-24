@@ -317,7 +317,7 @@ the swap happened and the health gate passed — not that the five daemons are r
 in. That gap is where an afternoon goes: four wifi fixes were once verified as broken against a
 `configd` that had never restarted.
 
-So the check runs on every push rather than before a promotion. It reads the identity each daemon
+So the check runs on every push rather than only before a release. It reads the identity each daemon
 publishes at startup, compares the release named there against the board's `current`, and — separately,
 because everything agreeing on the *previous* release would otherwise pass — against the version this
 push built. `robotd`, `configd` and `padd` are expected to match at once; `updaterd` and `btd` are

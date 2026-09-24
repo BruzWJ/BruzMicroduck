@@ -40,8 +40,8 @@ gh run list --branch main
 
 ## Release candidates
 
-What `release.yml` published to staging and nobody has promoted yet — what a canary robot should run
-before a promotion:
+The normal release workflow does not create a candidate channel. If an operator has deliberately
+published a signed prerelease under `daemon-staging-v<version>`, install it with:
 
 ```
 sudo robotctl update apply --staging daemon
@@ -51,10 +51,9 @@ sudo robotctl update apply --staging daemon
 sudo robotctl update apply --staging --version 0.3.0 daemon
 ```
 
-A candidate is signed with the release key like any release and carries the version it will be
-promoted under. What makes it unreachable without the flag is that it is flagged as a prerelease, and
-a plain `apply` skips those so no robot drifts onto a build nobody has validated. `--staging` is that
-filter's only opt-in, it applies to the one command, and it leaves nothing switched on afterwards.
+A candidate is signed with the release key and carries the stable version it is testing. What makes
+it unreachable without the flag is that it is flagged as a prerelease: a plain `apply` skips it.
+`--staging` is that filter's explicit per-command opt-in and leaves nothing switched on afterwards.
 
 ## After an update — the part that bites
 
