@@ -1,0 +1,61 @@
+/dts-v1/;
+/plugin/;
+
+/*
+ * Hardware I2C3 (M0 pinmux) on header pins 3/5 for the Radxa Zero 3W's
+ * SparkFun Qwiic SHIM.
+ *
+ * The three userspace-driven sensors on this bus are fixed by role, not by
+ * probe order:
+ *   - VL53L5CX ToF             0x29 (Linux 7-bit address)
+ *   - head LSM6DSV16X          0x6a (ADDR jumper moved to GND)
+ *   - body LSM6DSV16X Micro    0x6b (factory address)
+ * An optional legacy audio HAT adds its TLV320AIC3104 at 0x18 through the
+ * separate aic3104-i2c3 overlay. No sensor node is declared here because the
+ * daemons own these devices through i2c-dev.
+ *
+ * THE CATCH -- i2c3 is not free in the vendor DTB: it runs in its M1 mux
+ * (GPIO3_B5/B6, by the USB-C port) serving the FUSB302 USB-C PD controller.
+ * This overlay re-muxes the controller to M0 and disables the fusb302 node.
+ * Consequences (checked on a live duck, vendor 6.1.115 DTB):
+ *   - Nothing else references the fusb302 (no extcon consumers), so only
+ *     USB-C PD negotiation is lost.
+ *   - The FUSB302's power-on defaults already present Rd on both CC lines, so
+ *     USB-C chargers still deliver their default 5 V. This 5 V board never
+ *     negotiated a higher voltage.
+ *   - maskrom flashing over USB-C is ROM code and remains unaffected.
+ *
+ * The bus stays at 400 kHz. Every fitted device supports it and it leaves
+ * signal-integrity margin for the four-board cable chain. Do not leave every
+ * SparkFun board's 2.2k pull-up pair connected: the standard build cuts the
+ * I2C pull-up jumper on all three sensor boards and uses the Radxa header-side
+ * pull-ups. If that changes, retain only one measured pull-up pair on the bus.
+ *
+ * The controller is normally /dev/i2c-3. setup-board.sh installs a udev rule
+ * that names it /dev/i2c-qwiic so consumers do not depend on enumeration.
+ */
+
+/ {
+    compatible = "radxa,zero-3w", "rockchip,rk3566";
+
+    fragment@0 {
+        target = <&i2c3>;
+        __overlay__ {
+            status = "okay";
+            clock-frequency = <400000>;
+            pinctrl-names = "default";
+            pinctrl-0 = <&i2c3m0_xfer>;
+            #address-cells = <1>;
+            #size-cells = <0>;
+        };
+    };
+
+    /* The FUSB302 is wired to the M1 pins that fragment@0 un-muxes. Without
+     * this it probes against the Qwiic bus and fails at address 0x22. */
+    fragment@1 {
+        target-path = "/i2c@fe5c0000/fusb302@22";
+        __overlay__ {
+            status = "disabled";
+        };
+    };
+};

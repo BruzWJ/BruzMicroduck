@@ -5,7 +5,7 @@
 //! `architecture.md` §1 splits perception from `robotd` deliberately: a
 //! perception crash must not take out motor control. This sensor makes the case
 //! concretely — bringing it up uploads ~90 KB of firmware over I²C, taking
-//! seconds; it shares a bus with the audio codec; and a sensor that is not fitted
+//! seconds; it shares a bus with both IMUs; and a sensor that is not fitted
 //! (the common case on a duck without the head module) must be a daemon logging
 //! one line, not a retry loop inside the control loop's process. Nothing in the
 //! 50 Hz loop reads depth, so nothing is gained by putting it there.
@@ -16,7 +16,7 @@
 //!
 //! ## Shape
 //!
-//! A blocking thread drives the sensor: open, probe, upload firmware, then poll
+//! A blocking thread drives the sensor: open, upload firmware, then poll
 //! for frames and broadcast them. The socket server is async and reads no
 //! hardware; a subscriber that stops reading is dropped rather than allowed to
 //! slow the sensor (`broadcast` gives that for free, and a lagging consumer's gap
@@ -86,25 +86,27 @@ const POLL_GUARD: Duration = Duration::from_millis(20);
 /// The two failures that matter are "not fitted" (forever, on most ducks) and
 /// "the bus glitched" (transient). One backoff serves both: the transient case
 /// recovers in a second, and the permanent one settles at one attempt a minute
-/// instead of hammering a bus the audio codec is also using.
+/// instead of hammering the Qwiic bus shared with both IMUs.
 const RETRY_MIN: Duration = Duration::from_secs(1);
 const RETRY_MAX: Duration = Duration::from_secs(60);
+/// Opening and accepting configuration is not enough to reset retry backoff:
+/// a sensor can fail on its first ranging read and otherwise re-upload 90 KB
+/// at the minimum interval forever.
+const RETRY_RESET_AFTER: Duration = Duration::from_secs(2);
+/// A ranging sensor must produce at least one frame in this floor, or three
+/// configured frame periods at very low rates.
+const NO_FRAME_MIN: Duration = Duration::from_secs(2);
+
+fn no_frame_timeout(hz: u8) -> Duration {
+    NO_FRAME_MIN.max(Duration::from_secs_f64(3.0 / f64::from(hz.max(1))))
+}
 
 /// Buses to try when none was named, in order.
 ///
-/// `/dev/i2c-pihat` is the udev symlink `setup-board.sh` installs, which follows
-/// the HAT bus; `/dev/i2c-3` is what the `i2c3-pihat` overlay creates and is the
-/// answer on a board provisioned before that rule existed. Trying both means a
-/// board that predates the rule still finds its sensor, and the log says which
-/// path answered.
-pub(crate) const BUS_CANDIDATES: [&str; 2] = ["/dev/i2c-pihat", "/dev/i2c-3"];
-
-/// Addresses to try when none was named.
-///
-/// 0x29 is the factory default for both generations. 0x52 is where the prototype
-/// moved a VL53L5CX when an I²C IMU wanted 0x29 — that IMU is gone, but a sensor
-/// programmed then is still at 0x52, and the address survives power cycles.
-const ADDRESS_CANDIDATES: [u8; 2] = [0x29, 0x52];
+/// `/dev/i2c-qwiic` is the stable symlink installed by `setup-board.sh`;
+/// `/dev/i2c-3` is the underlying Radxa header bus and keeps a provisioned board
+/// usable if udev has not created the link yet.
+pub(crate) const BUS_CANDIDATES: [&str; 2] = ["/dev/i2c-qwiic", "/dev/i2c-3"];
 
 #[derive(Parser, Debug)]
 #[command(name = "tofd", about = "Head ToF sensor daemon", version)]
@@ -113,17 +115,17 @@ struct Args {
     #[arg(long, default_value = proto::socket::TOF)]
     socket: PathBuf,
 
-    /// I²C bus device. Unset tries the HAT symlink, then the i2c3 bus.
+    /// I²C bus device. Unset tries the Qwiic symlink, then the i2c3 bus.
     #[arg(long)]
     bus: Option<PathBuf>,
 
-    /// 7-bit I²C address. Unset tries 0x29, then 0x52.
-    #[arg(long, value_parser = parse_address)]
-    address: Option<u8>,
+    /// VL53L5CX 7-bit I²C address.
+    #[arg(long, default_value_t = 0x29, value_parser = parse_address)]
+    address: u8,
 
     /// Ranging rate, Hz. 15 is what an 8×8 frame costs about 5% of a 400 kHz bus
     /// to deliver; the sensor accepts up to 15 at this resolution.
-    #[arg(long, default_value_t = 15)]
+    #[arg(long, default_value_t = 15, value_parser = parse_tof_hz)]
     hz: u8,
 
     /// Publish a synthetic scene instead of reading hardware.
@@ -136,9 +138,18 @@ struct Args {
     #[arg(long)]
     fake: bool,
 
-    /// Head-IMU (BMI088) sample rate, Hz. The chip's default bandwidth is 100 Hz.
-    #[arg(long, default_value_t = 100)]
+    /// Head LSM6DSV16X publication rate, Hz. The sensor rate rounds up to an
+    /// SFLP-supported 15/30/60/120/240/480 Hz rung.
+    #[arg(long, default_value_t = 100, value_parser = parse_nonzero_hz)]
     imu_hz: u8,
+
+    /// Head LSM6DSV16X 7-bit address. The standard board's jumper selects 0x6a.
+    #[arg(
+        long,
+        default_value_t = qwiic_imu::HEAD_ADDRESS,
+        value_parser = parse_address
+    )]
+    imu_address: u8,
 
     /// Read the head IMU for this session, whatever `[head_imu] enabled` says.
     ///
@@ -147,7 +158,7 @@ struct Args {
     #[arg(long, conflicts_with = "no_imu")]
     imu: bool,
 
-    /// Do not read the head IMU, whatever the file says (a board without the HAT module, or to
+    /// Do not read the head IMU, whatever the file says (a board without the head module, or to
     /// free the bus for a measurement).
     #[arg(long)]
     no_imu: bool,
@@ -174,7 +185,30 @@ fn parse_address(s: &str) -> Result<u8, String> {
         Some(hex) => (16, hex),
         None => (10, s),
     };
-    u8::from_str_radix(digits, radix).map_err(|e| format!("{s:?} is not an address: {e}"))
+    let address =
+        u8::from_str_radix(digits, radix).map_err(|e| format!("{s:?} is not an address: {e}"))?;
+    if address > 0x7f {
+        return Err(format!("{s:?} is not a 7-bit I²C address"));
+    }
+    Ok(address)
+}
+
+fn parse_tof_hz(s: &str) -> Result<u8, String> {
+    let hz = parse_nonzero_hz(s)?;
+    if hz > 15 {
+        return Err("VL53L5CX 8x8 ranging rate must be between 1 and 15 Hz".to_owned());
+    }
+    Ok(hz)
+}
+
+fn parse_nonzero_hz(s: &str) -> Result<u8, String> {
+    let hz = s
+        .parse::<u8>()
+        .map_err(|e| format!("{s:?} is not a sample rate: {e}"))?;
+    if hz == 0 {
+        return Err("sample rate must be greater than zero".to_owned());
+    }
+    Ok(hz)
 }
 
 // One thread is plenty: the sensor is on its own std thread, and everything here
@@ -230,11 +264,8 @@ async fn main() -> std::process::ExitCode {
     // subscribers pick the stream by method.
     //
     // **Off unless `[head_imu] enabled` says otherwise**, and that default is the measurement in
-    // `docs/project/tof-on-demand.md`: reading this chip at 100 Hz costs ~3.5-4.5% of a core, of
-    // which the wakeups are 0.7 points and the fusion 0.3 — the rest is two I²C transactions a
-    // sample, which is what a gyro and an accelerometer sample *is*. Nothing in the loop was
-    // worth fixing, nothing subscribes to the stream yet, and a duck that is not mapping was
-    // paying for it from boot.
+    // `docs/project/tof-on-demand.md`: nothing subscribes to the stream yet, and a duck that is
+    // not mapping should not pay for an otherwise unused high-rate sensor from boot.
     //
     // Skipped for --sim/--fake too: there is no real bus behind either.
     let imu_status = Arc::new(ImuStatus::new(args.imu_hz));
@@ -246,7 +277,7 @@ async fn main() -> std::process::ExitCode {
     let wanted = args.imu || (configured && !args.no_imu);
     let imu_thread = if !wanted || args.fake || args.sim.is_some() {
         // Said out loud, and said by the stream too: a subscriber gets this sentence instead of
-        // frames, because "no samples" and "no BMI088 fitted" are different answers and only one
+        // frames, because "no samples" and "no LSM6DSV16X fitted" are different answers and only one
         // of them is somebody's mistake.
         if !wanted {
             tracing::info!(
@@ -254,6 +285,10 @@ async fn main() -> std::process::ExitCode {
                 "the head IMU is off; set [head_imu] enabled = true to read it"
             );
             imu_status.off();
+        } else if args.fake {
+            imu_status.unavailable("the fake depth backend does not emulate a head IMU");
+        } else {
+            imu_status.unavailable("the simulator depth backend does not publish a head IMU");
         }
         None
     } else {
@@ -261,11 +296,19 @@ async fn main() -> std::process::ExitCode {
             (imu_status.clone(), imu_frames.clone(), shutdown.clone());
         let bus = args.bus.clone();
         let hz = args.imu_hz;
+        let address = args.imu_address;
         Some(
             std::thread::Builder::new()
                 .name("head-imu".to_owned())
                 .spawn(move || {
-                    imu::imu_loop(bus.as_deref(), hz, &imu_status, &imu_frames, &shutdown)
+                    imu::imu_loop(
+                        bus.as_deref(),
+                        address,
+                        hz,
+                        &imu_status,
+                        &imu_frames,
+                        &shutdown,
+                    )
                 })
                 .expect("spawn the head-imu thread"),
         )
@@ -300,7 +343,7 @@ fn quiet_period(hz: u8) -> Duration {
 /// attempts. Never returns until shutdown.
 fn sensor_loop(
     bus: Option<&Path>,
-    address: Option<u8>,
+    address: u8,
     hz: u8,
     status: &Arc<Status>,
     frames: &tokio::sync::broadcast::Sender<proto::TofFrame>,
@@ -315,11 +358,13 @@ fn sensor_loop(
     while !shutdown.load(Ordering::Acquire) {
         match open_sensor(bus, address, hz) {
             Ok(mut sensor) => {
-                backoff = RETRY_MIN;
-                said = false;
-                let generation = sensor.generation();
-                tracing::warn!(sensor = generation.as_str(), hz, "ranging");
-                status.up(generation.as_str());
+                tracing::warn!(sensor = tof::SENSOR_NAME, hz, "ranging");
+                status.down("sensor initialised; waiting for its first frame");
+                let opened_at = Instant::now();
+                let mut last_frame_at = opened_at;
+                let frame_timeout = no_frame_timeout(hz);
+                let mut announced = false;
+                let mut retry_reset = false;
 
                 // When the sensor could not possibly have a frame yet, so there
                 // is nothing to ask it until then — see [`POLL_GUARD`]. `None`
@@ -345,7 +390,18 @@ fn sensor_loop(
                     match sensor.data_ready() {
                         Ok(true) => match sensor.read_frame() {
                             Ok(frame) => {
-                                quiet_until = Some(Instant::now() + quiet);
+                                let now = Instant::now();
+                                last_frame_at = now;
+                                quiet_until = Some(now + quiet);
+                                if !announced {
+                                    status.up(tof::SENSOR_NAME);
+                                    said = false;
+                                    announced = true;
+                                }
+                                if !retry_reset && opened_at.elapsed() >= RETRY_RESET_AFTER {
+                                    backoff = RETRY_MIN;
+                                    retry_reset = true;
+                                }
                                 seq += 1;
                                 // No subscribers is the normal state — nobody is
                                 // watching most of the time — so a send that
@@ -365,7 +421,16 @@ fn sensor_loop(
                                 break;
                             }
                         },
-                        Ok(false) => std::thread::sleep(POLL),
+                        Ok(false) => {
+                            if last_frame_at.elapsed() >= frame_timeout {
+                                tracing::warn!(
+                                    silent_ms = last_frame_at.elapsed().as_millis(),
+                                    "VL53L5CX stopped producing frames; reopening"
+                                );
+                                break;
+                            }
+                            std::thread::sleep(POLL);
+                        }
                         Err(e) => {
                             tracing::warn!(error = %e, "lost the sensor");
                             break;
@@ -553,38 +618,32 @@ struct SimDepth {
     status: Vec<u8>,
 }
 
-/// Try the named bus and address, or every candidate, and return the first
-/// sensor that comes up ranging.
-fn open_sensor(bus: Option<&Path>, address: Option<u8>, hz: u8) -> Result<tof::Sensor> {
-    let buses: Vec<PathBuf> = match bus {
-        Some(bus) => vec![bus.to_path_buf()],
-        None => BUS_CANDIDATES.iter().map(PathBuf::from).collect(),
+/// Try the named bus, or each standard Qwiic bus path, at the configured address
+/// and return the first sensor that comes up ranging.
+fn open_sensor(bus: Option<&Path>, address: u8, hz: u8) -> Result<tof::Sensor> {
+    // A provisioned `/dev/i2c-qwiic` is a symlink to `/dev/i2c-3`, not a
+    // second adapter. Fall back only when the alias is absent; retrying a
+    // failed firmware upload through both names would hammer the shared bus
+    // twice before backoff begins.
+    let bus = match bus {
+        Some(bus) if bus.exists() => bus.to_path_buf(),
+        Some(bus) => anyhow::bail!("{} does not exist", bus.display()),
+        None => BUS_CANDIDATES
+            .iter()
+            .map(PathBuf::from)
+            .find(|candidate| candidate.exists())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "neither {} nor {} exists",
+                    BUS_CANDIDATES[0],
+                    BUS_CANDIDATES[1]
+                )
+            })?,
     };
-    let addresses: Vec<u8> = match address {
-        Some(address) => vec![address],
-        None => ADDRESS_CANDIDATES.to_vec(),
-    };
-
-    let mut last = None;
-    for bus in &buses {
-        // A missing bus is not worth an address sweep, and saying so is more use
-        // than "nothing answered": it means the overlay is not loaded.
-        if !bus.exists() {
-            last = Some(anyhow::anyhow!("{} does not exist", bus.display()));
-            continue;
-        }
-        for &address in &addresses {
-            match tof::Sensor::open(bus, address) {
-                Ok(mut sensor) => {
-                    tracing::info!(bus = %bus.display(), address = format!("{address:#04x}"), "sensor found");
-                    sensor.start(hz)?;
-                    return Ok(sensor);
-                }
-                Err(e) => last = Some(e),
-            }
-        }
-    }
-    Err(last.unwrap_or_else(|| anyhow::anyhow!("no bus to look on")))
+    let mut sensor = tof::Sensor::open(&bus, address)?;
+    tracing::info!(bus = %bus.display(), address = format!("{address:#04x}"), "VL53L5CX found");
+    sensor.start(hz)?;
+    Ok(sensor)
 }
 
 fn sleep_unless_shutdown(total: Duration, shutdown: &Arc<AtomicBool>) {
@@ -900,7 +959,18 @@ mod tests {
         assert_eq!(parse_address("0x29"), Ok(0x29));
         assert_eq!(parse_address("41"), Ok(41));
         assert!(parse_address("0x1ff").is_err(), "wider than an address");
+        assert!(parse_address("0x80").is_err(), "not a 7-bit address");
         assert!(parse_address("nope").is_err());
+    }
+
+    #[test]
+    fn command_line_rates_match_the_hardware() {
+        assert_eq!(parse_tof_hz("1"), Ok(1));
+        assert_eq!(parse_tof_hz("15"), Ok(15));
+        assert!(parse_tof_hz("0").is_err());
+        assert!(parse_tof_hz("16").is_err());
+        assert_eq!(parse_nonzero_hz("100"), Ok(100));
+        assert!(parse_nonzero_hz("0").is_err());
     }
 
     /// The backoff must climb and stop climbing — a duck with no sensor fitted
@@ -949,9 +1019,17 @@ mod tests {
         assert_eq!(quiet_period(u8::MAX), Duration::ZERO);
     }
 
-    /// `--hz 0` is a division this must not do.
+    /// The CLI rejects zero, and this helper remains defensive if another caller
+    /// is added later.
     #[test]
     fn a_zero_rate_is_treated_as_one_hertz() {
         assert_eq!(quiet_period(0), Duration::from_secs(1) - POLL_GUARD);
+    }
+
+    #[test]
+    fn a_silent_ranging_sensor_has_a_finite_rate_aware_deadline() {
+        assert_eq!(no_frame_timeout(15), NO_FRAME_MIN);
+        assert_eq!(no_frame_timeout(1), Duration::from_secs(3));
+        assert_eq!(no_frame_timeout(0), Duration::from_secs(3));
     }
 }

@@ -73,10 +73,6 @@ pub fn mouth_target(open: f64) -> f64 {
     MOUTH_CLOSED + open * (MOUTH_OPEN - MOUTH_CLOSED)
 }
 
-/// The `imu_to_dxl` v2 board's Dynamixel ID. It rides the motor bus and is read in the
-/// same transaction as the servos ([`crate::bus`]).
-pub const IMU_DXL_ID: u8 = 200;
-
 pub const BAUD_RATE: u32 = 1_000_000;
 
 /// What a servo answers as out of the box: ID 1 at 57 600 baud. Both are deliberately unused
@@ -88,7 +84,7 @@ pub const FACTORY_BAUD_RATE: u32 = 57_600;
 /// EEPROM registers asserted (and corrected) at startup.
 ///
 /// `return_delay_time` is the load-bearing one: the XL330 ships at 250, which is 500 µs of
-/// turnaround *per device*. Across 16 devices that is 8 ms per tick — 40% of a 20 ms budget
+/// turnaround *per device*. Across 15 devices that is 7.5 ms per tick — 37.5% of a 20 ms budget
 /// — spent waiting for servos to get around to answering. The rest are here because the
 /// runtime found them worth pinning.
 ///
@@ -170,19 +166,12 @@ mod tests {
             .for_each(|w| assert_ne!(w[0], w[1], "duplicate Dynamixel ID {}", w[0]));
     }
 
-    /// The IMU board shares the bus with the servos, so its ID must not collide with one.
-    #[test]
-    fn imu_id_does_not_collide_with_a_joint() {
-        assert!(!JOINT_IDS.contains(&IMU_DXL_ID));
-    }
-
     /// The replacement path finds a new servo by the ID it ships with. If a joint ever took
     /// ID 1, a fresh servo would be indistinguishable from it — and flashing "the missing
     /// joint" onto ID 1 would re-address a servo that was never missing.
     #[test]
     fn factory_defaults_are_unused_on_the_bus() {
         assert!(!JOINT_IDS.contains(&FACTORY_ID));
-        assert_ne!(IMU_DXL_ID, FACTORY_ID);
         assert_ne!(FACTORY_BAUD_RATE, BAUD_RATE);
     }
 

@@ -1,14 +1,8 @@
 //! The head ToF sensor: an 8×8 matrix of distances, once per scan.
 //!
-//! A VL53L5CX or VL53L8CX on the HAT's I²C bus — the same `i2c3` bus the audio
-//! codec sits on — looking where the head looks. This crate is the driver and the
-//! frame shape; `tofd` (`src/main.rs`) is the daemon that owns the sensor and
-//! publishes frames on a socket.
-//!
-//! **Both generations, decided at runtime.** The two are interchangeable on the
-//! board and differ only in firmware and a driver prefix, so which one is fitted
-//! is not a build-time choice: an ID read picks the driver before any firmware is
-//! uploaded ([`Generation`]). Ducks in the field have both.
+//! A SparkFun Qwiic Mini VL53L5CX on the Radxa's Qwiic bus, looking where the
+//! head looks. This crate is the driver and frame shape; `tofd` (`src/main.rs`)
+//! owns the sensor and publishes frames on a socket.
 //!
 //! ## Why the C is vendored
 //!
@@ -16,10 +10,10 @@
 //! firmware blob that is uploaded into the sensor on every start. Reimplementing
 //! that in Rust would be transcribing a binary blob and a state machine nobody
 //! has documented outside the driver; depending on a third-party crate would put
-//! a sensor this robot needs behind someone else's maintenance. So both ULDs are
+//! a sensor this robot needs behind someone else's maintenance. So the ULD is
 //! vendored verbatim (BSD-3-Clause, `vendor/LICENSE.txt`), the Linux i2c-dev
 //! platform hooks come from `microduck_runtime` where they were measured — one
-//! implementation, compiled once per generation — and a flat shim keeps every
+//! implementation — and a flat shim keeps every
 //! struct on the C side of the boundary. `build.rs` compiles them and explains
 //! the one trick involved; there is no system library and no Python. The
 //! prototype reached the older sensor through a pip package and a `.so` loaded by
@@ -42,7 +36,10 @@
 
 pub mod sensor;
 
-pub use sensor::{Generation, Sensor};
+pub use sensor::Sensor;
+
+/// Hardware name reported by `tof.stream` when the sensor is ranging.
+pub const SENSOR_NAME: &str = "VL53L5CX";
 
 /// The sensor's resolution. Pinned: 8×8 is what `start` configures and what the
 /// wire format carries.
@@ -72,6 +69,8 @@ pub enum Zone {
     /// A measurement, in metres. Status 5 (valid) or 9 (valid, large pulse).
     Range(f32),
     /// Status 255: the sensor looked and found nothing in range. Empty space.
+    /// The ULD synthesizes this from its per-zone detected-target count; that
+    /// internal output must remain enabled even though it is not published.
     NoTarget,
     /// Any other status: the measurement failed. Says nothing about what is out
     /// there — carries the raw code, because the codes mean specific things to
@@ -82,7 +81,8 @@ pub enum Zone {
 /// Status codes ST documents as a usable range: valid, and valid with a large
 /// pulse (~50% confidence, which the sensor still stands behind).
 pub const STATUS_VALID: [u8; 2] = [5, 9];
-/// Status code for "measured, nothing there".
+/// Status code for "measured, nothing there". This is synthesized by ST's ULD
+/// when its detected-target count for the zone is zero.
 pub const STATUS_NO_TARGET: u8 = 255;
 
 impl Frame {

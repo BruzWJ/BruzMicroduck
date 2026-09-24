@@ -70,7 +70,7 @@ const LOOP_SUMMARY_INTERVAL: Duration = Duration::from_secs(300);
 
 /// How often an *isolated* dropped bus transaction is worth a line.
 ///
-/// One drop is ordinary on a serial bus and a run of them is a fault, so the loop logs the first
+/// One transient on either required hardware bus is ordinary and a run is a fault, so the loop logs the first
 /// of a run and every tenth after it. That rule reads `consecutive_errors`, which resets on the
 /// next good read — so it never fired on the case a board actually produces: one drop, one good
 /// read, one drop, at about a hertz, forever `consecutive=1`. Every one of them was logged.
@@ -787,8 +787,8 @@ impl RobotState {
                 // Degraded, not unhealthy: an unpowered bench board must not roll back every
                 // release shipped to it. The bus not answering is the same before and after.
                 return degraded(format!(
-                    "no robot on the motor bus after {waiting} attempts; \
-                     is servo power on and the bus wired?"
+                    "robot hardware buses have not opened after {waiting} attempts; \
+                     is servo power on, and are the Dynamixel and Qwiic buses wired?"
                 ));
             }
             return unhealthy("control loop has not completed a cycle yet".into());
@@ -1051,7 +1051,7 @@ fn run_init(params: &Params, duration: Duration) -> ExitCode {
     // The same open as the daemon's, replacement adoption included: `init` is what someone
     // reaches for right after a motor swap, and it must not be the one path that refuses the
     // new servo.
-    let Some(mut io) = open_bus(&params.bus, 0) else {
+    let Some(mut io) = open_bus(&params.bus, &params.body_imu, params.control.hz, 0) else {
         return ExitCode::FAILURE;
     };
     if let Err(e) = io.set_torque(true) {
@@ -1102,6 +1102,8 @@ fn spawn_control_thread(
     let fake = args.fake;
     let sim = args.sim.clone();
     let bus = params.bus.clone();
+    let body_imu = params.body_imu.clone();
+    let control_hz = params.control.hz;
     let params = params.clone();
     // So a reload can re-read `[policy]` without a restart. The path rather than the loaded
     // params, because the point is to pick up what has been written since.
@@ -1163,7 +1165,7 @@ fn spawn_control_thread(
             // loop has not completed a cycle yet", forever, whatever happened to the robot
             // afterwards. Retrying the read alone was not enough: execution never got there.
             runtime.block_on(async move {
-                if let Some(io) = open_bus_waiting(&bus, &state).await {
+                if let Some(io) = open_bus_waiting(&bus, &body_imu, control_hz, &state).await {
                     control_loop(io, state, intents, params, params_path, period, poweroff).await;
                 }
             });
@@ -1183,13 +1185,18 @@ type BusIo = FakeIo;
 /// one to abandon the control loop over.
 ///
 /// Returns `None` only if shutdown is requested while waiting.
-async fn open_bus_waiting(bus: &params::Bus, state: &RobotState) -> Option<BusIo> {
+async fn open_bus_waiting(
+    bus: &params::Bus,
+    body_imu: &params::BodyImuParams,
+    control_hz: u32,
+    state: &RobotState,
+) -> Option<BusIo> {
     let mut attempt = 0u32;
 
     while !state.shutdown.load(Ordering::Relaxed) {
         // Logging lives in `open_bus`, which is chatty by design on the first attempt and
         // quiet thereafter — a board waiting overnight must not fill the journal.
-        if let Some(io) = open_bus(bus, attempt) {
+        if let Some(io) = open_bus(bus, body_imu, control_hz, attempt) {
             state.startup_bus_failures.store(0, Ordering::Relaxed);
             return Some(io);
         }
@@ -1209,12 +1216,23 @@ async fn open_bus_waiting(bus: &params::Bus, state: &RobotState) -> Option<BusIo
 
 /// Open and verify the bus, or explain why not.
 #[cfg(target_os = "linux")]
-fn open_bus(bus: &params::Bus, attempt: u32) -> Option<BusIo> {
+fn open_bus(
+    bus: &params::Bus,
+    body_imu: &params::BodyImuParams,
+    control_hz: u32,
+    attempt: u32,
+) -> Option<BusIo> {
     // First attempt and every thirtieth — about one line per 30 s while waiting.
     let loud = attempt == 0 || attempt.is_multiple_of(STARTUP_READ_LOG_EVERY);
     let port = bus.port.as_str();
 
-    let mut io = match duck_control::bus::DynamixelIo::open(port, bus.fast_sync_read) {
+    let mut io = match duck_control::bus::DynamixelIo::open(
+        port,
+        bus.fast_sync_read,
+        Path::new(&body_imu.bus),
+        body_imu.address,
+        control_hz as u16,
+    ) {
         Ok(io) => io,
         Err(e) => {
             if loud {
@@ -1223,6 +1241,14 @@ fn open_bus(bus: &params::Bus, attempt: u32) -> Option<BusIo> {
             return None;
         }
     };
+    if loud {
+        tracing::info!(
+            bus = %body_imu.bus,
+            address = %format_args!("{:#04x}", body_imu.address),
+            rate_hz = io.body_imu_rate_hz(),
+            "body LSM6DSV16X ready"
+        );
+    }
     // Under the same `loud` rule as everything else here — a board waiting on servo power
     // retries this forever. Worth saying at all because the whole tick budget hangs off it,
     // and "turned off in robotd.toml" is otherwise indistinguishable from "this board is slow".
@@ -1311,7 +1337,12 @@ fn adopt_missing_servo(io: &mut BusIo, loud: bool) -> bool {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn open_bus(_bus: &params::Bus, _attempt: u32) -> Option<BusIo> {
+fn open_bus(
+    _bus: &params::Bus,
+    _body_imu: &params::BodyImuParams,
+    _control_hz: u32,
+    _attempt: u32,
+) -> Option<BusIo> {
     tracing::error!("no bus on this platform; use --fake");
     None
 }
@@ -1422,7 +1453,7 @@ async fn adopt_startup_pose<T: RobotIo>(
                     tracing::warn!(
                         attempt,
                         hz = 1.0 / period.as_secs_f64(),
-                        "the motor bus answered; holding the pose found at startup"
+                        "the servo and body-IMU buses answered; holding the pose found at startup"
                     );
                 }
                 return Some(sensors.positions);
@@ -1436,7 +1467,7 @@ async fn adopt_startup_pose<T: RobotIo>(
                     tracing::warn!(
                         error = %e,
                         attempt,
-                        "no answer from the motor bus; waiting, not commanding anything"
+                        "no complete servo and body-IMU sample; waiting, not commanding anything"
                     );
                 }
                 tokio::time::sleep(STARTUP_RETRY_INTERVAL).await;
@@ -7097,7 +7128,9 @@ mod tests {
         assert!(!health.healthy);
         let reason = health.reason.unwrap();
         assert!(
-            reason.contains("motor bus") && reason.contains("servo power"),
+            reason.contains("hardware buses")
+                && reason.contains("servo power")
+                && reason.contains("Qwiic"),
             "unactionable reason: {reason}"
         );
     }
@@ -7121,8 +7154,12 @@ mod tests {
             port: "/dev/definitely-not-a-bus".into(),
             ..Default::default()
         };
-        let handle =
-            tokio::spawn(async move { open_bus_waiting(&nowhere, &waiter_state).await.is_none() });
+        let body_imu = params::BodyImuParams::default();
+        let handle = tokio::spawn(async move {
+            open_bus_waiting(&nowhere, &body_imu, 50, &waiter_state)
+                .await
+                .is_none()
+        });
 
         // Bounded, so a regression fails rather than hanging CI.
         for _ in 0..10_000 {

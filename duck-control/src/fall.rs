@@ -21,9 +21,10 @@
 //! ġz = −(ωx·gy − ωy·gx)
 //! ```
 //!
-//! No filtering, no differentiation of the quaternion: the gyro is a direct measurement
-//! arriving in the same 12-byte block, and differentiating the SFLP quaternion instead
-//! would add the filter's own lag to the very number whose whole point is to be early.
+//! No filtering, no differentiation of the quaternion: the gyro is a direct register
+//! measurement read in the same poll as each fresh SFLP FIFO quaternion. Differentiating that
+//! quaternion instead would add the fusion filter's own lag to the number whose whole point is
+//! to be early.
 //!
 //! Extrapolate that linearly over [`FallPredictor`]'s lookahead and the test is "where
 //! will gravity be a quarter-second from now" — trigger when *that* is past the point of

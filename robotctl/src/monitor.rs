@@ -4340,7 +4340,7 @@ mod tests {
             &mut view,
             Update::TofStatus(Box::new(proto::TofStreamResult {
                 accepted: true,
-                sensor: Some("VL53L8CX".to_owned()),
+                sensor: Some("VL53L5CX".to_owned()),
                 unavailable: None,
                 rows: 8,
                 cols: 8,
@@ -4349,7 +4349,7 @@ mod tests {
         );
         feed(&mut view, Update::Tof(Box::new(a_tof_frame())));
         let live = render_to(&mut view, 100, 40);
-        assert!(live.contains("tof VL53L8CX"), "{live}");
+        assert!(live.contains("tof VL53L5CX"), "{live}");
         assert!(live.contains("15 Hz"), "{live}");
         assert!(live.contains("0.42"), "a range is a number: {live}");
         assert!(live.contains("·"), "empty space is a dot: {live}");

@@ -1,0 +1,18 @@
+# The two SparkFun LSM6DSV16X Qwiic boards, behind one Linux-safe interface.
+[package]
+name = "qwiic-imu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1"
+
+# The device node and the official ST driver only exist on the robot. Keeping
+# them target-scoped is what lets the whole workspace build and test on macOS.
+[target.'cfg(target_os = "linux")'.dependencies]
+embedded-hal = "1"
+linux-embedded-hal = { version = "0.4.1", default-features = false, features = ["i2c"] }
+lsm6dsv16x-rs = { version = "=2.1.0", default-features = false, features = ["blocking"] }
+st-mems-bus = { version = "=2.0.0", default-features = false, features = ["i2c"] }

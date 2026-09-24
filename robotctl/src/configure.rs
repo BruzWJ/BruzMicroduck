@@ -119,8 +119,8 @@ fn apply_for(key: &str) -> Option<Apply> {
         // - `enabled` is read once into `RobotState`, and the reload call is *refused* while it
         //   is false — so the one direction anybody cares about, off to on, cannot be a reload.
         "policy" if name != "mode" && name != "enabled" => Apply::Reload("robotd"),
-        "bus" | "control" | "update_gate" | "policy" | "safety" | "chorale" | "theremin"
-        | "audio" => Apply::Restart("robotd"),
+        "bus" | "body_imu" | "control" | "update_gate" | "policy" | "safety" | "chorale"
+        | "theremin" | "audio" => Apply::Restart("robotd"),
         _ => return None,
     })
 }

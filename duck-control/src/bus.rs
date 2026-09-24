@@ -1,8 +1,7 @@
 //! The Dynamixel bus.
 //!
-//! One combined `sync_read` per tick covering the IMU board and all 15 servos, and one
-//! `sync_write` of goal positions. The IMU is listed first so it answers before the servo
-//! burst.
+//! One servo `sync_read`, one body-IMU I²C poll, and one servo `sync_write` per tick. The
+//! LSM6DSV16X shares the Radxa's Qwiic bus with the head sensors, not the Dynamixel wire.
 //!
 //! Every sync read here is a **fast** sync read (protocol 2.0 instruction 0x8A): the devices
 //! append their answers to one status packet from the broadcast id instead of each sending
@@ -19,20 +18,20 @@
 //! at against real hardware. See [`crate::model`].
 
 use std::f64::consts::PI;
+use std::path::Path;
 use std::time::Duration;
 
 use rustypot::servo::dynamixel::xl330::Xl330Controller;
 
-use crate::imu::{IMU_BLOCK_LEN, SflpDecoder};
+use crate::imu::{ImuData, SflpDecoder};
 use crate::io::{ImuStale, IoError, JointTargets, Result, RobotIo, Sensors, SlowSensors};
 use crate::model::{
-    BAUD_RATE, EXPECTED_REGISTERS, FACTORY_BAUD_RATE, FACTORY_ID, IMU_DXL_ID, JOINT_IDS,
-    JOINT_NAMES, NUM_JOINTS,
+    BAUD_RATE, EXPECTED_REGISTERS, FACTORY_BAUD_RATE, FACTORY_ID, JOINT_IDS, JOINT_NAMES,
+    NUM_JOINTS,
 };
 
 /// Start of the contiguous block read every tick: `present_pwm`, `present_current`,
-/// `present_velocity`, `present_position`. Twelve bytes covers all four, and happens to be
-/// exactly what the IMU board serves at the same address.
+/// `present_velocity`, `present_position`. Twelve bytes covers all four.
 const READ_ADDR: u8 = 124;
 const READ_LEN: u8 = 12;
 
@@ -53,7 +52,7 @@ const SLOW_READ_LEN: u8 = 3;
 /// `present_input_voltage` counts 0.1 V each.
 const VOLTS_PER_COUNT: f64 = 0.1;
 
-/// A healthy 16-device read completes well inside this. Capping it means a missing device
+/// A healthy 15-device read completes well inside this. Capping it means a missing device
 /// costs a bounded hiccup rather than stalling the loop on the serial driver's default.
 const READ_TIMEOUT: Duration = Duration::from_millis(30);
 
@@ -69,39 +68,39 @@ const EEPROM_SETTLE: Duration = Duration::from_millis(20);
 
 /// Run of consecutive stale reads at which the journal says something.
 ///
-/// 25 reads is half a second at 50 Hz — the same span [`SflpDecoder::ready`] waits for before
-/// it will call the chip's output a measurement, and far longer than any ordinary hiccup. Below
-/// it the tracker stays quiet on purpose: warning on the very first repeated block is what
-/// taught everyone to ignore this message. Kept in step with `ImuHealth::FROZEN_RUN`, which is
-/// where the same threshold is applied to the health report — this crate is the hardware layer
-/// and deliberately does not depend on the IPC vocabulary, so the number lives in both places.
-const STALE_RUN_WARN: u64 = 25;
+/// The shipped sensor rate is above the control rate (60 Hz for the 50 Hz loop), so normal clock
+/// phase can create one empty poll but not three in a row. Even at the allowed 1 kHz control-rate
+/// ceiling, the 480 Hz SFLP ceiling produces at most two consecutive empty polls. On the third
+/// miss the held orientation is about 60 ms old in the shipped configuration: stop treating it
+/// as a complete policy sample and enter the loop's bounded coast path. Kept in step with
+/// `ImuHealth::FROZEN_RUN`; the hardware layer deliberately does not depend on the IPC vocabulary,
+/// so the number lives in both places.
+const STALE_RUN_WARN: u64 = 3;
 
-/// Detects an IMU board that answers without refreshing, by remembering the last block.
+/// Detects an IMU poll that produced no new SFLP quaternion.
 ///
 /// Split out from the read path so it can be tested without a serial port: the fault it
 /// describes is one nothing else on the robot reports, and it would otherwise be verifiable
 /// only against broken hardware.
 #[derive(Debug, Default)]
 struct StaleImuTracker {
-    /// `None` until the first block. A fixed initial value cannot work here: it would have to
-    /// be all zeros, and an all-zero block is exactly what a board whose SFLP table is still
-    /// empty sends — scoring a stale read against a predecessor that never existed.
-    last: Option<[u8; IMU_BLOCK_LEN]>,
     stale: ImuStale,
 }
 
 impl StaleImuTracker {
-    /// Records one block and returns the length of the run it belongs to — 0 when the block is
-    /// fresh, which is the overwhelmingly common answer.
-    fn observe(&mut self, block: &[u8; IMU_BLOCK_LEN]) -> u64 {
-        if self.last.replace(*block) == Some(*block) {
+    /// Records whether a poll yielded a new sample and returns the current stale run.
+    fn observe(&mut self, fresh: bool) -> u64 {
+        if fresh {
+            self.stale.run = 0;
+        } else {
             self.stale.total = self.stale.total.saturating_add(1);
             self.stale.run = self.stale.run.saturating_add(1);
-        } else {
-            self.stale.run = 0;
         }
         self.stale.run
+    }
+
+    fn frozen(&self) -> bool {
+        self.stale.run >= STALE_RUN_WARN
     }
 }
 
@@ -110,37 +109,46 @@ pub struct DynamixelIo {
     /// Kept so the port can be reopened at the factory baud rate: `rustypot` owns the serial
     /// handle outright and offers no way to change its speed in place.
     port: String,
-    /// IMU first, then the servos in [`JOINT_IDS`] order — the order blocks come back in.
-    ids: Vec<u8>,
     /// Kept for the same reason as `port`: [`Self::reopen`] builds a new controller, and one
     /// built without this would silently drop back to a plain sync read for the rest of the
     /// process — a motor swap quietly halving the tick's bus budget.
     fast_sync_read: bool,
+    body_imu: qwiic_imu::Sensor,
     imu: SflpDecoder,
-    /// Blocks identical to their predecessor. The read succeeded but the board handed back
-    /// the same sample, which means the policy is being fed dead orientation data — a
-    /// failure that is invisible unless someone counts it. Known to happen.
+    last_imu: ImuData,
+    /// Successful polls with no new SFLP quaternion. The control loop holds `last_imu`
+    /// for those ticks, so freshness has to be counted separately.
     stale_imu: StaleImuTracker,
 }
 
 impl DynamixelIo {
     /// Open the bus. `fast_sync_read` is `bus.fast_sync_read` from `robotd.toml` — see
     /// [`open_controller`] for what it costs to have wrong.
-    pub fn open(port: &str, fast_sync_read: bool) -> Result<Self> {
+    pub fn open(
+        port: &str,
+        fast_sync_read: bool,
+        imu_bus: &Path,
+        imu_address: u8,
+        requested_hz: u16,
+    ) -> Result<Self> {
         let controller = open_controller(port, BAUD_RATE, fast_sync_read)?;
-
-        let mut ids = Vec::with_capacity(NUM_JOINTS + 1);
-        ids.push(IMU_DXL_ID);
-        ids.extend_from_slice(&JOINT_IDS);
+        let body_imu = qwiic_imu::Sensor::open(imu_bus, imu_address, requested_hz)
+            .map_err(|e| IoError::Bus(format!("open body IMU on {}: {e:#}", imu_bus.display())))?;
 
         Ok(Self {
             controller,
             port: port.to_owned(),
-            ids,
             fast_sync_read,
+            body_imu,
             imu: SflpDecoder::default(),
+            last_imu: ImuData::default(),
             stale_imu: StaleImuTracker::default(),
         })
+    }
+
+    /// Effective SFLP rate after rounding the control rate to a supported sensor rung.
+    pub fn body_imu_rate_hz(&self) -> u16 {
+        self.body_imu.rate_hz()
     }
 
     /// Assert — and correct — the EEPROM registers the control loop depends on.
@@ -412,16 +420,15 @@ impl DynamixelIo {
 /// The serial port at `baud`, wrapped in a Protocol 2 controller.
 ///
 /// `with_fast_sync_read` routes every `sync_read_*` through instruction 0x8A, so it covers
-/// the tick's combined read, [`RobotIo::slow_sensors`] and [`DynamixelIo::present_positions`]
+/// the tick's motor read, [`RobotIo::slow_sensors`] and [`DynamixelIo::present_positions`]
 /// without any of them naming it. The saving is a packet header and a turnaround — the
 /// device's `return_delay_time`, which [`EXPECTED_REGISTERS`] pins low precisely because it
-/// is paid per device — for each of the sixteen devices on the bus.
+/// is paid per device — for each of the fifteen servos on the bus.
 ///
 /// It is all or nothing: one status packet carries every block, so a device whose firmware
 /// does not implement 0x8A does not answer and the whole read times out. That is the same
 /// shape of failure a silent servo already causes on a plain sync read, and the tick coasts
-/// over a dropped read either way. XL330 firmware needs to be v46 or newer, and the
-/// `imu_to_dxl` board is `id 200` on this bus and has to implement it too — which is a
+/// over a dropped read either way. XL330 firmware needs to be v46 or newer, which is a
 /// property of a robot's hardware and the reason `fast_sync_read` is a setting at all rather
 /// than something this code decides.
 ///
@@ -461,45 +468,19 @@ impl RobotIo for DynamixelIo {
     fn read(&mut self) -> Result<Sensors> {
         let blocks = self
             .controller
-            .sync_read_raw_data(&self.ids, READ_ADDR, READ_LEN)
-            .map_err(|e| IoError::Bus(format!("combined imu+motor sync_read: {e}")))?;
+            .sync_read_raw_data(&JOINT_IDS, READ_ADDR, READ_LEN)
+            .map_err(|e| IoError::Bus(format!("motor sync_read: {e}")))?;
 
-        if blocks.len() != self.ids.len() {
+        if blocks.len() != NUM_JOINTS {
             return Err(IoError::ShortRead {
                 what: "sync_read blocks",
-                expected: self.ids.len(),
+                expected: NUM_JOINTS,
                 got: blocks.len(),
             });
         }
 
         let mut sensors = Sensors::default();
-
-        // Slot 0 is the IMU board.
-        if blocks[0].len() == IMU_BLOCK_LEN {
-            let mut raw = [0u8; IMU_BLOCK_LEN];
-            raw.copy_from_slice(&blocks[0]);
-            // Say so, or the counters are numbers nobody ever reads — but only once the run
-            // is long enough to mean something. Rate-limited past that because a board which
-            // has stopped refreshing produces one of these every single tick, and 50 Hz of
-            // identical warnings would evict the journal.
-            let run = self.stale_imu.observe(&raw);
-            if run == STALE_RUN_WARN || (run > STALE_RUN_WARN && run.is_multiple_of(500)) {
-                tracing::warn!(
-                    consecutive = run,
-                    total = self.stale_imu.stale.total,
-                    "imu board has returned the same sample {run} reads running — orientation is frozen"
-                );
-            }
-            sensors.imu = self.imu.decode(&raw);
-        } else {
-            return Err(IoError::ShortRead {
-                what: "imu block",
-                expected: IMU_BLOCK_LEN,
-                got: blocks[0].len(),
-            });
-        }
-
-        for (joint, block) in blocks[1..].iter().enumerate() {
+        for (joint, block) in blocks.iter().enumerate() {
             if block.len() != READ_LEN as usize {
                 return Err(IoError::ShortRead {
                     what: "motor block",
@@ -514,6 +495,34 @@ impl RobotIo for DynamixelIo {
             let position = i32::from_le_bytes([block[8], block[9], block[10], block[11]]);
             sensors.positions[joint] = (2.0 * PI * position as f64 / 4096.0) - PI;
         }
+
+        let poll = self
+            .body_imu
+            .poll()
+            .map_err(|e| IoError::Bus(format!("read body IMU: {e:#}")))?;
+        if let Some(sample) = poll.sample {
+            self.last_imu = self.imu.decode(sample);
+        }
+        let run = self.stale_imu.observe(poll.sample.is_some());
+        if run == STALE_RUN_WARN || (run > STALE_RUN_WARN && run.is_multiple_of(500)) {
+            tracing::warn!(
+                consecutive = run,
+                total = self.stale_imu.stale.total,
+                "body IMU has produced no new SFLP sample for {run} reads — orientation is frozen"
+            );
+        }
+        if self.stale_imu.frozen() {
+            // A couple of empty FIFO polls can be the normal phase difference
+            // between the control loop and SFLP. Three in a row is not:
+            // accepting the held attitude forever would let a walking policy
+            // keep stepping after fusion had stopped. Route a frozen sensor through the same
+            // bounded coast/error path as any other required sensor failure;
+            // a later fresh FIFO record clears the run and recovers normally.
+            return Err(IoError::Bus(format!(
+                "body IMU produced no new SFLP sample for {run} consecutive reads"
+            )));
+        }
+        sensors.imu = self.last_imu;
 
         Ok(sensors)
     }
@@ -648,7 +657,6 @@ mod tests {
     /// other's values — which reads as a wiring fault, not a code bug.
     #[test]
     fn read_block_is_long_enough_for_every_field() {
-        assert_eq!(READ_LEN as usize, IMU_BLOCK_LEN);
         // Highest offset touched by the parser below is position at 8..12.
         const { assert!(READ_LEN >= 12) };
     }
@@ -675,56 +683,51 @@ mod tests {
         assert!((one_count * 60.0 / (2.0 * PI) - expected_rpm).abs() < 1e-12);
     }
 
-    fn block(n: u8) -> [u8; IMU_BLOCK_LEN] {
-        [n; IMU_BLOCK_LEN]
+    /// A poll without a FIFO quaternion is stale even before the first sample. Readiness keeps
+    /// the default orientation out of fall detection, while this counter makes the cause visible.
+    #[test]
+    fn no_sample_is_stale_from_the_first_poll() {
+        let mut t = StaleImuTracker::default();
+        assert_eq!(t.observe(false), 1);
+        assert_eq!(t.stale.total, 1);
     }
 
-    /// The first block has no predecessor, so it cannot be a repeat of one. This is not a
-    /// hypothetical: the natural initial value is all zeros, and an all-zero block is what a
-    /// board sends before SFLP has written its table — which used to score a stale read on the
-    /// very first tick of every boot, and put a permanent 1 in a counter rendered as an alarm.
+    /// Fresh samples leave the total alone and clear the current run.
     #[test]
-    fn the_first_block_is_never_stale() {
+    fn fresh_samples_count_for_nothing() {
         let mut t = StaleImuTracker::default();
-        assert_eq!(t.observe(&block(0)), 0);
-        assert_eq!(t.stale.total, 0);
-    }
-
-    /// Fresh blocks must leave both counters alone. The whole point of the run is that it means
-    /// "right now", so anything that does not repeat has to clear it.
-    #[test]
-    fn fresh_blocks_count_for_nothing() {
-        let mut t = StaleImuTracker::default();
-        for n in 0..10 {
-            assert_eq!(t.observe(&block(n)), 0);
+        for _ in 0..10 {
+            assert_eq!(t.observe(true), 0);
         }
         assert_eq!(t.stale, ImuStale { total: 0, run: 0 });
     }
 
-    /// A hiccup: two identical blocks, then the board recovers. The total remembers it — that
+    /// A hiccup: one poll has no new quaternion, then the board recovers. The total remembers it — that
     /// is what makes "9 over 40 minutes" sayable — while the run goes back to zero, because
     /// orientation is live again and nothing should be shouting.
     #[test]
     fn a_hiccup_is_remembered_in_the_total_but_not_the_run() {
         let mut t = StaleImuTracker::default();
-        t.observe(&block(1));
-        assert_eq!(t.observe(&block(1)), 1, "the repeat is the first of a run");
-        assert_eq!(t.observe(&block(2)), 0, "a fresh block ends the run");
+        t.observe(true);
+        assert_eq!(t.observe(false), 1, "a missed sample starts a run");
+        assert_eq!(t.observe(true), 0, "a fresh sample ends the run");
         assert_eq!(t.stale, ImuStale { total: 1, run: 0 });
     }
 
-    /// A board that has stopped refreshing repeats forever, and the run is what separates that
+    /// A board that has stopped refreshing misses forever, and the run is what separates that
     /// from the hiccup above. It has to reach the threshold the journal and the health report
     /// both key off, or a genuinely dead IMU is never reported at all.
     #[test]
     fn a_dead_board_runs_past_the_warning_threshold() {
         let mut t = StaleImuTracker::default();
-        t.observe(&block(7));
-        for _ in 0..STALE_RUN_WARN {
-            t.observe(&block(7));
+        for _ in 0..STALE_RUN_WARN - 1 {
+            t.observe(false);
         }
+        assert!(!t.frozen(), "one early empty poll must still coast");
+        t.observe(false);
         assert_eq!(t.stale.run, STALE_RUN_WARN);
         assert_eq!(t.stale.total, STALE_RUN_WARN);
+        assert!(t.frozen(), "the threshold must stop stale policy input");
     }
 
     /// Runs accumulate into the same total across separate episodes: the total is "how often
@@ -732,12 +735,12 @@ mod tests {
     #[test]
     fn separate_episodes_add_up() {
         let mut t = StaleImuTracker::default();
-        for n in 0..3u8 {
-            t.observe(&block(n));
-            t.observe(&block(n));
-            t.observe(&block(n));
+        for _ in 0..3 {
+            t.observe(true);
+            t.observe(false);
+            t.observe(false);
         }
-        assert_eq!(t.stale.total, 6, "two repeats in each of three episodes");
+        assert_eq!(t.stale.total, 6, "two misses in each of three episodes");
         assert_eq!(t.stale.run, 2, "the last episode was still going");
     }
 }

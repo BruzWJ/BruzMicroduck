@@ -4,7 +4,7 @@
 # docs/design/architecture.md §1. `robotd`, `btd` and `mediad` are all siblings now.
 [workspace]
 resolver = "3"
-members = ["btd", "configd", "duck-ble", "duck-control", "duck-detect", "duck-ether", "duck-ipc-proto", "duckctl", "kinematics", "mediad", "odometry", "pad-imu", "padd", "pet-detect", "sounds", "tof", "updater", "robotctl", "robotd", "robotd-params", "test-support", "uyvy", "xtask"]
+members = ["btd", "configd", "duck-ble", "duck-control", "duck-detect", "duck-ether", "duck-ipc-proto", "duckctl", "kinematics", "mediad", "odometry", "pad-imu", "padd", "pet-detect", "qwiic-imu", "sounds", "tof", "updater", "robotctl", "robotd", "robotd-params", "test-support", "uyvy", "xtask"]
 
 # Everything except `duckctl`, and that exception is the whole reason this key exists.
 #
@@ -18,7 +18,7 @@ members = ["btd", "configd", "duck-ble", "duck-control", "duck-detect", "duck-et
 # writing down. One list here, and a new daemon is picked up by both without anybody remembering.
 #
 # `--workspace` is unaffected, so CI still lints and tests `duckctl` exactly as before.
-default-members = ["btd", "configd", "duck-ble", "duck-ble", "duck-control", "duck-detect", "duck-ipc-proto", "kinematics", "mediad", "odometry", "pad-imu", "padd", "pet-detect", "sounds", "tof", "updater", "robotctl", "robotd", "robotd-params", "test-support", "uyvy", "xtask"]
+default-members = ["btd", "configd", "duck-ble", "duck-ble", "duck-control", "duck-detect", "duck-ipc-proto", "kinematics", "mediad", "odometry", "pad-imu", "padd", "pet-detect", "qwiic-imu", "sounds", "tof", "updater", "robotctl", "robotd", "robotd-params", "test-support", "uyvy", "xtask"]
 
 # ONNX Runtime, which robotd dlopens to run a policy. One source of truth: `xtask package`
 # bakes these into the release's preinstall hook, and a test asserts scripts/setup-board.sh
@@ -102,6 +102,12 @@ tracing-subscriber = "0.3"
 tokio-util = "0.7"
 async-trait = "0.1"
 url = "2"
+
+# ST's 2.1.0 LSM6DSV16X driver still names the original `bisync` package,
+# whose 0.3.x releases were yanked. `bisync2` is its maintained,
+# API-compatible successor.
+[patch.crates-io]
+bisync = { path = "vendor/bisync-compat" }
 
 # No custom [profile.release]. Binary size is not worth optimising for: model artifacts
 # will dwarf a few MB of binary, and the tuning cost more than it bought —

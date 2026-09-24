@@ -1,65 +1,47 @@
-//! The head IMU (BMI088 on the HAT), read by `tofd` because `tofd` owns this I²C bus.
+//! Head LSM6DSV16X reader.
 //!
-//! The BMI088 sits on the same bus as the ToF (accel `0x19`, gyro `0x68` per the HAT schematic —
-//! next to the ToF's `0x29` and the audio codec's `0x18`, no collision). The bus is accessed one
-//! transaction at a time (each carries its slave address), so a second `i2cdev` handle for the IMU
-//! coexists with the ToF driver's handle; the kernel serialises transactions at the adapter.
+//! `tofd` owns this reader because the head IMU and VL53L5CX share the Radxa
+//! Qwiic bus. Each has its own `i2c-dev` descriptor; Linux serialises individual
+//! transactions on the adapter. The IMU runs on a separate thread so the ToF's
+//! firmware upload and retry backoff cannot stall its stream.
 //!
-//! Runs on its own std thread, not the ToF thread: the ToF blocks for seconds uploading firmware
-//! and backs off for up to a minute when no sensor is fitted, and the IMU stream must not stall
-//! behind that. Same shape as the ToF loop otherwise — open, read at `hz`, broadcast frames,
-//! retry with backoff on error — so a BMI088 fitted later needs no reconnect.
-//!
-//! **Linux only, and quietly so**, like the vendored ULDs `build.rs` skips off a board: the bus is
-//! `/dev/i2c-*` and the driver is `linux-embedded-hal`, so on a developer's Mac there is no sensor
-//! to open and `imu_loop` says as much instead of being compiled. `tofd` still builds and still
-//! serves depth from `--fake` or `--sim` there, which is what a laptop runs it for.
-//!
-//! Orientation is a Madgwick fusion (the `bmi088` crate's `Bmi088Ahrs`); `gyro`/`accel` are the
-//! raw sensor axes. Placing the sample in the head frame (the IMU is rigid to the camera) is a
-//! `kinematics` job for the consumer, not this daemon's.
+//! Orientation comes from the LSM6DSV16X's on-chip SFLP game-rotation vector.
+//! Gyroscope, accelerometer and quaternion values remain in the sensor's own
+//! axes; consumers use the kinematic `head_imu` mount pose to place them.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use duck_ipc_proto as proto;
 
-#[cfg(target_os = "linux")]
-use std::path::PathBuf;
-#[cfg(target_os = "linux")]
-use std::sync::atomic::Ordering;
-#[cfg(target_os = "linux")]
-use std::time::{Duration, Instant};
-
-#[cfg(target_os = "linux")]
-use bmi088::{Bmi088, Bmi088Ahrs, Config};
-#[cfg(target_os = "linux")]
-use linux_embedded_hal::I2cdev;
-
-#[cfg(target_os = "linux")]
 use crate::BUS_CANDIDATES;
 
-/// Madgwick convergence rate. 0.1 is the crate's recommended starting point: fast enough to track
-/// a walking head, slow enough not to chase gyro noise.
-#[cfg(target_os = "linux")]
-const BETA: f64 = 0.1;
-
-/// Reopen backoff after an I²C error, same reasoning as the ToF loop: a bus glitch and a missing
-/// chip look alike from here, and one backoff serves both without hammering a shared bus.
-#[cfg(target_os = "linux")]
+/// Reopen backoff after an I²C error. A disconnected sensor and a transient bus
+/// error look alike here, so one bounded backoff handles both without hammering
+/// the shared bus.
 const RETRY_MIN: Duration = Duration::from_millis(500);
-#[cfg(target_os = "linux")]
 const RETRY_MAX: Duration = Duration::from_secs(30);
+/// A successful chip-ID/configuration exchange is not proof that streaming is
+/// healthy. Only reset retry backoff after fresh samples have continued for
+/// this long; otherwise an open-success/first-poll-failure cycle hammers the
+/// shared bus at the minimum interval forever.
+const RETRY_RESET_AFTER: Duration = Duration::from_secs(2);
+/// No FIFO quaternion for this long means the sensor is responsive but SFLP
+/// is not streaming. Reopen it instead of advertising a found, frozen IMU.
+const NO_SAMPLE_MIN: Duration = Duration::from_secs(2);
 
-/// How far an IMU subscriber may fall behind before it loses samples. At 100 Hz this is ~2.5 s.
+fn no_sample_timeout(hz: u8) -> Duration {
+    NO_SAMPLE_MIN.max(Duration::from_secs_f64(3.0 / f64::from(hz.max(1))))
+}
+
+/// How far an IMU subscriber may fall behind before it loses samples. At
+/// 100 Hz this is about 2.5 seconds.
 pub const FRAME_BUFFER: usize = 256;
 
-/// Read `temp_c` this often (every Nth sample); it barely moves and costs a bus read.
-#[cfg(target_os = "linux")]
-const TEMP_EVERY: u64 = 100;
-
-/// What the `head_imu.stream` answer reports — whether a BMI088 was found and at what rate.
+/// What `head_imu.stream` reports: whether the LSM6DSV16X was found and the
+/// consumer-requested publication rate.
 #[derive(Clone)]
 pub struct ImuStatus {
     hz: u8,
@@ -83,23 +65,23 @@ impl ImuStatus {
         }
     }
 
-    #[cfg(target_os = "linux")]
     fn found(&self, sensor: &str) {
         let mut inner = self.inner.lock().unwrap();
         inner.sensor = Some(sensor.to_owned());
         inner.unavailable = None;
     }
 
-    /// Switched off in the config, rather than absent or broken.
-    ///
-    /// A separate sentence from [`Self::lost`] on purpose: every other reason this stream has
-    /// nothing is a board to go and look at, and this one is a line in `robotd.toml`. A
-    /// subscriber that cannot tell them apart sends somebody to check a cable.
+    /// Switched off in configuration, rather than absent or broken.
     pub fn off(&self) {
         self.lost(
             "the head IMU is off — `[head_imu] enabled = true` in robotd.toml, then restart tofd"
                 .to_owned(),
         );
+    }
+
+    /// The selected backend deliberately has no physical head IMU.
+    pub fn unavailable(&self, why: &str) {
+        self.lost(why.to_owned());
     }
 
     fn lost(&self, why: String) {
@@ -119,10 +101,10 @@ impl ImuStatus {
     }
 }
 
-/// Read the BMI088 forever, broadcasting [`proto::HeadImuFrame`]. Returns only at shutdown.
-#[cfg(target_os = "linux")]
+/// Read the head LSM6DSV16X forever and broadcast wire-compatible head frames.
 pub fn imu_loop(
     bus: Option<&Path>,
+    address: u8,
     hz: u8,
     status: &ImuStatus,
     frames: &tokio::sync::broadcast::Sender<proto::HeadImuFrame>,
@@ -134,13 +116,8 @@ pub fn imu_loop(
     let mut backoff = RETRY_MIN;
 
     while !shutdown.load(Ordering::Acquire) {
-        let mut ahrs = match open_imu(bus) {
-            Ok(a) => {
-                tracing::info!("head IMU found: BMI088");
-                status.found("BMI088");
-                backoff = RETRY_MIN;
-                a
-            }
+        let (mut imu, opened_bus) = match open_imu(bus, address, hz) {
+            Ok(found) => found,
             Err(e) => {
                 status.lost(e.to_string());
                 tracing::warn!(error = %e, backoff_ms = backoff.as_millis(), "no head IMU; will retry");
@@ -149,46 +126,56 @@ pub fn imu_loop(
                 continue;
             }
         };
+        tracing::info!(
+            bus = %opened_bus.display(),
+            address = format!("{address:#04x}"),
+            sensor_hz = imu.rate_hz(),
+            publish_hz = hz,
+            "head LSM6DSV16X answered"
+        );
+        let opened_at = Instant::now();
+        let mut last_sample_at = opened_at;
+        let sample_timeout = no_sample_timeout(hz);
+        let mut announced = false;
+        let mut retry_reset = false;
 
-        // Read until an error, then fall out to reopen. `last` gives Madgwick its dt.
-        let mut last = Instant::now();
-        let mut temp_c = 0.0f32;
         while !shutdown.load(Ordering::Acquire) {
             let tick = Instant::now();
-            let dt = (tick - last).as_secs_f32().clamp(1e-4, 0.2);
-            last = tick;
-            // `update_all` rather than `update`: both read the accelerometer and the gyroscope,
-            // and only this one hands the accelerometer sample back. Asking for it afterwards —
-            // which is what this loop used to do — read the same six registers a second time.
-            //
-            // **Not for the CPU.** A transaction is worth about 9 µs of the ~440 µs a sample
-            // costs on this board (`bench_imu` at 100 Hz: 4.53% for three reads against 4.46%
-            // for two), so this buys nothing measurable and the idle cost of this thread is
-            // somewhere else entirely. What it buys is that the published `accel` is the sample
-            // the quaternion was computed from, rather than one read ~200 µs later, and that a
-            // read can fail in one place instead of two — either chip failing reopens rather
-            // than publishing a zero acceleration, which a consumer cannot tell from free-fall.
-            match ahrs.update_all(dt) {
-                Ok((accel, gyro, quat)) => {
-                    if seq.is_multiple_of(TEMP_EVERY)
-                        && let Ok(t) = ahrs.imu().read_temperature()
-                    {
-                        temp_c = t;
+            match imu.poll() {
+                Ok(poll) => {
+                    if let Some(sample) = poll.sample {
+                        last_sample_at = Instant::now();
+                        if !announced {
+                            status.found("LSM6DSV16X");
+                            announced = true;
+                        }
+                        if !retry_reset && opened_at.elapsed() >= RETRY_RESET_AFTER {
+                            backoff = RETRY_MIN;
+                            retry_reset = true;
+                        }
+                        seq = seq.saturating_add(1);
+                        let _ = frames.send(proto::HeadImuFrame {
+                            seq,
+                            at_us: started.elapsed().as_micros() as u64,
+                            t_ns: proto::clock::monotonic_ns(),
+                            gyro: sample.gyro,
+                            accel: sample.accel,
+                            quat: sample.quat,
+                            temp_c: sample.temp_c,
+                        });
+                    } else if last_sample_at.elapsed() >= sample_timeout {
+                        let why = format!(
+                            "no fresh SFLP sample for {} ms",
+                            last_sample_at.elapsed().as_millis()
+                        );
+                        status.lost(why.clone());
+                        tracing::warn!(reason = %why, "head IMU stopped streaming; reopening");
+                        break;
                     }
-                    seq += 1;
-                    let _ = frames.send(proto::HeadImuFrame {
-                        seq,
-                        at_us: started.elapsed().as_micros() as u64,
-                        t_ns: proto::clock::monotonic_ns(),
-                        gyro,
-                        accel,
-                        quat,
-                        temp_c,
-                    });
                 }
                 Err(e) => {
-                    status.lost(format!("read failed: {e:?}"));
-                    tracing::warn!("head IMU read failed; reopening");
+                    status.lost(format!("read failed: {e:#}"));
+                    tracing::warn!(error = %e, "head IMU read failed; reopening");
                     break;
                 }
             }
@@ -198,64 +185,48 @@ pub fn imu_loop(
             }
         }
 
-        // A read failure fell straight back into `open_imu`: a chip that answers its ID but
-        // cannot stream was reopened in a tight loop, warning each time, on the bus the audio
-        // codec shares. Same backoff as the open-failure path above.
+        // A device that answers identification but cannot stream must not be
+        // reopened in a tight loop on the bus shared with motor-critical IMU IO.
         sleep_unless_shutdown(backoff, shutdown);
         backoff = (backoff * 2).min(RETRY_MAX);
     }
 }
 
-/// Off Linux there is no `/dev/i2c-*` to open, so this returns at once and the status says why —
-/// the same answer `head_imu.stream` gives on a board whose HAT has no BMI088 fitted, which is the
-/// shape every consumer already handles.
-#[cfg(not(target_os = "linux"))]
-pub fn imu_loop(
-    _bus: Option<&Path>,
-    _hz: u8,
-    status: &ImuStatus,
-    _frames: &tokio::sync::broadcast::Sender<proto::HeadImuFrame>,
-    _shutdown: &Arc<AtomicBool>,
-) {
-    status.lost("the head IMU is on an I2C bus, which exists only on Linux".to_owned());
-}
-
-/// Open the BMI088 on the first bus that answers. The `bmi088` crate hardwires accel `0x19` /
-/// gyro `0x68` (the HAT's addresses), so there is nothing to sweep — a failure to read the
-/// chip-id in `Bmi088::new` is the "not fitted / bus glitch" signal.
-#[cfg(target_os = "linux")]
-fn open_imu(bus: Option<&Path>) -> anyhow::Result<Bmi088Ahrs<I2cdev>> {
-    let buses: Vec<PathBuf> = match bus {
-        Some(bus) => vec![bus.to_path_buf()],
-        None => BUS_CANDIDATES.iter().map(PathBuf::from).collect(),
+/// Open the fixed-address head IMU on the named bus, or the first existing
+/// standard Qwiic path. The two defaults are aliases of the same adapter on a
+/// provisioned board, so an init failure on the symlink must not immediately
+/// repeat the whole reset/configuration through `/dev/i2c-3`.
+fn open_imu(
+    bus: Option<&Path>,
+    address: u8,
+    requested_hz: u8,
+) -> anyhow::Result<(qwiic_imu::Sensor, PathBuf)> {
+    let bus = match bus {
+        Some(bus) if bus.exists() => bus.to_path_buf(),
+        Some(bus) => anyhow::bail!("{} does not exist", bus.display()),
+        None => BUS_CANDIDATES
+            .iter()
+            .map(PathBuf::from)
+            .find(|candidate| candidate.exists())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "neither {} nor {} exists",
+                    BUS_CANDIDATES[0],
+                    BUS_CANDIDATES[1]
+                )
+            })?,
     };
-    let mut last = None;
-    for bus in &buses {
-        if !bus.exists() {
-            last = Some(anyhow::anyhow!("{} does not exist", bus.display()));
-            continue;
-        }
-        let i2c = match I2cdev::new(bus) {
-            Ok(i2c) => i2c,
-            Err(e) => {
-                last = Some(anyhow::anyhow!("open {}: {e}", bus.display()));
-                continue;
-            }
-        };
-        match Bmi088::new(i2c, Config::default()) {
-            Ok(imu) => {
-                tracing::info!(bus = %bus.display(), "BMI088 answered");
-                return Ok(Bmi088Ahrs::new(imu, BETA));
-            }
-            Err(e) => last = Some(anyhow::anyhow!("BMI088 init on {}: {e:?}", bus.display())),
-        }
-    }
-    Err(last.unwrap_or_else(|| anyhow::anyhow!("no bus to look on")))
+    let imu = qwiic_imu::Sensor::open(&bus, address, u16::from(requested_hz)).map_err(|e| {
+        anyhow::anyhow!(
+            "LSM6DSV16X init at {address:#04x} on {}: {e:#}",
+            bus.display()
+        )
+    })?;
+    Ok((imu, bus))
 }
 
-#[cfg(target_os = "linux")]
 fn sleep_unless_shutdown(dur: Duration, shutdown: &Arc<AtomicBool>) {
-    // Slice the sleep so shutdown is prompt even during a long backoff.
+    // Slice sleeps so shutdown stays prompt during a long retry backoff.
     let slice = Duration::from_millis(50);
     let mut left = dur;
     while left > Duration::ZERO && !shutdown.load(Ordering::Acquire) {
@@ -269,11 +240,6 @@ fn sleep_unless_shutdown(dur: Duration, shutdown: &Arc<AtomicBool>) {
 mod tests {
     use super::*;
 
-    /// The three answers a subscriber can get, and the one this switch adds.
-    ///
-    /// "Off" has to be distinguishable from "not fitted" in the sentence itself, because they
-    /// are the same silence: one is a line in a file and the other is a board to go and look
-    /// at. So the reason names the key.
     #[test]
     fn switched_off_reads_differently_from_absent() {
         let status = ImuStatus::new(100);
@@ -287,13 +253,18 @@ mod tests {
         let why = off.unavailable.expect("a reason");
         assert!(why.contains("[head_imu] enabled"), "{why}");
         assert!(off.sensor.is_none());
-        // Still `accepted`: the subscription is fine, there is simply nothing coming. A refusal
-        // would send a client into a reconnect loop over a setting.
         assert!(off.accepted);
 
         status.lost("nothing answered on any bus".to_owned());
         let absent = status.result();
         let why = absent.unavailable.expect("a reason");
         assert!(!why.contains("[head_imu]"), "{why}");
+    }
+
+    #[test]
+    fn a_silent_sensor_has_a_finite_rate_aware_deadline() {
+        assert_eq!(no_sample_timeout(100), NO_SAMPLE_MIN);
+        assert_eq!(no_sample_timeout(1), Duration::from_secs(3));
+        assert_eq!(no_sample_timeout(0), Duration::from_secs(3));
     }
 }

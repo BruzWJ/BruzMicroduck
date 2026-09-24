@@ -2,19 +2,15 @@
 /plugin/;
 
 /*
- * TLV320AIC3104 audio codec on the Pollen Robotics RPI Robot HAT —
- * Radxa Zero 3W, HARDWARE-I2C variant.
+ * Optional TLV320AIC3104 audio codec on the Pollen Robotics RPI Robot HAT,
+ * connected to the Radxa Zero 3W's hardware I2C3 bus.
  *
- * Identical to aic3104-pihat.dts except the codec node is grafted onto
- * the hardware i2c3 bus (see i2c3-pihat.dts) instead of the bit-banged
- * i2c-gpio-pihat bus. Pair them:
- *   - hw mode      (default): overlays = i2c3-pihat aic3104-i2c3
- *   - bitbang mode (revert):  overlays = i2c-gpio-pihat aic3104-pihat
- * install.sh selects the pair via MICRODUCK_I2C_MODE.
+ * Pair this audio-only overlay with the generic sensor-bus overlay:
  *
- * Everything below fragment@2's target is byte-for-byte the same as the
- * bitbang variant — see aic3104-pihat.dts for the I2S/MCLK/clocking
- * rationale. Keep the two files in sync when touching either.
+ *     overlays=i2c3-qwiic aic3104-i2c3
+ *
+ * setup-board.sh provisions i2c3-qwiic whether or not this HAT is fitted.
+ * The codec overlay only adds the codec and I2S sound card to that bus.
  */
 
 / {
@@ -70,10 +66,10 @@
                 compatible = "simple-audio-card";
                 simple-audio-card,name = "aic3104";
                 simple-audio-card,format = "i2s";
-                simple-audio-card,bitclock-master = <&pihat_cpu_dai>;
-                simple-audio-card,frame-master = <&pihat_cpu_dai>;
+                simple-audio-card,bitclock-master = <&aic3104_cpu_dai>;
+                simple-audio-card,frame-master = <&aic3104_cpu_dai>;
 
-                pihat_cpu_dai: simple-audio-card,cpu {
+                aic3104_cpu_dai: simple-audio-card,cpu {
                     sound-dai = <&i2s3_2ch>;
                     /* Pin the I2S mclk to 256*48000. No mclk-fs on
                      * the card: with mclk-fs, simple-card would

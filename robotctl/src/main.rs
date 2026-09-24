@@ -1801,7 +1801,7 @@ fn render_health(report: &HealthReport) -> String {
                 let stale = if imu.frozen() {
                     // The one case worth shouting about: the board answers, so the bus reports
                     // no error and `ready` stays true, while the orientation being fed to the
-                    // policy has not changed in half a second.
+                    // policy has not changed across the frozen-run boundary.
                     format!(
                         ", orientation frozen — {} stale reads running",
                         imu.consecutive_stale_blocks

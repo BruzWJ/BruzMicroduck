@@ -494,21 +494,38 @@ create_group() {
         fi
     fi
 
-    # The accounts those units name, for a board where systemd-sysusers is not available. Both
+    # The accounts those units name, for a board where systemd-sysusers is not available. These
     # daemons run unprivileged for reasons that matter — btd parses bytes from anyone in radio
-    # range, padd is meant to have no privileged access to the robot — and a unit naming a
-    # missing `User=` fails to start with an error that reads as a broken daemon.
+    # range, mediad handles network media, padd is meant to have no privileged access to the
+    # robot, and tofd needs only its I2C device — and a unit naming a missing `User=` fails to
+    # start with an error that reads as a broken daemon. Make the matching primary group
+    # explicitly too; `useradd` defaults are distribution-specific, while every unit has
+    # `Group=<daemon>`.
     #
     # Only when the release actually ships the service. Creating a system account for something
     # that does not exist on this board is not harmful, but it is a lie about what is installed,
     # and the next person reading /etc/passwd should not have to work out which.
-    for daemon in btd padd; do
+    for daemon in btd mediad padd tofd; do
         [ -f "${INSTALL_DIR}/current/systemd/${daemon}.service" ] || continue
+        if ! getent group "$daemon" >/dev/null; then
+            groupadd --system "$daemon" \
+                || warn "could not create the ${daemon} group; ${daemon}.service will not start"
+        fi
         if ! getent passwd "$daemon" >/dev/null; then
-            useradd --system --no-create-home --shell /usr/sbin/nologin "$daemon" \
+            useradd --system --no-create-home --shell /usr/sbin/nologin \
+                --gid "$daemon" "$daemon" \
                 || warn "could not create the ${daemon} user; ${daemon}.service will not start"
         fi
     done
+
+    # `tofd` must be able to start and report an unavailable sensor even when this installer is
+    # used before `setup-board.sh`. Its unit names `SupplementaryGroups=i2c`, and systemd refuses
+    # to launch it if that group is absent — before the daemon gets a chance to report degraded.
+    if [ -f "${INSTALL_DIR}/current/systemd/tofd.service" ] \
+        && ! getent group i2c >/dev/null; then
+        groupadd --system i2c \
+            || die "the i2c group could not be created; tofd.service will not start without it"
+    fi
 
     if ! getent group robot >/dev/null; then
         groupadd --system robot
@@ -965,13 +982,14 @@ EOF
 }
 
 
-# The motor bus, checked but never configured here.
+# The hardware buses, checked but never configured here.
 #
 # Board bring-up is `setup-board.sh`'s job — device-tree overlays need a reboot and belong to
-# the board, not to a daemon release. But installing a robot daemon onto a board with no bus
-# is worth saying out loud: the install will succeed, `robotd` will start, fail to open the
-# bus, and report unhealthy. That is honest behaviour, and an easy thing to stare past.
+# the board, not to a daemon release. But installing a robot daemon onto a board with either bus
+# missing is worth saying out loud: the install will succeed, the affected daemons will report
+# degraded/unhealthy, and the physical Qwiic retrofit cannot be certified by the update gate.
 MOTOR_PORT="${MOTOR_PORT:-/dev/ttyS2}"
+QWIIC_BUS="${QWIIC_BUS:-/dev/i2c-qwiic}"
 
 check_board() {
     if [ -e "$MOTOR_PORT" ]; then
@@ -984,12 +1002,19 @@ check_board() {
   It will consume servo replies and robotd will report every motor missing. Run
   scripts/setup-board.sh, which masks it."
         fi
-        return 0
-    fi
-    warn "${MOTOR_PORT} does not exist, so robotd will have no motor bus.
+    else
+        warn "${MOTOR_PORT} does not exist, so robotd will have no motor bus.
   Run scripts/setup-board.sh (then reboot) to enable it. Installing anyway: the update
   system is worth testing on a board whose bus is not wired yet, and robotd reports itself
   unhealthy rather than pretending."
+    fi
+
+    if [ ! -e "$QWIIC_BUS" ]; then
+        warn "${QWIIC_BUS} does not exist, so robotd cannot read the required body IMU and
+  tofd cannot read the head IMU or ToF. Fit the Qwiic chain, run scripts/setup-board.sh,
+  and reboot before installing this hardware-cutover release. Installing anyway so bench
+  and recovery installs remain possible; missing sensors are reported explicitly."
+    fi
 }
 
 # Let `updaterd` fetch updates on a *developer's* board.

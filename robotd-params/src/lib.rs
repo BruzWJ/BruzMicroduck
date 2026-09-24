@@ -64,6 +64,7 @@ pub const DEFAULT_PATH: &str = "/etc/robot/robotd.toml";
 #[serde(deny_unknown_fields, default)]
 pub struct Params {
     pub bus: Bus,
+    pub body_imu: BodyImuParams,
     pub control: Control,
     pub update_gate: UpdateGate,
     pub policy: PolicyParams,
@@ -707,19 +708,13 @@ impl ThereminParams {
     }
 }
 
-/// `[head_imu]` — the BMI088 on the head module, read by `tofd` and served as
+/// `[head_imu]` — the LSM6DSV16X in the head, read by `tofd` and served as
 /// `head_imu.stream`.
 ///
-/// **One switch, and it is off.** Reading this chip at 100 Hz costs ~3.5–4.5% of a core on an
-/// RK3566, and a bench that isolates the parts says none of it is fixable in the loop: being
-/// woken a hundred times a second is 0.7 points of it, the Madgwick fusion 0.3, and the rest is
-/// the two I²C transactions a sample takes. Fewer bytes is not on offer — a gyro and an
-/// accelerometer sample *is* twelve bytes — so what is left is not reading it, which is this
-/// key, or reading it less often, which is `tofd --imu-hz`.
-///
-/// It stays off until something subscribes to the stream, because for now nothing does: it was
-/// added for the mapping work, and a duck that is not mapping was paying for it from boot.
-/// `docs/project/tof-on-demand.md` is the measurement and the reasoning.
+/// **One switch, and it is off.** The chip supplies gyro, acceleration, and its SFLP game
+/// rotation over the shared Qwiic bus. Nothing currently subscribes to the stream, so a duck
+/// that is not mapping should not spend I²C bandwidth and wakeups reading it. This key turns
+/// the worker on; `tofd --imu-hz` controls its rate.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct HeadImuParams {
@@ -1785,19 +1780,18 @@ impl Default for SafetyParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Bus {
-    /// Serial port the servos and the IMU board share. The Radxa Zero 3W wires them to
-    /// `/dev/ttyS2`.
+    /// Serial port for the servos. The Radxa Zero 3W wires them to `/dev/ttyS2`.
     pub port: String,
     /// Read the bus with fast sync read (protocol 2.0 instruction 0x8A) rather than a plain
-    /// sync read: the sixteen devices append their blocks to one status packet instead of
-    /// each sending its own, which is fifteen packet headers and fifteen bus turnarounds off
+    /// sync read: the fifteen servos append their blocks to one status packet instead of
+    /// each sending its own, which is fourteen packet headers and fourteen bus turnarounds off
     /// every tick.
     ///
     /// On by default, because that is what this robot's hardware does and a setting nobody
     /// has to find is worth more than a saving nobody gets. It is a setting rather than a
-    /// constant because the instruction is a property of *firmware* — XL330 v46 or newer, and
-    /// the `imu_to_dxl` board has to implement it too — so a board built before either is the
-    /// one case this code cannot talk its way out of. Turning it off is the whole remedy.
+    /// constant because the instruction is a property of *firmware* — XL330 v46 or newer — so
+    /// a board built before that is the one case this code cannot talk its way out of. Turning
+    /// it off is the whole remedy.
     ///
     /// The symptom of getting it wrong is unambiguous, which is why the default can be the
     /// brave one: a device that does not implement 0x8A does not answer at all, so *every*
@@ -1805,6 +1799,21 @@ pub struct Bus {
     /// the bus drops, `update_gate` sees an unhealthy robot, and a release that turned this on
     /// against firmware that cannot do it is rolled back on its own.
     pub fast_sync_read: bool,
+}
+
+/// `[body_imu]` — the required trunk LSM6DSV16X on the shared Qwiic bus.
+///
+/// Roles are fixed rather than detected by scan: the body Micro breakout keeps the factory
+/// address `0x6b`, while the head breakout is jumpered to `0x6a`. Losing this device makes a
+/// complete control sample impossible, so open/read errors follow the same health path as a
+/// failed motor-bus transaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct BodyImuParams {
+    /// Stable i2c-dev alias installed for the Radxa header's Qwiic bus.
+    pub bus: String,
+    /// Seven-bit I²C address. Only the two LSM6DSV16X strap addresses are valid.
+    pub address: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1879,6 +1888,15 @@ impl Default for Bus {
     }
 }
 
+impl Default for BodyImuParams {
+    fn default() -> Self {
+        Self {
+            bus: "/dev/i2c-qwiic".into(),
+            address: 0x6b,
+        }
+    }
+}
+
 impl Default for Control {
     fn default() -> Self {
         Self {
@@ -1921,6 +1939,10 @@ pub enum ParamsError {
     },
     #[error("{path}: control.hz must be between 1 and 1000, got {got}")]
     Rate { path: String, got: u32 },
+    #[error(
+        "{path}: body_imu.address must be 0x6a or 0x6b, got {got:#04x}; the body breakout uses 0x6b"
+    )]
+    BodyImuAddress { path: String, got: u8 },
     #[error(
         "{path}: media.bitrate must be between {min} and {max} bits per second, got {got} — \
          the unit is bits, so 2 Mb/s is 2000000"
@@ -2005,6 +2027,12 @@ impl Params {
             return Err(ParamsError::Rate {
                 path: path.display().to_string(),
                 got: self.control.hz,
+            });
+        }
+        if !matches!(self.body_imu.address, 0x6a | 0x6b) {
+            return Err(ParamsError::BodyImuAddress {
+                path: path.display().to_string(),
+                got: self.body_imu.address,
             });
         }
         // Checked here rather than in `mediad`, so `robotctl configure` refuses to write it:
@@ -3071,6 +3099,7 @@ mod tests {
 
         assert_eq!(from_file.bus.port, built_in.bus.port);
         assert_eq!(from_file.bus.fast_sync_read, built_in.bus.fast_sync_read);
+        assert_eq!(from_file.body_imu, built_in.body_imu);
         assert_eq!(from_file.control.hz, built_in.control.hz);
         assert_eq!(from_file.control.cmd_alpha, built_in.control.cmd_alpha);
         assert_eq!(from_file.control.head_alpha, built_in.control.head_alpha);
@@ -3363,6 +3392,21 @@ mod tests {
         for hz in ["0", "5000"] {
             let path = write(dir.path(), &format!("[control]\nhz = {hz}\n"));
             assert!(Params::load(&path, true).is_err(), "hz = {hz} was accepted");
+        }
+    }
+
+    /// A scan must never decide which of the two identical chips is the body. Accept only the
+    /// LSM6DSV16X strap addresses and let the explicit role configuration choose between them.
+    #[test]
+    fn an_impossible_body_imu_address_is_rejected_at_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad = write(dir.path(), "[body_imu]\naddress = 0x29\n");
+        let err = Params::load(&bad, true).unwrap_err().to_string();
+        assert!(err.contains("body_imu.address"), "{err}");
+
+        for address in ["0x6a", "0x6b"] {
+            let path = write(dir.path(), &format!("[body_imu]\naddress = {address}\n"));
+            assert!(Params::load(&path, true).is_ok(), "{address} was rejected");
         }
     }
 }

@@ -495,7 +495,8 @@ phase_one() {
 
     tmp=/tmp/setup-board.sh
     fetch setup-board.sh "$tmp"
-    DUCK_WEIRD_BLE="$WEIRD_BLE" sh "$tmp"
+    DUCK_REPO="$REPO" DUCK_REF="$REF" DUCK_TOKEN="$TOKEN" \
+        DUCK_WEIRD_BLE="$WEIRD_BLE" sh "$tmp"
 
     tmp=/tmp/migrate-network.sh
     fetch migrate-network.sh "$tmp"
@@ -532,11 +533,13 @@ phase_two() {
     # The persisted copies, which is what those scripts leave behind for exactly this moment.
     # Re-fetching would work and would also be a second chance for the network to fail.
     if [ -x "$SETUP_SELF" ]; then
-        DUCK_WEIRD_BLE="$WEIRD_BLE" "$SETUP_SELF"
+        DUCK_REPO="$REPO" DUCK_REF="$REF" DUCK_TOKEN="$TOKEN" \
+            DUCK_WEIRD_BLE="$WEIRD_BLE" "$SETUP_SELF"
     else
         tmp=/tmp/setup-board.sh
         fetch setup-board.sh "$tmp"
-        DUCK_WEIRD_BLE="$WEIRD_BLE" sh "$tmp"
+        DUCK_REPO="$REPO" DUCK_REF="$REF" DUCK_TOKEN="$TOKEN" \
+            DUCK_WEIRD_BLE="$WEIRD_BLE" sh "$tmp"
     fi
 
     # GStreamer, unless turned off — see `GSTREAMER` above.
