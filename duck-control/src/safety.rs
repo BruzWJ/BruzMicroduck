@@ -215,7 +215,16 @@ impl<T: RobotIo> Safety<T> {
     ///    gets written. A fallen robot with torque on is still commanded `hold` at `gain_limp`.
     pub fn set_torque(&mut self, on: bool) -> Result<(), IoError> {
         tracing::warn!(on, "torque");
-        self.io.set_torque(on)
+        self.io.set_torque(on)?;
+        if !on {
+            // Torque-off is also the recovery boundary after the OpenRB or the servos have
+            // power-cycled. XL330 gains live in RAM, so keeping this cache would make the next
+            // init believe the requested gain was still installed and skip the write that
+            // restores P/I/D. Clear only after every torque-off write succeeded: on an error we
+            // do not know which servos accepted it.
+            self.gain = None;
+        }
+        Ok(())
     }
 
     /// Reboot these servos, and forget the gain cache: a rebooted servo comes back at its EEPROM
@@ -469,6 +478,27 @@ mod tests {
         );
         s.apply(DEFAULT_POSITION, DEFAULT_POSITION, 200).unwrap();
         assert_eq!(s.gain(), Some(200));
+        assert_eq!(s.io().gain_writes, 2);
+    }
+
+    /// Relax followed by init is the explicit recovery path after the OpenRB has reset its
+    /// DYNAMIXEL power FET. The servo reboot restores EEPROM gains, so torque-off must forget
+    /// the host-side cache or the next apply would leave those defaults in place.
+    #[test]
+    fn torque_off_rewrites_the_gain_on_the_next_apply() {
+        let mut s = safety();
+        s.apply(DEFAULT_POSITION, DEFAULT_POSITION, 200).unwrap();
+        assert_eq!(s.gain(), Some(200));
+
+        s.set_torque(false).unwrap();
+        assert_eq!(s.io().torque, Some(false));
+        assert_eq!(s.gain(), None, "torque-off must forget the RAM gain");
+
+        s.set_torque(true).unwrap();
+        s.apply(DEFAULT_POSITION, DEFAULT_POSITION, 200).unwrap();
+        assert_eq!(s.gain(), Some(200));
+        assert_eq!(s.io().last_gain, Some(200));
+        assert_eq!(s.io().gain_writes, 2);
     }
 
     use super::*;

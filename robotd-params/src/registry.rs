@@ -107,7 +107,11 @@ pub const REGISTRY: &[Entry] = &[
         "Which electronic board this robot is built on — set when it is provisioned",
     ),
     // ── [bus] ────────────────────────────────────────────────────────────────
-    entry("bus.port", Kind::Text, "Dynamixel serial port device"),
+    entry(
+        "bus.port",
+        Kind::Text,
+        "Stable OpenRB USB-to-Dynamixel device link",
+    ),
     // Not a feature switch, though it is a `Bool`: the front page is "what does this robot
     // do", and this is "what does this robot's firmware understand". It belongs beside the
     // serial port, with the other thing you set once per board and then forget.

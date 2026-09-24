@@ -35,16 +35,11 @@ set -eu
 ONNX_VERSION="${ONNX_VERSION:-1.28.0}"
 ONNX_LIB_DIR=/usr/local/lib
 
-# The Dynamixel bus. All fifteen servos share it, so without this there is no robot — just
-# a daemon reporting that it cannot see one. The body IMU is on the Qwiic bus configured below.
-MOTOR_PORT="${MOTOR_PORT:-/dev/ttyS2}"
+# The OpenRB-150's factory usb_to_dynamixel firmware exposes the Dynamixel bus over USB CDC.
+# A udev rule below gives that otherwise-enumeration-dependent tty a stable name.
+MOTOR_PORT="${MOTOR_PORT:-/dev/openrb-dxl}"
 
 ENV_TXT=/boot/armbianEnv.txt
-
-# Boot args of the *running* kernel. A variable, like MOTOR_PORT and ENV_TXT above, so the
-# console check can be exercised against a fixture instead of only on a board that happens to
-# be misconfigured — which is the state you least want to discover the check is wrong in.
-CMDLINE="${CMDLINE:-/proc/cmdline}"
 
 BT_CONF=/etc/bluetooth/main.conf
 
@@ -109,12 +104,8 @@ MIGRATE="/tmp/${MIGRATE_NAME}"
 MIGRATE_SELF=/usr/local/sbin/robot-migrate-network
 NET_CHECK_UNIT=/etc/systemd/system/robot-net-check.service
 
-# The motor UART overlay. The Qwiic I2C3 overlay is compiled and enabled separately because it
-# is repository-owned rather than one Armbian ships.
-REQUIRED_OVERLAY=uart2-m0
-
 # Header pins 3/5 are I2C3-M0. This generic overlay is required by both IMUs and the ToF;
-# the optional legacy audio HAT merely adds another device to the same controller.
+# the optional audio HAT merely adds another device to the same controller.
 QWIIC_OVERLAY=i2c3-qwiic
 LEGACY_QWIIC_OVERLAY=i2c3-pihat
 QWIIC_RULE=/etc/udev/rules.d/99-robot-i2c-qwiic.rules
@@ -183,28 +174,6 @@ migrate_advice() {
     fi
 }
 
-# Which serial port the *running* kernel prints to — bare tty name, no baud — or nothing.
-#
-# `case` globs rather than a regex: the two substitutions in `free_motor_port` are already
-# split for exactly this reason, since BRE alternation differs between sed dialects and fails
-# by matching nothing. A check that silently never fires is worse here than no check.
-#
-# ttyFIQ* counts. It is Rockchip's FIQ debugger rather than an 8250, but it is attached to the
-# SoC debug UART — uart2 on the RK3566, which is the motor bus — so a kernel printing there
-# lands on the same wires. Worth naming even though the caller then hedges on the mapping.
-kernel_console_tty() {
-    for arg in $(cat "$CMDLINE" 2>/dev/null || true); do
-        case "$arg" in
-            console=ttyS*|console=ttyAMA*|console=ttyFIQ*) ;;
-            *) continue ;;
-        esac
-        arg="${arg#console=}"
-        # console=ttyS2,1500000 — the baud is not part of the device name.
-        printf '%s' "${arg%%,*}"
-        return 0
-    done
-}
-
 # Leave a copy somewhere that survives a reboot.
 #
 # Not possible when piped (`curl | sh`), because then there is no file to copy — `$0` is the
@@ -243,24 +212,16 @@ check_environment() {
     done
 }
 
-# Enable the UART the Dynamixel bus lives on.
-#
-# Two traps here, both of which fail *silently* — which is why this is scripted rather than
-# written up as a checklist:
-#
-#  1. Armbian ships `overlay_prefix=rk35xx`, but the RK3566 shares device-tree overlays with
-#     the RK3568 and they are named `rk3568-*.dtbo`. With the wrong prefix the loader finds
-#     nothing, boots happily, and there is no /dev/ttyS2.
-#  2. `armbian-config`'s overlay editor crashes on this board for the same reason
-#     (`Invalid overlay_prefix rk35xx`), so the file is patched directly.
-#
-# A kernel upgrade that repoints /boot/{Image,dtb,uInitrd} can undo this. If a board stops
-# seeing its motors after an apt upgrade, re-run this.
-configure_overlay() {
+# Armbian ships `overlay_prefix=rk35xx`, but the RK3566 shares device-tree overlays with the
+# RK3568 and the Qwiic, camera and optional audio overlays are installed as `rk3568-*.dtbo`.
+# `armbian-config`'s overlay editor crashes on this board for the same reason, so patch the file
+# directly. Also retire the old motor UART word: motors now use the OpenRB USB bridge, while
+# preserving every unrelated overlay word on an upgraded board.
+configure_overlay_prefix() {
     if [ ! -f "$ENV_TXT" ]; then
         warn "no ${ENV_TXT}; not an Armbian image?
-  Enable the UART that ${MOTOR_PORT} lives on by whatever means this image provides, then
-  re-run. Everything else here will still be done."
+  Load the Qwiic, camera and optional audio overlays by whatever means this image provides.
+  Everything else here will still be done."
         return 0
     fi
 
@@ -276,23 +237,37 @@ configure_overlay() {
         changed=1
     fi
 
-    if ! grep -Eq '^overlays=' "$ENV_TXT"; then
-        say "adding overlays=${REQUIRED_OVERLAY}"
-        echo "overlays=${REQUIRED_OVERLAY}" >> "$ENV_TXT"
-        changed=1
-    elif ! grep -E '^overlays=' "$ENV_TXT" | grep -qw "$REQUIRED_OVERLAY"; then
-        say "adding ${REQUIRED_OVERLAY} to overlays"
-        # Appended rather than replacing the line: whatever else this image enables is not
-        # ours to remove.
-        sed -i "s/^overlays=\(.*\)\$/overlays=\1 ${REQUIRED_OVERLAY}/" "$ENV_TXT"
+    if grep -E '^overlays=' "$ENV_TXT" | grep -qw uart2-m0; then
+        old_line=$(grep -E '^overlays=' "$ENV_TXT" | head -1)
+        words=${old_line#overlays=}
+        new_words=""
+        for word in $words; do
+            [ "$word" = uart2-m0 ] && continue
+            new_words="${new_words}${new_words:+ }${word}"
+        done
+        say "removing the retired uart2-m0 motor overlay"
+        sed -i "s/^overlays=.*/overlays=${new_words}/" "$ENV_TXT"
         changed=1
     fi
 
     if [ "$changed" = 1 ]; then
         needs_reboot=1
     else
-        say "device-tree overlays already correct"
+        say "device-tree overlay prefix already correct"
     fi
+}
+
+# Use the release-owned OpenRB setup rather than carrying a second copy of its udev rule here.
+# `setup-board.sh` is commonly piped on a fresh image, so fetch the helper from the same pinned
+# repository/ref as the overlays instead of assuming a sibling file exists locally.
+configure_openrb() {
+    tmp=$(mktemp)
+    if ! fetch_repo_file "scripts/setup-openrb.sh" "$tmp"; then
+        rm -f "$tmp"
+        die "could not fetch scripts/setup-openrb.sh; the OpenRB device rule was not installed"
+    fi
+    sh "$tmp" || { rm -f "$tmp"; die "OpenRB host setup failed"; }
+    rm -f "$tmp"
 }
 
 # ONNX Runtime, which `robotd` dlopens to run its gait policy.
@@ -397,54 +372,6 @@ check_network() {
     fi
 }
 
-# Take the login console off the motor UART.
-#
-# UART2 is the RK3566 debug console, so Armbian runs `serial-getty@ttyS2` on it by default.
-# A getty does not merely hold the port open — it *reads* from it, consuming the Dynamixel
-# replies before `robotd` ever sees them. Every servo then looks absent, which is
-# indistinguishable from hardware that is unpowered or unwired.
-#
-# That is not a hypothetical: it cost an afternoon of staring at
-# `read return_delay_time on 20: Operation timed out` with a correctly wired robot attached
-# and every servo visible to other tools. `fuser -v /dev/ttyS2` naming `agetty` was the
-# first honest evidence.
-#
-# Two halves, because two things write to that UART:
-#
-#  1. The getty, which is masked rather than merely disabled — `getty.target` pulls it back
-#     in otherwise.
-#  2. The kernel's own console. Armbian's `console=both`/`console=serial` puts printk on the
-#     same wires as the servos, so a kernel message mid-transaction corrupts a reply. It is
-#     quiet most of the time, which makes it worse: an intermittent bus fault with no
-#     pattern. `console=display` is the supported Armbian value that keeps a console on HDMI
-#     and takes it off the UART.
-#
-# A UART cannot be both a console and a motor bus. Choosing the motor bus is the whole point
-# of this script.
-free_motor_port() {
-    tty="$(basename "$MOTOR_PORT")"
-    unit="serial-getty@${tty}.service"
-
-    if [ "$(systemctl is-enabled "$unit" 2>/dev/null)" = masked ]; then
-        say "${unit} already masked"
-    else
-        say "masking ${unit} so it stops eating servo replies"
-        systemctl disable --now "$unit" >/dev/null 2>&1 || true
-        if ! systemctl mask "$unit" >/dev/null 2>&1; then
-            warn "could not mask ${unit}; it will keep consuming bytes on ${MOTOR_PORT}"
-        fi
-    fi
-
-    if [ -f "$ENV_TXT" ] && grep -Eq '^console=(both|serial)$' "$ENV_TXT"; then
-        say "taking the kernel console off the motor UART (console=display)"
-        # Two plain substitutions rather than a BRE alternation, which differs between
-        # sed dialects and would fail silently by matching nothing.
-        sed -i 's/^console=both$/console=display/' "$ENV_TXT"
-        sed -i 's/^console=serial$/console=display/' "$ENV_TXT"
-        needs_reboot=1
-    fi
-}
-
 # The one Bluetooth setting a gamepad needs from this script, on the boards that need it.
 #
 # **Only with `DUCK_WEIRD_BLE=1`** — `--weird-ble` on `provision-board.sh`. Without it this touches
@@ -532,7 +459,7 @@ fetch_repo_file() {
 
 # Add one word to armbianEnv's overlays= line, preserving order.
 ensure_overlay_word() {
-    # Same guard `configure_overlay` has, for the same reason — and here it matters more:
+    # Same guard `configure_overlay_prefix` has, for the same reason — and here it matters more:
     # without it the `echo >>` below *creates* an armbianEnv.txt that never existed, on a
     # board that boots from something else entirely, and asks for a reboot to load it.
     if [ ! -f "$ENV_TXT" ]; then
@@ -868,7 +795,7 @@ UNIT
 # Armbian ships it as `radxa-zero3-rpi-camera-v2.dtbo` with no `rk3568-` prefix, while this
 # board runs `overlay_prefix=rk3568` — so the loader resolves the `overlays=` word to
 # `rk3568-radxa-zero3-rpi-camera-v2.dtbo`, finds nothing, and boots happily with no camera.
-# Same silent class of failure as the wrong prefix in `configure_overlay`. The prototype hit
+# Same silent class of failure as the wrong prefix in `configure_overlay_prefix`. The prototype hit
 # this and mirrors the file (`microduck_runtime/install.sh`); so does this.
 #
 # Copying rather than symlinking, matching the prototype: an Armbian package update replaces the
@@ -1030,15 +957,14 @@ report() {
     say "board status"
 
     if [ -e "$MOTOR_PORT" ]; then
-        printf '  %-22s %s\n' "motor bus" "$MOTOR_PORT present"
-    elif [ "$needs_reboot" = 1 ]; then
-        printf '  %-22s %s\n' "motor bus" "$MOTOR_PORT absent — enabled, pending reboot"
+        motor_target=$(readlink -f "$MOTOR_PORT" 2>/dev/null || true)
+        printf '  %-22s %s\n' "motor bus" "$MOTOR_PORT -> ${motor_target:-unknown}"
     else
         printf '  %-22s %s\n' "motor bus" "$MOTOR_PORT ABSENT"
-        warn "${MOTOR_PORT} is missing and no overlay change was needed, so something else
-  is wrong. Check:  dmesg | grep -iE 'ttyS|serial'
-  robotd will start, fail to open the bus, and report unhealthy — which is honest, but it
-  will not drive anything."
+        warn "${MOTOR_PORT} is missing. Connect the OpenRB-150 to this computer by USB-C and
+  restore its factory usb_to_dynamixel firmware. Replug it after installing the udev rule,
+  then check:  lsusb -d 2f5d:2202
+  robotd will start, fail to open the bus, and report unhealthy until it appears."
     fi
 
     if [ -e /dev/i2c-qwiic ]; then
@@ -1106,37 +1032,6 @@ report() {
   replies and every motor will look absent. Identify it with:  sudo fuser -v ${MOTOR_PORT}"
     else
         printf '  %-22s %s\n' "motor bus owner" "free"
-    fi
-
-    # `/proc/cmdline` is the kernel that is *running*; `free_motor_port` edits ${ENV_TXT} for
-    # the kernel that will run *next*. They cannot agree until a reboot — so on the very run
-    # that fixed this, an unqualified "still on a serial port / set console=display" reads as
-    # "the fix did not take", and costs a round trip to disprove. Three distinct states.
-    console_tty="$(kernel_console_tty)"
-    if [ -n "$console_tty" ]; then
-        if [ "/dev/${console_tty}" = "$MOTOR_PORT" ]; then
-            console_what="${console_tty} (the motor bus)"
-        else
-            console_what="${console_tty}"
-        fi
-
-        if [ -f "$ENV_TXT" ] && grep -q '^console=display$' "$ENV_TXT"; then
-            if [ "$needs_reboot" = 1 ]; then
-                # Already handled. Say which way it is going, and do not warn.
-                printf '  %-22s %s\n' "kernel console" "${console_what}, until the reboot"
-            else
-                printf '  %-22s %s\n' "kernel console" "${console_what} — CONFLICT"
-                warn "${ENV_TXT} says console=display, yet this boot still prints to
-  ${console_tty}. Something outside that line wins — an extraargs= in ${ENV_TXT}, or bootargs
-  baked into U-Boot. Find it in /proc/cmdline; editing console= again will not help."
-            fi
-        else
-            printf '  %-22s %s\n' "kernel console" "${console_what}"
-            warn "the kernel prints to ${console_tty} and ${ENV_TXT} does not say
-  console=display, so this script left it alone — it only rewrites console=both and
-  console=serial. Kernel messages on the motor UART corrupt servo replies intermittently,
-  which is an unpatterned bus fault. Set console=display in ${ENV_TXT} and reboot."
-        fi
     fi
 
     if [ -e "${ONNX_LIB_DIR}/libonnxruntime.so" ]; then
@@ -1253,9 +1148,9 @@ EOF
 main() {
     check_environment
     persist_self
-    configure_overlay
+    configure_overlay_prefix
+    configure_openrb
     check_network
-    free_motor_port
     configure_bluetooth
     configure_classic_hid
     configure_qwiic
