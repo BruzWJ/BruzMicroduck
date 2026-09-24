@@ -1,8 +1,7 @@
 # Build, sign, verify and publish a release. Called, never triggered.
 #
-# The one place the release recipe lives, so the staging and stable paths cannot drift apart in what
-# they ship — this repository has been bitten more than once by two lists that were supposed to agree.
-# `release.yml` decides which channel is being published and calls this; nothing else should.
+# `release.yml` validates the selected source and calls this once. Keeping the long board-build recipe
+# here lets packaging tests read it without duplicating the release entry point.
 #
 # `xtask`'s packaging tripwires read THIS file for the `--include` list, so a unit, hook or sysusers
 # file that is not named here fails a test rather than a robot.
@@ -12,17 +11,17 @@ on:
   workflow_call:
     inputs:
       tag:
-        description: 'Tag to publish under, e.g. daemon-staging-v1.2.3'
+        description: 'Stable tag to create, e.g. daemon-v1.2.3'
         required: true
         type: string
       version:
         description: 'Semver being published, e.g. 1.2.3'
         required: true
         type: string
-      prerelease:
-        description: 'True for staging, false for stable. Decides the GitHub flag a robot reads.'
+      source_sha:
+        description: 'Exact commit to build and tag'
         required: true
-        type: boolean
+        type: string
 
 permissions:
   contents: write   # create the release and upload assets
@@ -44,11 +43,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # The tagged commit, named explicitly rather than left to the default: for a release
-          # event the default is the release's target commitish, which is a branch head when
-          # someone drafts a release against a branch — and that is not necessarily what the tag
-          # points at by the time this runs.
-          ref: ${{ inputs.tag }}
+          # Freeze the source selected by the caller. On the ordinary manual path the tag does not
+          # exist yet; the publish step creates it only after these exact bytes pass verification.
+          ref: ${{ inputs.source_sha }}
           # Full history so the recorded revision is meaningful.
           fetch-depth: 0
 
@@ -100,14 +97,13 @@ jobs:
           version: 0.14.1
       - run: cargo install cargo-zigbuild --locked
 
-      - name: Derive version from the tag
+      - name: Record release identity
         id: version
         run: |
-          # daemon-staging-v1.2.3 -> 1.2.3
-          # The caller resolved this from the tag; recorded here so the log shows it.
+          # The caller read this from Cargo.toml; record it here so the build log names its input.
           version="${{ inputs.version }}"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "publishing $version from ${{ inputs.tag }} (prerelease=${{ inputs.prerelease }})"
+          echo "publishing $version from ${{ inputs.source_sha }} as ${{ inputs.tag }}"
 
       # Same command and same glibc floor as scripts/board-test.sh, so what ships is
       # what was tested rather than a differently-configured build.
@@ -119,7 +115,7 @@ jobs:
       # say, and why they are not required.
       - name: Build for the board
         env:
-          DUCK_REVISION: ${{ github.sha }}
+          DUCK_REVISION: ${{ inputs.source_sha }}
         run: |
           export DUCK_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           cargo board --bins
@@ -162,7 +158,7 @@ jobs:
             --bin-dir staged \
             --out dist \
             --base-url "https://github.com/${{ github.repository }}/releases/download/${{ inputs.tag }}" \
-            --revision "${GITHUB_SHA}" \
+            --revision "${{ inputs.source_sha }}" \
             --include "updater/systemd/updaterd.service=systemd/updaterd.service" \
             --include "updater/systemd/sysusers.d/robot.conf=systemd/sysusers.d/robot.conf" \
             --include "robotd/systemd/robotd.service=systemd/robotd.service" \
@@ -260,9 +256,9 @@ jobs:
           cp "dist/${artifact}"                       verify/published/
           cp "dist/${artifact}.minisig"               verify/published/
 
-          # The public key is not a secret, but keeping it in CI config means the
-          # verification uses the same trust anchor a robot would.
-          printf '%s\n' "${{ vars.MINISIGN_PUBLIC_KEY }}" > verify/keys/release-1.pub
+          # Use the exact trust anchor the release installs on a robot. A separate CI variable for
+          # public material would only create another value that could drift.
+          cp deploy/trusted_keys/release-1.pub verify/keys/release-1.pub
 
           # The production `on_apply` and `health`, not inert placeholders. `updaterd
           # install` overrides both for the duration of a bootstrap — see its doc comment
@@ -387,71 +383,75 @@ jobs:
           cat "verify/opt/daemon/current/version.toml"
           echo "the updater accepted this release"
 
-      # Create it if it is not there, then fill it in either way.
-      #
-      # Two things made the old single `gh release create ... dist/*` wrong, and they are the same
-      # thing seen from different sides: it only ever worked on a release that did not exist yet.
-      #
-      #   - **It could not be re-run.** If this step failed after creating the release — a network
-      #     blip, a partial upload — every re-run failed identically on "release already exists",
-      #     and the only way out was deleting the release and the tag by hand, mid-release.
-      #   - **It could not follow the UI.** Drafting a release in the web UI is the obvious way to
-      #     cut one, and it creates the release object first, so the pipeline arrived to find its
-      #     own destination already taken and died *after* signing.
-      #
-      # `--clobber` on the upload so a re-run replaces assets rather than refusing them.
-      #
-      # `--prerelease` is re-asserted on a release that already exists, and that is a safety
-      # property rather than cosmetics: staging releases are flagged as prereleases because a plain
-      # `update apply` skips prereleases, which is what keeps an unvalidated build away from robots
-      # on stable. A release drafted in the UI without that box ticked would otherwise be a
-      # candidate every robot could reach.
+      # `gh release create` creates the tag at SOURCE_SHA, uploads every asset through an internal
+      # draft, and publishes only after the uploads succeed. A partial run can leave a draft;
+      # re-running the same commit fills and publishes it. Published releases are immutable here.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
           TAG: ${{ inputs.tag }}
         run: |
-          if [ "${{ inputs.prerelease }}" = "true" ]; then
-            title="daemon ${{ inputs.version }} (staging)"
-            provenance="Staging build from \`${GITHUB_SHA}\`.
+          set -eu
 
-          Not for client robots. Promote it — create a release for tag \`daemon-v${{ inputs.version }}\`,
-          or run the \`promote\` workflow — once a canary has run the on-device acceptance checks.
-          Promotion ships these exact bytes."
-            flag=--prerelease
-          else
-            # Said in the release itself, because it is the one thing that distinguishes this from a
-            # promoted release and nothing else would record it. Built here means engine-verified —
-            # signature, manifest and a real install, all checked in this job — but not *canaried*:
-            # no robot ran these bytes before they became the stable channel.
-            title="daemon ${{ inputs.version }}"
-            provenance="Built directly from \`${GITHUB_SHA}\`, with no staging release to promote.
-
-          Verified through the update engine in CI, but **not validated on a robot**. For the
-          canaried path, publish a pre-release for \`daemon-staging-v${{ inputs.version }}\` first
-          and then promote it."
-            flag=--prerelease=false
+          # If the tag already exists, it must identify the source that was built. `--target` only
+          # controls automatic tag creation; GitHub otherwise follows an existing tag silently.
+          git fetch --force --tags origin
+          if git show-ref --verify --quiet "refs/tags/$TAG"; then
+            tag_sha="$(git rev-parse "$TAG^{commit}")"
+            if [ "$tag_sha" != "$SOURCE_SHA" ]; then
+              echo "::error::$TAG points at $tag_sha, but this run built $SOURCE_SHA"
+              exit 1
+            fi
           fi
 
+          title="daemon ${{ inputs.version }}"
+          provenance="Built, signed, and verified from \`${SOURCE_SHA}\` by the release workflow.
+
+          The artifact passed a real install through the update engine before publication."
           notes="$(PROVENANCE="$provenance" TAG="$TAG" ./scripts/ci-release-notes.sh)"
 
-          # Create it if absent, fill it in either way — see the note in release.yml on why this is
-          # not a single `gh release create`. The flag is re-asserted on a release that already
-          # exists: staging must be flagged so a plain `update apply` skips it, and stable must not
-          # be, or it ships to nobody.
-          #
-          # Notes are only written when there are none. Anything typed into the UI is somebody's
-          # deliberate description of their own release and outranks a generated one.
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "release $TAG exists; filling it in"
-            gh release edit "$TAG" "$flag" --title "$title"
+            state="$(gh release view "$TAG" --json isDraft,targetCommitish --jq '[.isDraft, .targetCommitish] | @tsv')"
+            is_draft="$(printf '%s' "$state" | cut -f1)"
+            release_target="$(printf '%s' "$state" | cut -f2)"
+
+            if [ "$is_draft" != true ]; then
+              echo "::error::$TAG is already published; bump [workspace.package].version before releasing again"
+              exit 1
+            fi
+            if [ "$release_target" != "$SOURCE_SHA" ]; then
+              echo "::error::draft $TAG targets $release_target, but this run built $SOURCE_SHA"
+              exit 1
+            fi
+
+            echo "resuming draft $TAG"
+            gh release edit "$TAG" --prerelease=false --title "$title"
             if [ -z "$(gh release view "$TAG" --json body --jq .body)" ]; then
               gh release edit "$TAG" --notes "$notes"
-            else
-              echo "keeping the notes it came with"
             fi
+
+            gh release upload "$TAG" dist/* --clobber
+            gh release edit "$TAG" --draft=false --prerelease=false --latest
           else
-            gh release create "$TAG" "$flag" --title "$title" --notes "$notes"
+            # With assets on the create command, gh creates a draft internally, uploads everything,
+            # then publishes. It also creates the missing lightweight tag at SOURCE_SHA.
+            gh release create "$TAG" dist/* \
+              --latest \
+              --target "$SOURCE_SHA" \
+              --title "$title" \
+              --notes "$notes"
           fi
 
-          gh release upload "$TAG" dist/* --clobber
+          published="$(gh release view "$TAG" --json isDraft,isPrerelease,tagName --jq '[.isDraft, .isPrerelease, .tagName] | @tsv')"
+          if [ "$published" != "false	false	${TAG}" ]; then
+            echo "::error::published release state is unexpected: $published"
+            exit 1
+          fi
+
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+          tag_sha="$(git rev-parse "$TAG^{commit}")"
+          if [ "$tag_sha" != "$SOURCE_SHA" ]; then
+            echo "::error::published tag $TAG points at $tag_sha, expected $SOURCE_SHA"
+            exit 1
+          fi

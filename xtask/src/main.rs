@@ -1,4 +1,4 @@
-//! Build tooling: package, sign and promote robot releases.
+//! Build tooling for packaging and signing robot releases.
 //!
 //! This is the **publisher** side of the update contract. It never ships to a robot —
 //! notably it links the full `minisign` crate (which can sign), while `updaterd` links
@@ -13,24 +13,7 @@
 //! ```text
 //!   cargo xtask package --version 1.2.3 --channel daemon --bin-dir <dir> --out dist/
 //!   cargo xtask sign    --dir dist/ --key secret.key
-//!   cargo xtask promote --version 1.2.3 --staging-tag daemon-staging-v1.2.3 \
-//!                       --stable-tag daemon-v1.2.3 \
-//!                       --repo ORG/REPO --out dist/ --key secret.key
 //! ```
-//!
-//! `promote` is what makes §16.3's `staging → stable` real: it emits a *stable*
-//! manifest carrying the **same artifact bytes** already validated in staging —
-//! same sha256 — rather than rebuilding. Promotion is therefore a re-signing, and
-//! what ships is provably what was tested.
-//!
-//! The stable manifest points at the artifact on the *stable* release, which
-//! `promote.yml` uploads alongside it. It used to point back at the staging release
-//! instead, to avoid a second copy of the bytes. That made every stable release
-//! depend on a tag named as if it were disposable — and it was duly disposed of:
-//! deleting the `daemon-staging-v0.1.x` releases left three stable releases pointing
-//! at nothing. The sha256 in the manifest is verified on the robot before install
-//! (`updater::verify::verify_sha256`), so a copy that diverged could never install
-//! silently, which is what the single-copy rule was protecting against.
 
 use std::path::{Path, PathBuf};
 
@@ -50,7 +33,7 @@ enum KeyKind {
 }
 
 #[derive(Parser)]
-#[command(about = "Package, sign and promote robot releases", version)]
+#[command(about = "Package and sign robot releases", version)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -166,39 +149,6 @@ enum Command {
         #[arg(long, env = "MINISIGN_PASSWORD", hide_env_values = true)]
         password: Option<String>,
     },
-
-    /// Emit a *stable* manifest pointing at an already-published staging artifact.
-    ///
-    /// No rebuild: the artifact URL and sha256 are carried over unchanged, so what
-    /// ships is byte-identical to what was validated.
-    Promote {
-        #[arg(long)]
-        version: semver::Version,
-
-        /// Tag of the staging release holding the validated artifact.
-        #[arg(long)]
-        staging_tag: String,
-
-        /// Tag of the stable release being created. The manifest's `url` points here,
-        /// so the release that `promote.yml` creates must carry the artifact itself.
-        #[arg(long)]
-        stable_tag: String,
-
-        /// `ORG/REPO`, used to build the download URL.
-        #[arg(long)]
-        repo: String,
-
-        /// The staging manifest to carry forward.
-        #[arg(long)]
-        staging_manifest: PathBuf,
-
-        #[arg(long, default_value = "dist")]
-        out: PathBuf,
-
-        /// Set or clear the mandatory-update floor for the stable channel.
-        #[arg(long)]
-        min_supported: Option<semver::Version>,
-    },
 }
 
 fn main() -> std::process::ExitCode {
@@ -250,23 +200,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             password,
         } => keycheck(&key, public.as_deref(), password.as_deref()),
         Command::Sign { dir, key, password } => sign_dir(&dir, &key, password.as_deref()),
-        Command::Promote {
-            version,
-            staging_tag,
-            stable_tag,
-            repo,
-            staging_manifest,
-            out,
-            min_supported,
-        } => promote(
-            &version,
-            &staging_tag,
-            &stable_tag,
-            &repo,
-            &staging_manifest,
-            &out,
-            min_supported.as_ref(),
-        ),
     }
 }
 
@@ -536,8 +469,8 @@ fn keygen(
         KeyKind::Release => {
             println!("This is a RELEASE key. It is the trust anchor for every robot.");
             println!();
-            println!("  public  → into the trusted_keys_dir of every robot image, and");
-            println!("            into the MINISIGN_PUBLIC_KEY CI secret");
+            println!("  public  → commit it into deploy/trusted_keys so every robot image");
+            println!("            and the release verification job use the same trust anchor");
             println!("  private → a password manager or offline store. Never in the repo,");
             println!("            never on a robot, never in a shared drive.");
             println!("            The CI secret MINISIGN_SECRET_KEY holds a copy for");
@@ -692,71 +625,6 @@ fn sign_dir(
     Ok(())
 }
 
-/// Carry a validated staging artifact into the stable channel.
-///
-/// The artifact is **not** rebuilt: the sha256 comes from the staging manifest, so the
-/// stable channel serves the same bytes that passed staging. That is the whole point of
-/// §16.3 — promotion is a decision, not a build.
-fn promote(
-    version: &semver::Version,
-    staging_tag: &str,
-    stable_tag: &str,
-    repo: &str,
-    staging_manifest: &Path,
-    out: &Path,
-    min_supported: Option<&semver::Version>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let staging: serde_json::Value = serde_json::from_slice(&std::fs::read(staging_manifest)?)?;
-
-    let staged_version: semver::Version = serde_json::from_value(staging["version"].clone())?;
-    if staged_version != *version {
-        return Err(format!(
-            "staging manifest is version {staged_version}, asked to promote {version}"
-        )
-        .into());
-    }
-
-    let artifact_name = staging["url"]
-        .as_str()
-        .and_then(|u| u.rsplit('/').next())
-        .ok_or("staging manifest has no usable url")?;
-
-    // Point at the artifact on the *stable* release — which makes that release
-    // self-contained, and staging disposable once promotion succeeds. `promote.yml`
-    // uploads these exact bytes under this tag; the two have to agree, and the test
-    // `promote_yml_uploads_the_artifact_it_points_at` is what keeps them agreeing.
-    let url = format!("https://github.com/{repo}/releases/download/{stable_tag}/{artifact_name}");
-
-    let mut manifest = staging.clone();
-    manifest["url"] = serde_json::json!(url);
-    manifest["sig_url"] = serde_json::json!(format!("{url}{SIG_SUFFIX}"));
-    match min_supported {
-        Some(floor) => manifest["min_supported"] = serde_json::json!(floor),
-        // Not inherited: a floor set to remediate a bad staging build should not
-        // silently become a fleet-wide forced upgrade.
-        None => {
-            manifest.as_object_mut().map(|m| m.remove("min_supported"));
-        }
-    }
-
-    std::fs::create_dir_all(out)?;
-    let path = out.join("manifest.json");
-    std::fs::write(&path, serde_json::to_vec_pretty(&manifest)?)?;
-
-    println!("promoted {version} from {staging_tag}");
-    println!("  artifact {url}");
-    println!(
-        "  sha256 {} (unchanged)",
-        staging["sha256"].as_str().unwrap_or("?")
-    );
-    println!("  manifest {}", path.display());
-    println!(
-        "\nnext: cargo xtask sign --dir {} --key <key>",
-        out.display()
-    );
-    Ok(())
-}
-
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 /// ONNX Runtime floor and target from `[workspace.metadata.onnxruntime]`.
@@ -852,9 +720,9 @@ mod tests {
     /// binaries live. Repository paths, because one of them is not a workflow.
     ///
     /// Named once, because the tests below all read the same files and the recipe has moved before:
-    /// it used to sit in `release.yml`, and now lives in the reusable `_build-release.yml` that both
-    /// the staging and stable paths call. A test that kept reading the old name would pass while
-    /// guarding nothing, which is worse than failing.
+    /// it used to sit in `release.yml`, and now lives in the called `_build-release.yml`. A test
+    /// that kept reading the old name would pass while guarding nothing, which is worse than
+    /// failing.
     ///
     /// `scripts/dev-push.sh` is the third because it assembles the same artifact from its own copy
     /// of the same lists — a laptop build a board actually runs. `xtask/tests/artifact.rs` opens the
@@ -867,8 +735,33 @@ mod tests {
         "scripts/dev-push.sh",
     ];
 
-    /// Where promotion happens: the stable manifest, the artifact carried forward, the retire step.
-    const PROMOTE_WORKFLOW: &str = "_promote-release.yml";
+    /// A release is one manual action that creates its own stable tag. These strings cross the
+    /// entry-point/called-workflow boundary, so neither file can assert the contract alone.
+    #[test]
+    fn release_is_one_manual_stable_publish() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask/ has a parent");
+        let entry = std::fs::read_to_string(root.join(".github/workflows/release.yml"))
+            .expect("release.yml must exist");
+        let build = std::fs::read_to_string(root.join(".github/workflows/_build-release.yml"))
+            .expect("_build-release.yml must exist");
+
+        assert!(entry.contains("workflow_dispatch:"));
+        assert!(
+            !entry.contains("\n  push:"),
+            "a pushed tag must not start a second release path"
+        );
+        assert!(!entry.contains("daemon-staging-v"));
+        assert!(!entry.contains("promote"));
+        assert!(entry.contains("version = tomllib.load(stream)"));
+        assert!(entry.contains("source_sha: ${{ needs.prepare.outputs.source_sha }}"));
+
+        assert!(build.contains("gh release create \"$TAG\" dist/*"));
+        assert!(build.contains("--target \"$SOURCE_SHA\""));
+        assert!(build.contains("--latest"));
+        assert!(!build.contains("inputs.prerelease"));
+    }
 
     /// Where a unit's `ExecStart` points when it runs a program out of the live release.
     ///
@@ -1860,46 +1753,6 @@ mod tests {
                 "{site} still packages the detector model inside the release"
             );
         }
-    }
-
-    /// The stable manifest names an artifact URL under the stable tag — so the workflow
-    /// that creates that release must actually upload the artifact to it.
-    ///
-    /// These two halves live in different languages and different files, and the failure
-    /// mode when they disagree is invisible until a robot tries to update: the release
-    /// looks complete, is correctly signed, and its `url` 404s. That is not hypothetical.
-    /// It is exactly the state `daemon-v0.1.0`, `v0.1.1` and `v0.1.4` were left in when
-    /// the manifest pointed at a staging release someone later deleted.
-    #[test]
-    fn promote_yml_uploads_the_artifact_it_points_at() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("xtask/ has a parent");
-        let yml = std::fs::read_to_string(root.join(".github/workflows").join(PROMOTE_WORKFLOW))
-            .unwrap_or_else(|e| panic!("{PROMOTE_WORKFLOW}: {e}"));
-
-        assert!(
-            yml.contains("--stable-tag"),
-            "the promote workflow must pass --stable-tag, or the manifest url is built from the \
-             wrong release"
-        );
-        assert!(
-            yml.contains("\"artifact/$artifact_name\""),
-            "the promote workflow must upload the artifact to the stable release — the manifest's \
-             url points there"
-        );
-        assert!(
-            yml.contains("\"artifact/$artifact_name.minisig\""),
-            "the promote workflow must upload the artifact signature too — `sig_url` is derived \
-             from `url` and points at the same release"
-        );
-
-        // Retiring staging is only safe because of the two uploads above. If someone
-        // removes them, this assertion is the one that should look wrong.
-        assert!(
-            yml.contains("gh release delete \"$staging_tag\""),
-            "the promote workflow should retire the staging release once stable is self-contained"
-        );
     }
 
     /// A unit's `sysusers.d` file must be in the artifact too.
