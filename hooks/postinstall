@@ -37,6 +37,23 @@ SBIN_DIR=/usr/local/sbin
 
 # Hooks run with the release directory as their working directory.
 
+# The OpenRB USB transport before any unit is installed or restarted. This is deliberately a
+# release step rather than only setup-board.sh work: existing robots reach hardware migrations by
+# updating, not by being provisioned again. The helper is idempotent, installs the stable udev name,
+# and changes only the exact old shipped /dev/ttyS2 config line; operator-selected paths survive.
+#
+# Failure to write the rule or migrate the shipped config fails the update: restarting robotd with
+# neither half applied would accept a release whose required motor path cannot work. Reload and
+# retrigger failures remain best-effort inside the helper; the controller may simply be unplugged.
+script=scripts/setup-openrb.sh
+if [ -f "$script" ]; then
+    sh "$script" \
+        || { echo "postinstall: OpenRB host setup failed; refusing to restart robotd" >&2; exit 1; }
+else
+    echo "postinstall: release is missing scripts/setup-openrb.sh; refusing to restart robotd" >&2
+    exit 1
+fi
+
 # The recovery scripts, copied out for the same reason as the units below and one more: they are what
 # runs when this release cannot start, so they must not be read through `current`. A warning and not
 # a failure — a release that cannot install them is still a release worth having, and `install.sh`
