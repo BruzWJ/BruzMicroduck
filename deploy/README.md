@@ -362,14 +362,10 @@ is `auto_apply`:
 | `mandatory` | **the shipped default** — only a release whose `min_supported` floor says the running version must not be used |
 | `all` | every available release |
 
-A canary or bench robot that should track `staging` and install each candidate:
+A bench robot that should install each stable release automatically:
 
 ```bash
 sudo sed -i 's/^auto_apply = .*/auto_apply = "all"/' /etc/robot/updater.toml
-```
-
-```bash
-sudo sed -i 's/^tag_prefix     = .*/tag_prefix     = "daemon-staging-v"/' /etc/robot/updater.toml
 ```
 
 ```bash

@@ -154,7 +154,7 @@ impl GithubReleases {
     /// The newest release candidate, which is the same scan with the prerelease flag allowed.
     ///
     /// Only the *GitHub* flag is allowed, never a semver prerelease: candidates carry the plain
-    /// version they will be promoted under (`0.3.0`), while dev builds carry `0.3.0-dev.17.abc`
+    /// stable version they test (`0.3.0`), while dev builds carry `0.3.0-dev.17.abc`
     /// and live under a third prefix. So the two exclusions in [`Self::newest_under`] are not
     /// redundant here — dropping one still excludes branch builds, which is the point.
     async fn newest_staging_version(&self) -> Result<semver::Version, Error> {
