@@ -10,14 +10,12 @@
 //! +X-forward, +Y-left, +Z-up axes; consumers use the kinematic `head_imu`
 //! pose to follow the articulated head and place them in the trunk.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use duck_ipc_proto as proto;
-
-use crate::BUS_CANDIDATES;
 
 /// Reopen backoff after an I²C error. A disconnected sensor and a transient bus
 /// error look alike here, so one bounded backoff handles both without hammering
@@ -104,7 +102,7 @@ impl ImuStatus {
 
 /// Read the head LSM6DSV16X forever and broadcast wire-compatible head frames.
 pub fn imu_loop(
-    bus: Option<&Path>,
+    bus: &Path,
     address: u8,
     hz: u8,
     status: &ImuStatus,
@@ -117,7 +115,7 @@ pub fn imu_loop(
     let mut backoff = RETRY_MIN;
 
     while !shutdown.load(Ordering::Acquire) {
-        let (mut imu, opened_bus) = match open_imu(bus, address, hz) {
+        let mut imu = match open_imu(bus, address, hz) {
             Ok(found) => found,
             Err(e) => {
                 status.lost(e.to_string());
@@ -128,7 +126,7 @@ pub fn imu_loop(
             }
         };
         tracing::info!(
-            bus = %opened_bus.display(),
+            bus = %bus.display(),
             address = format!("{address:#04x}"),
             sensor_hz = imu.rate_hz(),
             publish_hz = hz,
@@ -193,37 +191,14 @@ pub fn imu_loop(
     }
 }
 
-/// Open the fixed-address head IMU on the named bus, or the first existing
-/// standard Qwiic path. The two defaults are aliases of the same adapter on a
-/// provisioned board, so an init failure on the symlink must not immediately
-/// repeat the whole reset/configuration through `/dev/i2c-3`.
-fn open_imu(
-    bus: Option<&Path>,
-    address: u8,
-    requested_hz: u8,
-) -> anyhow::Result<(qwiic_imu::Sensor, PathBuf)> {
-    let bus = match bus {
-        Some(bus) if bus.exists() => bus.to_path_buf(),
-        Some(bus) => anyhow::bail!("{} does not exist", bus.display()),
-        None => BUS_CANDIDATES
-            .iter()
-            .map(PathBuf::from)
-            .find(|candidate| candidate.exists())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "neither {} nor {} exists",
-                    BUS_CANDIDATES[0],
-                    BUS_CANDIDATES[1]
-                )
-            })?,
-    };
-    let imu = qwiic_imu::Sensor::open(&bus, address, u16::from(requested_hz)).map_err(|e| {
+/// Open the fixed-address head IMU on the one configured Qwiic adapter.
+fn open_imu(bus: &Path, address: u8, requested_hz: u8) -> anyhow::Result<qwiic_imu::Sensor> {
+    qwiic_imu::Sensor::open(bus, address, u16::from(requested_hz)).map_err(|e| {
         anyhow::anyhow!(
             "LSM6DSV16X init at {address:#04x} on {}: {e:#}",
             bus.display()
         )
-    })?;
-    Ok((imu, bus))
+    })
 }
 
 fn sleep_unless_shutdown(dur: Duration, shutdown: &Arc<AtomicBool>) {
