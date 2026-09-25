@@ -1046,23 +1046,11 @@ TURN proxy offered no relay servers" at info level. That is indistinguishable fr
 was never offered one, which is a legibility gap worth closing when somebody hits it. It is also
 the argument `stream.rs` makes for sending frames outbound rather than through a relay.
 
-**Something now notices when it dies, which is the reason this went unnoticed for three months.**
-The endpoint was already dead when #1182 shipped it, and the only symptom was a warning in a log
-and a candidate type nobody counted. `.github/workflows/turn-endpoint.yml` runs daily: one
-authenticated `GET` against `DEFAULT_TURN_ENDPOINT`, asserting 200 and at least one `turn:`/
-`turns:` entry. Every other check in the repository passes regardless, because every one of them
-pairs two peers on one network, which never looks at a relay.
+**Nothing outside a running robot probes this endpoint.** If it disappears, the evidence is a
+warning in `mediad`'s journal and the absence of a relay candidate. Checks that pair two peers on
+one network do not exercise the relay path.
 
-Three things about its shape are deliberate. It reads the URL **out of `turn.rs` with `sed`**
-rather than keeping a copy, because a check holding its own endpoint tests whatever it was last
-told and can drift from what the daemon compiles in — and a green check on a URL no robot uses is
-worse than no check, since it reads as proof. It is **not** on `pull_request`: the failure being
-guarded against is "nobody touched this for months", which a PR trigger cannot see, and a third
-party's outage must never block unrelated work. And a **missing `HF_TOKEN` secret fails** rather
-than skipping, because a check that quietly skips itself into permanent silence is the exact
-failure mode it exists to end.
-
-Two things this deliberately does not do:
+The relay design deliberately does not do two things:
 
 - **Our own proxy.** This endpoint is a small service holding a Cloudflare Calls key and minting
   short-lived credentials for a caller with a valid HF token, and running one ourselves would end
@@ -1144,7 +1132,6 @@ Five slices, and the first two are independently useful and need no client:
 | a calibration for the camera | `media.video` publishes the module's design figures with `calibrated: false`, which is enough to map a room and not enough for metrology. Measuring one robot and writing `[media.intrinsics]` closes it for that robot; a per-unit calibration in provisioning closes it for the family. §11 of `remote-webrtc.md` |
 | everything on the wire should be timestamped at source | `remote-webrtc.md` §11: `abs-capture-time` on the media, checked against what `webrtcsink`, a browser and `aiortc` actually surface; and a monotonic-plus-epoch field on every control-channel notification that describes a moment. Wanted for any consumer that has to relate what the robot saw to what it felt — visual-inertial SLAM is the case that makes it concrete — and it wants its own version bump rather than riding along with a transport |
 | §2.6 `logout` revokes nothing | whether Hugging Face accepts a revocation for the first-party device-code client, checked rather than assumed. Not blocking — signing out stops the robot being reachable, and a stolen board is answered on hf.co — but it is the difference between "forgotten" and "revoked" |
-| §6 the relay check needs a token | `.github/workflows/turn-endpoint.yml` exists and runs daily, and fails until an `HF_TOKEN` secret is set on the repository — a Hugging Face token with no scope beyond sign-in, used only to mint TURN credentials. Failing loudly is deliberate; the alternative is a check that skips itself into silence |
 | §6 the relay is somebody else's Space | a credentials proxy of our own, holding the Cloudflare key in one place instead of trusting a dormant project's Space to keep its name. `--turn-url` is the seam. Not blocking — the Space answers — but `*.hf.space` is `{owner}-{space}` and there is no alias left to repoint if it moves |
 
 Closed since this page was written: the OAuth client (§2.3 — Hugging Face ships one), whether the
