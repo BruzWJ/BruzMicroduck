@@ -1,8 +1,8 @@
 //! The update state machine.
 //!
 //! ```text
-//! preflight → fetch manifest → verify sig → compatibility
-//!   → download → verify hash → verify sig
+//! preflight → fetch manifest → compatibility
+//!   → download → verify hash
 //!   → extract → [pre hook] → ATOMIC SWAP → [post hook] → apply
 //!   → HEALTH GATE → healthy ? commit+prune : ROLLBACK
 //! ```
@@ -12,7 +12,7 @@
 //!
 //!  - **Any failure at or after the swap rolls back.** Hook failure, health
 //!    failure and timeout are all the same outcome — there is no "mostly applied".
-//!  - **Nothing is extracted to a live path before signature and hash both pass.**
+//!  - **Nothing is extracted to a live path before its SHA-256 passes.**
 //!  - **The boot counter is armed before the swap**, so a crash between swap and
 //!    health check is still recoverable. The reverse order would leave an
 //!    unrecorded bad release live.
@@ -31,7 +31,6 @@ use crate::proto::{
 use crate::robot::RobotClient;
 use crate::store::Store;
 use crate::transcript::Transcript;
-use crate::verify::KeyRing;
 use crate::{Error, hooks, preflight, source, verify};
 
 /// Boots a pending update gets to prove itself before unconditional revert.
@@ -167,7 +166,7 @@ const EMBEDDED_MANIFEST: &str = ".updater-manifest.json";
 
 /// Run a blocking closure on the blocking pool.
 ///
-/// Used for hashing, signature verification, extraction and recursive deletes:
+/// Used for hashing, extraction and recursive deletes:
 /// all of them run for seconds on a Pi-class board, and leaving them on an async
 /// worker would stall the IPC tasks that must keep serving `status`/`subscribe`
 /// during an update (`docs/design/architecture.md` §2.3).
@@ -187,9 +186,6 @@ pub type ProgressTx = tokio::sync::mpsc::UnboundedSender<Progress>;
 
 pub struct Engine {
     config: Config,
-    /// Behind an `Arc` so verification can be handed to `spawn_blocking` without
-    /// borrowing `self` across an await.
-    keys: std::sync::Arc<KeyRing>,
     robot: Box<dyn RobotClient>,
     journal: Journal,
     boot_counter: BootCounter,
@@ -328,17 +324,15 @@ pub struct ApplyOptions {
     pub interrupt_sessions: bool,
     /// Read the release from this directory instead of the component's configured source.
     ///
-    /// The laptop-to-board path (`scripts/dev-push.sh`): build, sign with the dev key, copy
-    /// the directory over, apply. Served by [`Engine::apply`] and not by
+    /// The laptop-to-board path (`scripts/dev-push.sh`): build, copy the directory over, apply.
+    /// Served by [`Engine::apply`] and not by
     /// `updaterd install --from`, which is the reason it exists — `install` has to force
     /// `on_apply` and the health gate off, so it can only be used on a board with no live
     /// release, and every use of it on a working robot silently gives up auto-rollback.
     /// A dev board is exactly where a release most needs to be gated and rolled back.
     ///
     /// It changes where the bytes come from and nothing else: same `LocalDir` source as the
-    /// tests and the offline installer, so signature, hash and compatibility are checked
-    /// identically. A locally built release installs because the dev key is trusted on that
-    /// board, not because a check was skipped.
+    /// tests and the offline installer, so hash and compatibility checks are identical.
     pub from_dir: Option<std::path::PathBuf>,
 
     /// Who asked, as `uid=1000 gid=1000 pid=2317`, for the transcript's opening line.
@@ -350,18 +344,12 @@ pub struct ApplyOptions {
 }
 
 impl Engine {
-    pub fn new(
-        config: Config,
-        keys: KeyRing,
-        robot: Box<dyn RobotClient>,
-        faults: Faults,
-    ) -> Result<Self, Error> {
+    pub fn new(config: Config, robot: Box<dyn RobotClient>, faults: Faults) -> Result<Self, Error> {
         let journal = Journal::open(&config.state_dir, LOG_CAPACITY)?;
         let boot_counter = BootCounter::open(&config.state_dir);
         let pins = Pins::open(&config.state_dir);
         Ok(Self {
             config,
-            keys: std::sync::Arc::new(keys),
             robot,
             journal,
             boot_counter,
@@ -415,9 +403,8 @@ impl Engine {
         let store = self.store(component)?;
         let installed = store.current()?;
 
-        let signed = source::from_config(&cfg.source).latest_manifest().await?;
-        self.verify_manifest(&signed)?;
-        let manifest = signed.parsed;
+        let fetched = source::from_config(&cfg.source).latest_manifest().await?;
+        let manifest = fetched.parsed;
         Self::check_channel(&manifest, component)?;
 
         if Some(&manifest.version) == installed.as_ref() {
@@ -467,10 +454,10 @@ impl Engine {
     /// Is an update available? Changes nothing that is installed.
     ///
     /// Records that the source answered, when it did, because `update.status` reports how long ago
-    /// that was ([`crate::journal::Checked`]). Every `Ok` below comes after the manifest verified
-    /// and named this component's channel; an `Err` may be the fetch, the signature or the
-    /// channel, and none of those is an answer — so it is recorded as an attempt that failed, with
-    /// the reason `robotctl health` gives for the silence.
+    /// that was ([`crate::journal::Checked`]). Every `Ok` below comes after the manifest parsed and
+    /// named this component's channel; an `Err` may be the fetch, parse or channel check, and none
+    /// of those is an answer — so it is recorded as an attempt that failed, with the reason
+    /// `robotctl health` gives for the silence.
     pub async fn check(&self, component: &str) -> Result<CheckResult, Error> {
         let result = self.check_source(component).await;
         match &result {
@@ -714,7 +701,7 @@ impl Engine {
     ) -> Result<ApplyResult, Error> {
         let installed = store.current()?;
         // A per-call source override, so the configured one stays in place: a dev board keeps
-        // reaching GitHub for `--ref <branch>`, `--staging` and a return to the release stream,
+        // reaching GitHub for `--ref <branch>` and a return to the release stream,
         // and a laptop build is one flag rather than a config edit to undo afterwards.
         let source = match &options.from_dir {
             Some(dir) => Box::new(source::LocalDir::new(dir.clone())) as Box<dyn source::Source>,
@@ -728,35 +715,31 @@ impl Engine {
         rec.phase(Phase::Preflight, None);
         self.preflight(None, options, store).await?;
 
-        // 1. Manifest, and its signature. Nothing else happens until this passes.
+        // 1. Manifest. Nothing else happens until it parses and names this component.
         rec.phase(Phase::Checking, None);
-        let signed = match &target {
+        let fetched_manifest = match &target {
             crate::proto::Target::Latest => source.latest_manifest().await?,
             crate::proto::Target::Exact(v) => source.manifest_for(v).await?,
             crate::proto::Target::Ref(git_ref) => source.manifest_at_ref(git_ref).await?,
-            crate::proto::Target::Staging => source.staging_manifest().await?,
-            crate::proto::Target::StagingExact(v) => source.staging_manifest_for(v).await?,
         };
-        let signed_by = self.verify_manifest(&signed)?;
-        let manifest = signed.parsed.clone();
+        let manifest = fetched_manifest.parsed.clone();
 
         // Recorded here rather than at the end, and before any of the refusals below: a run that
-        // was *refused* is one of the two runs anyone reads, and "which release, from where,
-        // signed by which key" is what the refusal has to be read against.
+        // was *refused* is one of the two runs anyone reads, and "which release, from where" is
+        // what the refusal has to be read against.
         rec.note(RunEvent::Manifest {
             version: manifest.version.clone(),
             sha256: manifest.sha256.clone(),
             bytes: manifest.size,
             url: Some(manifest.url.clone()),
-            signed_by: Some(signed_by),
             source_revision: manifest.source_revision.clone(),
         });
 
         Self::check_channel(&manifest, component)?;
 
-        // The source answered with its latest, signed and for this component: what a `check`
-        // records. Not a `--from` directory, which says nothing about the source, and not an exact
-        // version, which a source that has stopped moving still serves.
+        // The source answered with its latest manifest for this component: what a `check` records.
+        // Not a `--from` directory, which says nothing about the source, and not an exact version,
+        // which a source that has stopped moving still serves.
         if options.from_dir.is_none() && matches!(target, crate::proto::Target::Latest) {
             self.source_answered(component);
         }
@@ -783,23 +766,14 @@ impl Engine {
             });
         }
 
-        // Rollback-attack guard. A signature proves an artifact is *ours*; it says
-        // nothing about it being *current*. A stale or reverted mirror can serve an
-        // old, still-validly-signed manifest, which would silently walk the fleet
-        // backwards onto a version we withdrew — the classic downgrade attack on a
-        // signed-artifact scheme.
+        // Rollback guard. A stale or reverted source can serve an old manifest, which would
+        // silently walk the fleet backwards onto a version we withdrew.
         //
         // Only `Latest` is guarded. `Exact` is a deliberate operator action (that is how a
         // targeted revert works), and `Ref` *always* looks like a downgrade — a dev build is
         // a semver prerelease, so it sorts below the release it precedes — so guarding it
         // would reject every branch install. Rollback and reset-to-golden move backwards on
         // purpose without passing through here.
-        //
-        // `StagingExact` is unguarded for the `Exact` reason: naming a candidate is how someone
-        // reinstalls the one a board just rolled back from, which is exactly the move they reach
-        // for while investigating that rollback. Bare `Staging` *is* guarded, but by
-        // [`staging_has_nothing_newer`] below rather than by this — the refusals are not the same
-        // claim, and this one's message would be actively misleading there.
         //
         // `from_dir` is exempt for the `Exact` reason. The guard defends against a *mirror*
         // that has gone backwards, and a directory named on the command line by somebody with
@@ -813,26 +787,6 @@ impl Engine {
             && manifest.version < *installed
         {
             return Err(Error::WouldDowngrade {
-                installed: installed.clone(),
-                candidate: manifest.version,
-            });
-        }
-
-        // `--staging` on a board that is ahead of the candidate channel. Normal releases publish
-        // straight to stable, so the staging scan can keep answering with the last manually
-        // published candidate.
-        //
-        // Refused rather than installed. Every layer below here behaved correctly when it was
-        // not: the artifact verified, the swap happened, a unit that the older release does not
-        // contain failed to start, and the update reverted. But the operator asked for "the one
-        // being tested" and there is no such thing, so the answer is a sentence rather than a
-        // rollback — and `orphan` cannot be that sentence, since it only sees a stale unit, not a
-        // stale channel.
-        if let Some(installed) =
-            staging_has_nothing_newer(&target, installed.as_ref(), &manifest.version)
-        {
-            return Err(Error::StagingBehind {
-                component: component.to_owned(),
                 installed: installed.clone(),
                 candidate: manifest.version,
             });
@@ -871,7 +825,7 @@ impl Engine {
                 cfg,
                 store,
                 &manifest,
-                &signed.bytes,
+                &fetched_manifest.bytes,
                 &*source,
                 &staging,
                 &download_dir,
@@ -963,12 +917,12 @@ impl Engine {
             let _ = f.write_all(b"x");
         }
 
-        // 4. Integrity, then authenticity. Both before anything is extracted.
+        // 4. Integrity, before anything is extracted.
         //
-        // Hashing and signature verification stream hundreds of megabytes and take
-        // seconds on this class of board. Run on the async worker they would stall
-        // the IPC tasks that are meant to keep answering `status`/`subscribe` while
-        // the update runs, so both go to `spawn_blocking`.
+        // Hashing streams hundreds of megabytes and takes seconds on this class of board.
+        // Run on the async worker it would stall the IPC tasks that are meant to keep
+        // answering `status`/`subscribe` while the update runs, so it goes to
+        // `spawn_blocking`.
         // The size the download actually turned out to be, which a manifest need not have
         // declared and a resumed transfer makes worth stating outright.
         if let Ok(meta) = std::fs::metadata(&fetched.artifact) {
@@ -983,21 +937,7 @@ impl Engine {
         let artifact = fetched.artifact.clone();
         let expected = manifest.sha256.clone();
         blocking(move || verify::verify_sha256(&artifact, &expected)).await?;
-
-        let signature = std::fs::read(&fetched.signature).map_err(|e| Error::Io {
-            path: fetched.signature.clone(),
-            source: e,
-        })?;
-        let keys = std::sync::Arc::clone(&self.keys);
-        let artifact = fetched.artifact.clone();
-        let signed_by = blocking(move || {
-            keys.verify_file(&artifact, &signature)
-                .map(|key| key.id.clone())
-        })
-        .await?;
-        rec.say(format!(
-            "hash matches; signature verifies against {signed_by}"
-        ));
+        rec.say("artifact hash matches the manifest");
 
         // 5. Extract to the side, never over a live path. Also CPU-bound (zstd).
         rec.phase(Phase::Extracting, None);
@@ -1342,7 +1282,7 @@ impl Engine {
 
     /// Install a policy set from the Hub and tell `robotd` to pick it up.
     ///
-    /// Not an update in the component sense — no manifest, no signature, no health gate, no
+    /// Not an update in the component sense — no release manifest, no health gate, no
     /// rollback — and [`crate::policy`] says why. It is here because it needs this process's two
     /// privileges, a network stack and root, and because `robotd` must be told afterwards: the
     /// swap moves a symlink underneath unchanged paths, so nothing about the slots looks
@@ -2472,29 +2412,6 @@ impl Engine {
         }
     }
 
-    /// Verify a manifest's signature, naming what failed.
-    ///
-    /// The bare "did not verify against any trusted key" is true but unhelpful: the
-    /// usual causes are a rotated signing key or a stale release left in the
-    /// source, and both are diagnosable only if the message says *which* version and
-    /// channel it was. The parsed fields are untrusted here — they are used for the
-    /// message only, never for a decision.
-    /// Returns the id of the trusted key that admitted it. A *set* of keys is allowed, so which
-    /// one signed a release is a fact about that release — and [`crate::verify::TrustedKey::id`]
-    /// has said it was for the log since the day it was written.
-    fn verify_manifest(&self, signed: &source::SignedBytes<Manifest>) -> Result<String, Error> {
-        self.keys
-            .verify_bytes(&signed.bytes, &signed.signature)
-            .map(|key| key.id.clone())
-            .map_err(|e| {
-                Error::Verification(format!(
-                    "manifest for {} {} (unverified): {e}. \
-                     Was the signing key rotated, or is this a stale release?",
-                    signed.parsed.channel, signed.parsed.version
-                ))
-            })
-    }
-
     /// Guard against a manifest that belongs to a different channel, so a
     /// misconfigured URL can't install a model as the daemon.
     fn check_channel(manifest: &Manifest, expected: &str) -> Result<(), Error> {
@@ -2541,31 +2458,6 @@ impl Reverted {
             ),
         }
     }
-}
-
-/// Is this a bare `--staging` whose newest candidate is *older* than what the board runs?
-///
-/// Returns the installed version when so, purely so the caller can build the refusal without
-/// unwrapping the option a second time.
-///
-/// A predicate rather than a let-chain at the call site because the interesting content is which
-/// targets it answers for, and that is worth a test. `Target::Staging` only:
-///
-/// - `StagingExact` names an older candidate on purpose — see the call site.
-/// - `Latest` has its own guard, which makes a different claim.
-/// - `Ref` and `Exact` are exempt from both, for reasons the call site states.
-///
-/// Equality is not "behind": a candidate matching what is installed is what `AlreadyCurrent`
-/// reports, above this and more usefully.
-fn staging_has_nothing_newer<'a>(
-    target: &crate::proto::Target,
-    installed: Option<&'a semver::Version>,
-    candidate: &semver::Version,
-) -> Option<&'a semver::Version> {
-    if !matches!(target, crate::proto::Target::Staging) {
-        return None;
-    }
-    installed.filter(|installed| candidate < *installed)
 }
 
 /// The program that drives units. A constant so tests can substitute a stub for it.
@@ -2816,8 +2708,6 @@ fn describe_target(target: &crate::proto::Target) -> String {
         crate::proto::Target::Latest => "latest".to_owned(),
         crate::proto::Target::Exact(v) => v.to_string(),
         crate::proto::Target::Ref(git_ref) => format!("branch {git_ref}"),
-        crate::proto::Target::Staging => "latest release candidate".to_owned(),
-        crate::proto::Target::StagingExact(v) => format!("release candidate {v}"),
     }
 }
 
@@ -3238,123 +3128,6 @@ async fn run_systemctl(mut command: tokio::process::Command, what: &str) -> Resu
         )));
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod staging_channel_tests {
-    use super::*;
-    use crate::proto::Target;
-
-    fn v(s: &str) -> semver::Version {
-        semver::Version::parse(s).expect("a version")
-    }
-
-    /// A board on stable `0.4.0` asks for the newest candidate when the last manually published
-    /// candidate was `0.2.0`; the staging scan still answers `0.2.0`.
-    #[test]
-    fn a_candidate_older_than_the_board_is_reported() {
-        assert_eq!(
-            staging_has_nothing_newer(&Target::Staging, Some(&v("0.4.0")), &v("0.2.0")),
-            Some(&v("0.4.0"))
-        );
-    }
-
-    /// The ordinary case, which must stay silent: a candidate ahead of the board is the entire
-    /// point of the channel.
-    #[test]
-    fn a_candidate_ahead_of_the_board_is_not() {
-        assert_eq!(
-            staging_has_nothing_newer(&Target::Staging, Some(&v("0.4.0")), &v("0.5.0")),
-            None
-        );
-    }
-
-    /// A candidate equal to what is installed is `AlreadyCurrent`, which the caller answers
-    /// before reaching here. Reporting it as a stale channel would be both wrong and worse.
-    #[test]
-    fn a_candidate_equal_to_the_board_is_not_behind() {
-        assert_eq!(
-            staging_has_nothing_newer(&Target::Staging, Some(&v("0.4.0")), &v("0.4.0")),
-            None
-        );
-    }
-
-    /// A first install has nothing to be behind. Guarding it would make `--staging` unusable on a
-    /// freshly flashed board, which is one of the two boards that ever uses the flag.
-    #[test]
-    fn a_board_with_nothing_installed_is_never_behind() {
-        assert_eq!(
-            staging_has_nothing_newer(&Target::Staging, None, &v("0.2.0")),
-            None
-        );
-    }
-
-    /// Every other target, at a version that *would* trip this if the variant were not checked.
-    ///
-    /// The load-bearing one is `StagingExact`: it is the way past the refusal this function
-    /// produces, so guarding it too would leave a board that can neither install the candidate
-    /// nor be told why. The rest have their own guards or their own exemptions.
-    #[test]
-    fn no_other_target_is_this_functions_business() {
-        for target in [
-            Target::StagingExact(v("0.2.0")),
-            Target::Latest,
-            Target::Exact(v("0.2.0")),
-            Target::Ref("my-branch".into()),
-        ] {
-            assert_eq!(
-                staging_has_nothing_newer(&target, Some(&v("0.4.0")), &v("0.2.0")),
-                None,
-                "{target:?} must not be refused as a stale staging channel"
-            );
-        }
-    }
-
-    /// The message is the deliverable — the rollback it replaces was already correct, and what
-    /// was missing was a sentence saying the channel had nothing newer. So: the two versions, the
-    /// reason there is nothing there, and a command that can be pasted.
-    #[test]
-    fn the_refusal_says_the_channel_is_behind_and_what_to_type() {
-        let text = Error::StagingBehind {
-            component: "daemon".into(),
-            installed: v("0.4.0"),
-            candidate: v("0.2.0"),
-        }
-        .to_string();
-
-        assert!(text.contains("newest release candidate is 0.2.0"), "{text}");
-        assert!(text.contains("already on 0.4.0"), "{text}");
-        assert!(
-            text.contains("nothing more recent is available on the staging channel"),
-            "{text}"
-        );
-        assert!(
-            text.contains("robotctl update apply daemon --staging --version 0.2.0"),
-            "{text}"
-        );
-        // Not the other refusal's words. Someone told "refusing to downgrade" goes looking for a
-        // mirror that has gone backwards, and there isn't one.
-        assert!(!text.contains("downgrade"), "{text}");
-    }
-
-    /// Both refusals answer the same JSON-RPC code, so a client that already handles one handles
-    /// this. Pinned because the reasoning is a choice — see [`Error::code`].
-    #[test]
-    fn it_answers_the_downgrade_code() {
-        assert_eq!(
-            Error::StagingBehind {
-                component: "daemon".into(),
-                installed: v("0.4.0"),
-                candidate: v("0.2.0"),
-            }
-            .code(),
-            Error::WouldDowngrade {
-                installed: v("0.4.0"),
-                candidate: v("0.2.0"),
-            }
-            .code()
-        );
-    }
 }
 
 #[cfg(test)]

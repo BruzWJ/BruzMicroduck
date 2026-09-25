@@ -121,12 +121,12 @@ enum Command {
         ///
         /// Omit it on a robot with a network: the configured `github_releases` source
         /// resolves `latest` itself, which is what the one-line installer relies on —
-        /// otherwise it would have to parse a signed manifest in shell to learn the
+        /// otherwise it would have to parse a manifest in shell to learn the
         /// version and the artifact URL.
         ///
         /// Supply it for an offline or factory install, or to sideload a build. The
-        /// directory holds `<version>.manifest.json`, its `.minisig`, the artifact and
-        /// the artifact's `.minisig` — the layout `updater::source::local` expects.
+        /// directory holds `<version>.manifest.json` and the artifact it names — the
+        /// layout `updater::source::local` expects.
         #[arg(long)]
         from: Option<PathBuf>,
 
@@ -148,8 +148,8 @@ enum Command {
         ///
         /// Refused unless `robotd` is silent, so the reason plain `install` refuses — no
         /// health gate on a *working* robot — cannot apply. Stop it first:
-        /// `systemctl stop robotd`. Signatures, hashes and compatibility are still checked;
-        /// what is given up is auto-rollback for this one install.
+        /// `systemctl stop robotd`. Hashes and compatibility are still checked; what is given
+        /// up is auto-rollback for this one install.
         #[arg(long)]
         force: bool,
     },
@@ -237,21 +237,18 @@ async fn main() -> ExitCode {
 
 /// What both entry points need, loaded identically.
 ///
-/// Split out so `serve` and `install` cannot diverge on the two things that must fail
-/// loudly — a bad config and an unusable keyring. A bootstrap path that was lenient
-/// about either would be a hole in the trust chain reachable exactly once per robot,
-/// which is the worst possible time for it to be there.
+/// Split out so `serve` and `install` cannot diverge on loading the board's config and
+/// runtime dependencies.
 struct Loaded {
     config: updater::config::Config,
-    keys: updater::verify::KeyRing,
     robot: Box<dyn updater::robot::RobotClient>,
     faults: updater::faults::Faults,
 }
 
 /// `None` means the failure was already logged with its context.
 fn load(args: &Args) -> Option<Loaded> {
-    // Config and keyring first: both must fail loudly. A bad config that silently
-    // left the robot unable to update would be invisible until it mattered.
+    // Config first: a bad config that silently left the robot unable to update would
+    // be invisible until it mattered.
     let config = match updater::config::Config::load(&args.config) {
         Ok(config) => config,
         Err(e) => {
@@ -277,17 +274,6 @@ fn load(args: &Args) -> Option<Loaded> {
         );
     }
 
-    // An empty trusted-keys directory is fatal, never an empty allow-list: silently
-    // trusting nothing looks identical to a misconfigured path.
-    let keys = match updater::verify::KeyRing::load(&config.trusted_keys_dir, config.allow_dev_keys)
-    {
-        Ok(keys) => keys,
-        Err(e) => {
-            tracing::error!(error = %e, "could not load trusted keys");
-            return None;
-        }
-    };
-
     // `robotd` may well not be running — that is a normal, expected state, and the
     // client reports Unreachable rather than failing.
     let robot_socket = args
@@ -300,7 +286,6 @@ fn load(args: &Args) -> Option<Loaded> {
 
     Some(Loaded {
         config,
-        keys,
         robot,
         faults,
     })
@@ -420,15 +405,14 @@ async fn install(
         None => tracing::info!(source = ?cfg.source, "installing from the configured source"),
     }
 
-    let mut engine =
-        match updater::engine::Engine::new(loaded.config, loaded.keys, loaded.robot, loaded.faults)
-        {
-            Ok(engine) => engine,
-            Err(e) => {
-                tracing::error!(error = %e, "could not start the engine");
-                return ExitCode::FAILURE;
-            }
-        };
+    let mut engine = match updater::engine::Engine::new(loaded.config, loaded.robot, loaded.faults)
+    {
+        Ok(engine) => engine,
+        Err(e) => {
+            tracing::error!(error = %e, "could not start the engine");
+            return ExitCode::FAILURE;
+        }
+    };
 
     // Progress is advisory and the channel unbounded, so this cannot slow the install
     // down — it just makes a long download visible in the journal.
@@ -539,7 +523,7 @@ async fn serve(args: Args) -> ExitCode {
     let Some(loaded) = load(&args) else {
         return ExitCode::FAILURE;
     };
-    let (config, keys, robot, faults) = (loaded.config, loaded.keys, loaded.robot, loaded.faults);
+    let (config, robot, faults) = (loaded.config, loaded.robot, loaded.faults);
 
     // Read before `config` is moved into the engine.
     let config_check_interval = config.check_interval;
@@ -561,7 +545,7 @@ async fn serve(args: Args) -> ExitCode {
             .filter_map(|name| resolve_gid(name)),
     );
 
-    let mut engine = match updater::engine::Engine::new(config, keys, robot, faults) {
+    let mut engine = match updater::engine::Engine::new(config, robot, faults) {
         Ok(engine) => engine,
         Err(e) => {
             tracing::error!(error = %e, "could not start the engine");
@@ -764,7 +748,7 @@ mod tests {
     }
 
     /// The one-liner installer's path: no `--from`, so the configured source resolves
-    /// `latest` itself and nothing has to parse a signed manifest in shell.
+    /// `latest` itself and nothing has to parse a manifest in shell.
     #[test]
     fn install_without_from_uses_the_configured_source() {
         let args = Args::try_parse_from(["updaterd", "install"]).unwrap();
@@ -776,7 +760,7 @@ mod tests {
 
     /// `--config` is global, so the bootstrap installer can point `install` at the same
     /// config the daemon will use rather than at a copy of its values. A copy is what
-    /// would let the two disagree about `trusted_keys_dir` or `state_dir`.
+    /// would let the two disagree about `state_dir` or component settings.
     #[test]
     fn install_accepts_the_global_config_flag() {
         let args = Args::try_parse_from([

@@ -28,7 +28,7 @@ document is the update system only.
   (§5.5).
 - Trigger + monitor updates from the mobile app.
 - **Force-upgrade off known-bad releases** via a minimum-version floor.
-- Never brick a robot: atomic apply, automatic rollback, signed artifacts.
+- Never brick a robot: SHA-256-verified artifacts, atomic apply, automatic rollback.
 - Keep it simple; no fleet backend.
 - Be **reusable across the team's other robots** with minimal adaptation.
 - Support a per-component **post-install hook** for migrations / one-off steps.
@@ -46,7 +46,7 @@ document is the update system only.
 | Update granularity | Application-level (not A/B image) | Only daemon + model change; OS is static. A/B (RAUC/Mender) would be over-engineering. |
 | Transport | Robot **pulls** from CDN over its own wifi | Robot has internet; phone is trigger + progress only. Big payloads never touch BLE. |
 | Hosting | **GitHub Releases** (daemon) + **HF Hub** (model) | Zero backend; each is a natural home for its artifact. Engine treats "source" as pluggable. |
-| Signing | **minisign** (CI signs, robot verifies) | Battle-tested format, tiny verify crate, simple key management. |
+| Release integrity | **GitHub over HTTPS + SHA-256** | The manual workflow verifies the exact draft assets; the robot checks the manifest's declared artifact hash before extraction. |
 | Channels | One per independently-versioned thing: `daemon`, plus one per model | Different cadences; models reload without a full restart. |
 | Rollback | Versioned dirs + atomic symlink swap + health gate | Simple, robust, no partitioning needed. |
 | Reuse | Config-driven generic engine | Same engine everywhere; each robot declares its components. |
@@ -56,8 +56,9 @@ weeks for the first months, then every ~2–3 months. The model updates on its o
 separate rhythm.
 
 But **internal** iteration runs far hotter (the prototype saw ~8 builds in 3 days), so branch builds
-use the separate dev-key path while customer robots see only manually published stable releases
-(§16.3). Scripted rollback remains load-bearing rather than optional polish.
+use a separate prerelease/tag namespace and require an explicit `--ref`, while the stable resolver
+sees only manually published stable releases (§16.3). Scripted rollback remains load-bearing rather
+than optional polish.
 
 ### 3.1 Prerequisite: the robot needs its own internet access
 
@@ -228,12 +229,10 @@ Two logical channels, each with its own manifest and version line:
 
 The two channels live on **different hosts**, which the engine handles via a
 pluggable `source` per component:
-- `daemon` → **GitHub Releases**, tag `daemon-v1.4.2`, assets = artifact +
-  `.minisig` + manifest.
+- `daemon` → **GitHub Releases**, tag `daemon-v1.4.2`, assets = artifact + manifest.
 - `model` → **HF Hub** repo, versioned by git revision/tag; files resolved at
   `https://huggingface.co/ORG/MODEL/resolve/<rev>/<file>`. "Latest" = a moving
-  tag/branch or the newest tag. We still `minisign` the model artifact ourselves
-  and store the `.minisig` alongside — HF does not sign for us.
+  tag/branch or the newest tag. Its artifact size and SHA-256 live in the component manifest.
 
 ### 5.2 Artifact
 
@@ -243,13 +242,13 @@ One compressed tarball per release, e.g. `daemon-1.4.2.tar.zst`, containing:
 bin/robotd  bin/mediad  bin/btd        # (daemon channel)
 model/gait.onnx  config/…              # (model channel)
 version.toml                           # semver, min_hw_rev, schema_version
-hooks/postinstall                      # optional, executable, versioned+signed
+hooks/postinstall                      # optional, executable, included in the hashed artifact
 ```
 
 ### 5.3 Manifest
 
 A small JSON published as a release asset (and referenced by a stable URL, see
-§6). Signed with minisign.
+§6). GitHub serves it over HTTPS; it declares the artifact size and SHA-256.
 
 ```json
 {
@@ -257,7 +256,7 @@ A small JSON published as a release asset (and referenced by a stable URL, see
   "version": "1.4.2",
   "url": "https://github.com/ORG/REPO/releases/download/daemon-v1.4.2/daemon-1.4.2.tar.zst",
   "sha256": "…",
-  "sig_url": "https://github.com/ORG/REPO/releases/download/daemon-v1.4.2/daemon-1.4.2.tar.zst.minisig",
+  "size": 193147812,
   "min_hw_rev": 3,
   "schema_version": 2,
   "min_supported": "1.5.1",
@@ -282,54 +281,48 @@ is deferred in §8.4.2. Adding it later is additive (absent = no expiry), unlike
 `min_supported`, so it does not need reserving now. `model` manifests additionally carry
 `model_api` (§5.5).
 
-### 5.4 Signing / trust
+### 5.4 Publication authority and integrity
 
-- CI signs both the **artifact** and the **manifest** with the private minisign
-  key (kept in CI secrets, offline master ideally).
-- The robot ships with a **set of trusted minisign public keys**
-  (`/etc/robot/trusted_keys/`), not a single key. A signature is valid if it
-  verifies against *any* trusted key. This is the trust anchor — no PKI needed.
-- **Key rotation:** shipping a *set* from day one means a lost/compromised key
-  is survivable — publish an update signed by an existing key that adds the new
-  key and (later) retires the old one. A single baked-in key would make a lost
-  key an unrecoverable dead update path.
-- Optionally reserve a distinct **dev key** in the set, gated behind a flag, for
-  the team's local sideload path (§15).
-- Verification order on the robot: verify manifest signature → download artifact
-  → verify sha256 → verify artifact signature. **No unsigned bytes are ever
-  executed or extracted to a live path.**
+The stable publisher is the repository's manual `release.yml` workflow. GitHub repository write
+access is the authorization boundary: only someone who can write the repository can dispatch the
+workflow, and the job alone receives `contents: write`. It accepts no inputs, refuses a branch
+selector other than the default branch, and freezes the selected commit SHA. There are no release
+secrets, private keys, passwords or local signing step.
 
-#### Key custody
+One run creates or resumes the exact draft for that commit, builds the aarch64 runtime, packages
+it, and exercises a real local install through `updaterd`. It uploads exactly four assets:
 
-Generate keys with `cargo xtask keygen`, which refuses to write into the repository and
-writes secret keys `0600`.
+- `manifest.json`;
+- `<version>.manifest.json`;
+- `daemon-<version>.tar.zst`;
+- `updaterd-bootstrap-aarch64`.
 
-| key | encrypted | private half lives | in trusted set of |
-|---|---|---|---|
-| `release-1.pub/.key` | yes | password manager **and** CI secrets | every robot |
-| `release-2.pub/.key` | yes, **different passphrase** | password manager only — **never CI** | every robot |
-| `release-3.pub/.key` | yes, **different passphrase** | offline; ideally never on a networked machine | every robot |
-| `team.dev.pub/.key` | no | team store + CI | developer boards only |
+Before publishing, the workflow verifies the draft's version, source commit and release identity,
+the exact asset-name set, every asset size, and GitHub's reported SHA-256 digest against the local
+bytes. It then creates `daemon-v<version>` at the frozen commit and publishes the draft as the
+latest stable release. A retry can resume only the same draft; a published version is immutable.
 
-Three things this table encodes, each easy to get wrong:
+The robot requires HTTPS for a remote artifact URL. It fetches the manifest from GitHub, validates
+the channel, version and compatibility fields, uses the optional size for its disk-space preflight,
+downloads into a staging directory, then checks the artifact's SHA-256 before extraction. No
+unchecked artifact bytes reach a live release path. Local `--from` installs receive the same hash
+and compatibility checks.
 
-1. **The spare must ship from the first image.** A robot verifies against the key set
-   baked into it, so a replacement cannot be introduced over the air later — a lost sole
-   key means re-flashing every robot by hand.
-2. **The spare must differ in passphrase *and* exposure.** Its purpose is surviving a
-   compromise of the first; `release.key` is in CI by necessity, so `release-2.key` must
-   not be. Sharing a passphrase collapses both into one.
-3. **Passphrases are generated, not chosen.** They are never typed — they live in a
-   password manager and a secret store — so memorability buys nothing, while minisign's
-   scrypt parameters (32 MiB, opslimit 2²⁰) are only a modest brake on an offline attack
-   against a leaked key file. ≥128 bits, e.g. `openssl rand -base64 24`.
+This model deliberately places publisher authority at GitHub repository access. SHA-256 detects a
+truncated, corrupted or mismatched asset; because the manifest and artifact share the same hosting
+authority, it does not defend against a compromised maintainer account or compromised GitHub
+release. Repository access controls, workflow review and account security are therefore part of
+the release boundary, not interchangeable with the artifact hash.
 
-Releases are signed **in CI**, not locally — a deliberate choice, with the approval gate
-that compensates for it documented in [`ci-setup.md`](../project/ci-setup.md).
+Development builds use a separate `daemon-dev-*` prerelease/tag namespace and are selected only by
+an explicit `--ref` request from a locally authorized client. They never participate in the stable
+resolver. A local `dev-push` is selected explicitly with `--from` and is not published at all.
 
-The dev key is deliberately unencrypted: CI signs non-interactively, and a passphrase
-stored beside the key it protects adds little. Its real protection is structural — it is
-absent from customer robots' trusted sets, and gated there by `allow_dev_keys = false`.
+**One-time cutover.** No public stable release used the former signed-release format. An
+old development-board updater that expects those extra assets cannot install the first release in
+this format. Re-run `scripts/provision-board.sh`, or use the forced bootstrap path, once to install
+the current updater before applying the first stable release. This is a migration, not a second
+release mechanism.
 
 ### 5.5 Models: one component each
 
@@ -467,15 +460,13 @@ done only when genuinely needed, never unconditionally on every update.
 
 ## 6. Hosting on GitHub Releases
 
-- Artifact + `.minisig` + `manifest.json` are assets on each release.
-- "What's the latest?" resolves via one of:
-  - **Stable redirect URL** `…/releases/latest/download/<asset>` — but GitHub's
-    "latest" is repo-wide, so this only works cleanly with **one channel per repo**.
-  - **GitHub API** query for the newest tag matching a channel prefix
-    (`daemon-v*`) — works with a single shared repo. Preferred if we keep both
-    channels in one repo.
-- CI side: `cargo-dist` can build and publish signed artifacts to GitHub
-  Releases; we host manifests as additional assets.
+- Each stable release has exactly the four assets in §5.4. There are no sidecar authenticity
+  files and no second promotion release.
+- "What's the latest?" is a GitHub API query for the highest stable semver tag matching
+  `daemon-v*`. Drafts, GitHub prereleases, semver prereleases and the `daemon-dev-*` namespace are
+  excluded. A repo-wide `/releases/latest` redirect is not the resolver.
+- The manual `release.yml` workflow is the sole stable publisher. It creates the tag and GitHub
+  release itself after building and checking the draft; an operator does not pre-create either.
 
 ### 6.1 A private repository cannot serve the fleet — so this one does not stay private
 
@@ -492,16 +483,15 @@ Verified directly:
 So the engine resolves every asset through the API endpoint, which works for a **developer's
 board** — `GITHUB_TOKEN` is in the environment and `--ref` installs a branch build — and for a
 public repo, but not for a customer robot, which has no token and should not have one: a
-fleet-wide credential baked into an image leaks and cannot be rotated without reflashing, the
-same problem the signing keys are tiered to avoid.
+fleet-wide credential baked into an image leaks and cannot be rotated without updating every image.
 
 Three other options were on the table, and are recorded because the decision could be revisited
 if the source ever needs to close again:
 
 | option | keeps zero-backend | notes |
 |---|---|---|
-| A **public repo holding only release artifacts** | yes | signatures are what make an artifact safe, not obscurity — an artifact repo leaks build metadata and nothing else. Source stays private. The fallback if this repo ever goes private again. |
-| An object store or CDN with a plain HTTP source | mostly | one more thing to own and pay for; the source trait already abstracts it. |
+| A **public repo holding only release artifacts** | yes | publication remains permission-gated and assets remain HTTPS + SHA-256 verified; source can stay private. The fallback if this repo ever goes private again. |
+| An object store or CDN with an HTTPS source | mostly | one more thing to own and pay for; the source trait already abstracts it. |
 | A read-only token in the image | yes | rejected: an unrotatable fleet credential. |
 
 **Going public changes no code.** The API path stays correct — it is the one path for private
@@ -527,10 +517,10 @@ receive trigger (from btd)  ── check | apply(version)
 PREFLIGHT (§7.2):  single-flight lock · clock/NTP sane · robot stopped · disk space free
         │  (any fail → report + exit, no changes)
         ▼
-fetch manifest ──► verify manifest signature ──► compare version, check min_hw_rev / model_api / pin / downgrade
+fetch manifest ──► parse + validate identity ──► compare version, check min_hw_rev / model_api / pin / downgrade
         │                                                    │ (nothing to do / incompatible)
         ▼                                                    └─► report + exit
-download artifact ──► verify sha256 ──► verify artifact signature
+download artifact ──► verify sha256
         │
         ▼
 extract to releases/<ver>.tmp/  ──► orphaned-unit check (§7.3) ──► [pre_install hook]
@@ -585,9 +575,8 @@ side effects:
   if BLE drops. Status is persisted and replayed to the phone on reconnect —
   the phone is never required to stay connected.
 - **Clock sanity.** A Pi/eMMC board has no battery-backed RTC; a wrong clock
-  fails HTTPS cert-date validation before any download. Require NTP sync (or a
-  sane-clock check + bounded retry) as a precondition. minisign itself is
-  time-independent.
+  fails HTTPS certificate-date validation before any download. Require NTP sync (or a
+  sane-clock check + bounded retry) as a precondition.
 - **Robot stopped.** We assume the app only offers updates while the robot is
   stopped/parked (motors safe). `updaterd` still does a light "safe to restart?"
   query to `robotd` and refuses if not — cheap insurance against restarting
@@ -753,10 +742,9 @@ even under "latest-for-all" (where a robot otherwise only updates when tapped):
 - On check/start, if the running version `< min_supported`, the update is
   **mandatory** — `updaterd` applies it without waiting for a tap (and the
   running bad version can be refused).
-- A blunter **kill switch** (a signed "version X revoked" statement) is the same
-  mechanism escalated. Being signed means an attacker cannot *forge* one — but see
-  §8.4: a signature says an artifact is **ours**, not that it is **current**, so
-  signing alone does not prevent replay of an old genuine manifest.
+- A blunter **kill switch** (a published "version X revoked" statement) is the same
+  mechanism escalated. It would share the release workflow's authority boundary; see
+  §8.4 for why freshness still needs its own mechanism.
 - Ship the field in the schema now (§5.3); it can't be retrofitted later.
 - `min_supported` only takes effect once a robot successfully fetches a manifest
   carrying it. It is therefore a *remediation* tool, not a defence: a robot cut
@@ -798,8 +786,7 @@ destroy the account of the swap or the rollback (§5.7):
 
 - the run's opening: the target as the caller named it, the source, what was live, and who asked,
   from `SO_PEERCRED`;
-- the manifest that passed its signature check — version, hash, size, URL, **which** trusted key
-  admitted it, and the revision it was built from;
+- the validated manifest — version, hash, size, URL and the revision it was built from;
 - every phase boundary, with a detail where there is one, and therefore the time each took;
 - hook output verbatim, with its exit code, on success as well as on failure;
 - each unit restarted, reloaded or deferred, and what systemd said;
@@ -833,21 +820,19 @@ a socket whose read side is deliberately ungated — and it is the half that cov
 daemons, which the transcript never sees. An operator without journal access gets the transcript
 plus the command to run for the rest.
 
-### 8.4 What signatures do and don't buy: downgrade and freeze
+### 8.4 Integrity is not freshness: downgrade and freeze
 
-A minisign signature proves an artifact **came from us and wasn't modified**. It
-says nothing about *when* it was published or whether it is still current. Two
-attacks survive a perfectly valid signature, and they are the standard pair for
-any signed-artifact scheme:
+HTTPS and the artifact SHA-256 protect transport and detect mismatched bytes, but they say nothing
+about whether the manifest presented as latest is still current. Two stale-metadata failures remain:
 
 | | What it is | Status |
 |---|---|---|
-| **Downgrade / rollback** | Serve an *older, genuinely signed* manifest so robots walk backwards onto a version we withdrew | **Fixed** |
+| **Downgrade / rollback** | Serve an older valid manifest so robots walk backwards onto a version we withdrew | **Fixed** |
 | **Freeze** | Serve the *current* manifest forever, so robots never learn a fix exists | **Open** (§8.4.2) |
 
-Both are reachable by anyone who controls what the robot fetches: a stale or
-reverted CDN/mirror, a cached proxy, DNS interception, or a hostile local network.
-Neither requires a stolen key.
+Both can result from stale or reverted hosting metadata. A network attacker would also have to
+defeat HTTPS; a compromised repository publisher is inside the authority boundary described in
+§5.4.
 
 #### 8.4.1 Downgrade — closed
 
@@ -873,9 +858,9 @@ fires.
 
 Options, cheapest first:
 
-1. **Signed manifest expiry.** Add `not_valid_after` (a timestamp) to the
+1. **Manifest expiry.** Add `not_valid_after` (a timestamp) to the
    manifest; refuse a manifest older than that and surface "update metadata is
-   stale" in the app. Cost: publishing becomes time-bound — CI must re-sign the
+   stale" in the app. Cost: publishing becomes time-bound — CI must republish the
    `stable` manifest on a schedule even when no release changes, or every robot
    starts warning. Also depends on the robot's clock, which is exactly what
    §7.2's clock check exists to distrust.
@@ -894,16 +879,15 @@ Options, cheapest first:
 **Recommendation: (3) now, (1) when there is a release cadence to hang it on.**
 Staleness reporting is nearly free, has no failure mode of its own, and converts a
 silent attack into a visible one. Expiry is the real defence but its operational
-cost — a re-signing schedule that, if missed, warns the entire fleet — is not worth
+cost — a metadata-publishing schedule that, if missed, warns the entire fleet — is not worth
 paying before the publishing pipeline is routine. (2) is cheap but solves a problem
 §8.4.1 already covers at the version level.
 
 **(3) is built.** `update.status` carries `last_checked` per component, and `robotctl health`
 says when the update source last answered and warns once it has been quiet for a week. Only the
-source's latest counts, signed and for the right channel, so a failed fetch, a manifest that does
-not verify and a `--from` directory all leave it where it was. As the option says, it makes a robot
-that cannot reach its source visible, and not one being fed an old signed manifest; that is still
-(1).
+source's latest counts, valid and for the right channel, so a failed fetch, malformed manifest or
+`--from` directory all leave it where it was. As the option says, it makes a robot that cannot reach
+its source visible, and not one being fed an old valid manifest; that is still (1).
 
 **A source that has never answered is the warning, not the silence.** A board that has been
 blocked since it was provisioned has nothing recorded — which is also what an `updaterd` older
@@ -934,14 +918,14 @@ check would otherwise read as freshly checked for good, since only a successful 
 record.
 
 **Explicitly accepted for v1:** a robot whose network is hostile can be prevented
-from updating. It cannot be made to *downgrade*, install an artifact we did not
-sign, or install one that fails its health gate. Those are the properties we
+from updating. It cannot be made to *downgrade* through the latest resolver, extract an artifact
+whose bytes do not match its manifest, or keep one that fails its health gate. Those are the properties we
 actually rely on.
 
 ## 9. Post-install hooks
 
-Same idea as dpkg `postinst`, but the hook ships **inside the (signed) tarball**,
-so no unsigned code ever runs. Rust binary or shell script — the engine just
+Same idea as dpkg `postinst`, but the hook ships **inside the hash-verified tarball**,
+so no unchecked artifact code runs. Rust binary or shell script — the engine just
 `exec`s it.
 
 **Contract**
@@ -1067,8 +1051,7 @@ fleet will never get.
 ## 10. Reusable, config-driven engine
 
 The engine is identical across robots; each robot ships a config declaring its
-components. Adapting to a new robot = new config + new signing key + (maybe) a
-new health probe.
+components. Adapting to a new robot = new config + (maybe) a new health probe.
 
 The authoritative, parse-tested example is
 [`updater/updater.example.toml`](../../updater/updater.example.toml) — a unit test
@@ -1076,7 +1059,6 @@ parses it, so it cannot drift from the code. Abridged here:
 
 ```toml
 # /etc/robot/updater.toml
-trusted_keys_dir = "/etc/robot/trusted_keys"   # a *set* of keys (§5.4)
 hw_rev           = 1
 state_dir        = "/var/lib/robot/updater"    # must be outside every install_dir
 
@@ -1126,8 +1108,8 @@ Note the model uses `reload` (SIGHUP → re-mmap weights) rather than `restart`,
 so motor control is never dropped for a model swap. Per-component `on_apply` is
 what makes this natural and is a core reason the two channels stay separate.
 
-Shared across robots: engine, minisign pipeline, phone/BLE trigger protocol,
-rollback logic. Per-robot: the config file, the signing key, health probes,
+Shared across robots: engine, SHA-256 pipeline, phone/BLE trigger protocol,
+rollback logic. Per-robot: the config file, health probes,
 hooks. It's a small binary + a schema, not a framework.
 
 ## 11. OS updates (deliberately out of scope for OTA)
@@ -1187,17 +1169,17 @@ Payloads never traverse BLE.
 
 `updaterd`, a small Rust binary (~a few hundred lines of logic):
 - `reqwest` — download (with resume/retry) + GitHub API for latest-tag lookup.
-- `minisign-verify` — signature verification.
+- `sha2` — artifact integrity before extraction.
 - `tar` + `zstd` — extract.
 - `serde` / `toml` — config; `serde_json` — manifests.
 - Atomic symlink swap via `rename(2)`; health poll over the existing unix-socket IPC.
 - systemd integration: `Type=notify`, `WatchdogSec`, unit templating.
 
-CI (per channel):
-1. Build artifact (optionally via `cargo-dist`).
-2. `minisign -S` the artifact and the manifest.
-3. Create a GitHub Release tagged `daemon-vX` / `model-vX` with the artifact,
-   `.minisig`, and `manifest.json` as assets.
+Stable publisher:
+1. A repository writer manually dispatches `release.yml` on the default branch.
+2. The workflow builds, packages, and verifies a local install through the real updater.
+3. It uploads the exact four assets from §5.4 to one draft, checks their sizes and GitHub
+   SHA-256 digests, creates `daemon-vX` at the selected commit, and publishes that draft.
 
 ## 15. Good neighbors (in scope)
 
@@ -1213,17 +1195,15 @@ Cheap additions that slot into the same IPC / engine and pay off:
   `check`, `apply [--version|--dry-run]`, `rollback`, `reset-to-golden`,
   `select` (how a model bundle is switched), `pin`, `status`, `log`, `watch`.
   Only the `update` namespace is implemented.
-- **Dev sideload path.** Accept an artifact signed with a distinct **dev key**
-  (present in the trusted set but gated behind a flag / dev build) so the team
-  can flash local builds without touching prod signing (see §5.4).
+- **Dev sideload path.** Accept a locally packaged artifact through an explicit, privileged
+  request without publishing it or changing the configured stable source.
   **Built.** `robotctl update apply --from <dir>` overrides the source for one call,
   so the release comes off a directory on the board while everything else about the
-  apply is unchanged — preflight, signature, hash, compatibility, health gate,
+  apply is unchanged — preflight, hash, compatibility, health gate,
   auto-rollback. `scripts/dev-push.sh` is the whole path: cross-compile, package,
-  sign, copy, apply. Two things it does *not* do, both deliberate: it is not
+  copy, apply. Two things it does *not* do, both deliberate: it is not
   `updaterd install --from`, which forces `on_apply` and the gate off and therefore
-  cannot be used on a live release; and it does not relax verification, which is why
-  it needs a dev key on the board rather than a flag that skips a check. The
+  cannot be used on a live release; and it does not relax hash or compatibility checks. The
   downgrade guard stands aside for `--from` for the reason it stands aside for
   `--version` — an operator naming a directory is not a mirror that has gone
   backwards, and a local build is a prerelease that sorts below whatever the board is
@@ -1236,9 +1216,9 @@ Cheap additions that slot into the same IPC / engine and pay off:
   directory whose `ls` lists it, which is unfalsifiable from the outside.
 - **BLE provisioning security.** Adjacent but important: wifi credentials pass
   over BLE during setup. That characteristic must be paired + encrypted, or it's
-  a credential leak. Update artifacts are signed so a spoofed *trigger* is
-  low-risk, but *provisioning* writes must be authenticated. Confirm `btd`
-  already enforces this.
+  a credential leak. Update triggers and provisioning writes both require authenticated,
+  encrypted access; artifact integrity is not caller authorization. Confirm `btd` already
+  enforces this.
 
 ## 16. Release testing & confidence
 
@@ -1272,10 +1252,9 @@ lives in the update *mechanism*, which is pure software and testable in CI with
 **Tier 1 — mechanism tests (CI, no hardware, fast).** Run on every PR; this
 alone removes most of the manual-revert risk. Cover automatically:
 
-- signature valid / invalid / wrong-key → accept / reject
-- hash mismatch → reject
+- valid hash → accept; hash mismatch → reject before extraction
 - `min_hw_rev` / `model_api` incompatible → refuse with clear status
-- older-but-validly-signed manifest offered as "latest" → refused as a downgrade
+- older valid manifest offered as "latest" → refused as a downgrade
   (§8.4.1), while an explicit `--version` downgrade is still allowed
 - `rollback` never lands on the release that just failed, nor on one the log
   records as rolled back
@@ -1319,23 +1298,21 @@ Repeatable because reset-to-golden and `apply --version` are scriptable.
 
 ### 16.3 Release publishing
 
-The release path has one operator action and produces one stable GitHub release:
+The release path has one operator action and produces one stable GitHub release. The operator must
+have repository write access; GitHub enforces that before it offers the manual dispatch:
 
 1. Bump `[workspace.package].version`, commit, and push the default branch.
 2. Click **Actions → release → Run workflow** with the default branch selected.
-3. GitHub freezes that commit, cross-builds the board binaries, packages and signs them, installs
-   the package through the real updater as verification, creates `daemon-v<version>` at that exact
-   SHA, uploads every asset, and publishes it as the stable/latest release.
+3. GitHub freezes that commit, cross-builds the board binaries, packages them, installs the package
+   through the real updater as verification, uploads and verifies the draft assets, creates
+   `daemon-v<version>` at that exact SHA, and publishes it as the stable/latest release.
 
 There are no workflow inputs, local tag commands, staging releases, or promotion step. The workflow
-uses its scoped `GITHUB_TOKEN` to create the tag and release; `DUCK_TOKEN` and personal access tokens
-are unrelated. The release signing key and passphrase still have to exist in the `release` GitHub
-environment because GitHub cannot invent the private key already trusted by the robots.
-
-The recipe is split across `release.yml` (source/version validation) and `_build-release.yml`
-(build, package, sign, verify, publish). That is an implementation split, not a second release. The
-publisher remains a Rust `xtask` so it uses the same minisign, tar, zstd, and SHA-256 formats that the
-updater verifies.
+uses its job-scoped `GITHUB_TOKEN` with `contents: write`; `DUCK_TOKEN` and personal access tokens
+are unrelated. It needs no repository/environment secrets, protected release environment, private
+key or password. One `release.yml` contains the complete recipe. `xtask package` remains the shared
+packager so CI, local development and the updater agree on the tar, zstd, manifest and SHA-256
+formats.
 
 The workflow enforces these invariants:
 
@@ -1345,11 +1322,14 @@ The workflow enforces these invariants:
   same version.
 - An existing published version is never overwritten. Only a draft left by the same commit may be
   resumed.
-- `gh release create` receives the exact source SHA and the assets together. It uploads through a
-  draft and publishes only after the uploads succeed, then the workflow verifies the final tag and
-  release state.
-- Before publication, `updaterd install --from` accepts the signed artifact and the workflow checks
-  the installed binaries, recorded revision, and bootstrap-binary digest.
+- The draft contains exactly `manifest.json`, `<version>.manifest.json`,
+  `daemon-<version>.tar.zst`, and `updaterd-bootstrap-aarch64`. Before publication, their names,
+  states, byte sizes and GitHub-reported SHA-256 digests must equal the local build metadata.
+- Before publication, `updaterd install --from` accepts the packaged artifact and the workflow
+  checks the installed binaries, recorded revision, and bootstrap-binary digest.
+- The tag is created only after draft verification and must be a lightweight tag resolving directly
+  to the selected source SHA. After publication, the workflow verifies the release is stable,
+  non-draft, points at that SHA, and is GitHub's Latest release.
 - Fixed mtimes keep artifacts reproducible, so a rebuild from identical inputs can be compared with
   what shipped.
 
@@ -1363,7 +1343,7 @@ history remains immutable and auditable.
 exact version a client is running" is always reproducible in the lab.
 
 This closes the loop that hurt last time: **humans decide when to publish; the machine builds,
-signs, verifies, applies, and rolls back identically every time.**
+hashes, verifies, applies, and rolls back identically every time.**
 
 ### 16.5 Bootstrap state — over for the health gate, not for the payload
 
@@ -1442,20 +1422,19 @@ Still open:
 - **Phone-delivered artifacts as a fallback** — for a robot with no usable
   internet: never provisioned, captive portal, blocked CDN, offline demo site.
   The engine side is nearly free, because `LocalDir` (§15, §16.1) already applies
-  a directory of manifest + artifact + both `.minisig`s through the real
-  verification path, and signing makes the delivery transport untrusted by
-  construction. The cost is entirely in the link, which must be wifi or USB
+  a directory of manifest + artifact through the real hash and compatibility
+  path. The cost is mostly in the link, which must be wifi or USB
   (§3.1). Two shapes, and they solve different problems: the robot hosts an AP
   for the phone to join (needs no robot credentials, but the phone must fetch the
   release over cellular *before* joining, and both mobile OSes resist a network
   with no internet), or — where wifi works but the CDN does not — the phone
   pushes over the LAN, much cheaper but it adds a network-facing ingest listener.
-  That listener's blast radius is bounded by signature verification (an unsigned
-  upload cannot install; worst case is filling the disk), but it wants a token
-  and a deliberate bind regardless (`architecture.md` §2.2). Backup plan, not v1.
+  Because a manifest supplied by that same listener can name the uploaded file's hash, the listener
+  itself must authenticate and authorize the uploader, enforce quotas, and bind deliberately;
+  SHA-256 is not an authorization boundary (`architecture.md` §2.2). Backup plan, not v1.
 - ~~**Manifest staleness reporting**~~ (§8.4.2), **built**: `update.status` carries
-  `last_checked`, and `robotctl health` warns when a source has been quiet for a week. Signed
-  manifest expiry is still the real defence, deferred until publishing is routine.
+  `last_checked`, and `robotctl health` warns when a source has been quiet for a week. Manifest
+  expiry is still the real defence, deferred until publishing is routine.
 - **Config ownership** — does config ride with the model bundle, the daemon, or
   become its own tiny channel? (Hooks handle migrations either way, §9.)
 - **Minimal success/failure phone-home** — one ping per update would let us catch
@@ -1469,6 +1448,6 @@ Explicitly **not** doing: hardware variant matrix (§5.6), peripheral firmware O
 (§11.1), staged rollouts / telemetry, delta updates.
 
 Decided since first draft: split hosting (GitHub + HF Hub); `min_supported` floor
-in schema; model *bundles with named slots* + `model_api` compatibility; multiple
-trusted signing keys; single hardware target; robot-specific state preservation
+in schema; model *bundles with named slots* + `model_api` compatibility; manual GitHub
+release authority plus HTTPS/SHA-256 integrity; single hardware target; robot-specific state preservation
 (§5.7); config in a file rather than the systemd unit.

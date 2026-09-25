@@ -1,43 +1,48 @@
-# One click, one tag, one release.
+# One manual run builds one immutable stable release.
 #
-# Bump [workspace.package].version in Cargo.toml, push the default branch, then use
-# Actions → release → Run workflow. GitHub freezes that commit, builds, signs, verifies,
-# creates daemon-v<version>, uploads the assets, and publishes the release.
+# Bump [workspace.package].version in Cargo.toml, merge it to the default branch, then use
+# Actions → release → Run workflow. GitHub freezes that commit, prepares a draft, builds
+# and checks the exact assets, creates daemon-v<version>, and publishes the verified draft.
 name: release
 
 on:
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 concurrency:
   group: daemon-release
   cancel-in-progress: false
 
+# Jobs opt in to write access only where the draft, assets, tag, and release need it.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  prepare:
-    name: Validate source
+  release:
+    name: Build, verify, and publish
     runs-on: ubuntu-latest
-    outputs:
-      source_sha: ${{ steps.identity.outputs.source_sha }}
-      tag: ${{ steps.identity.outputs.tag }}
-      version: ${{ steps.identity.outputs.version }}
+    timeout-minutes: 180
+    permissions:
+      contents: write
     steps:
-      - name: Check out the selected commit
-        uses: actions/checkout@v4
+      - name: Check out selected branch commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
           persist-credentials: false
           ref: ${{ github.sha }}
 
-      - name: Derive release identity
+      - name: Validate source and derive release identity
         id: identity
+        shell: bash
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           DISPATCH_REF: ${{ github.ref }}
           DISPATCH_SHA: ${{ github.sha }}
         run: |
+          set -euo pipefail
           python3 - <<'PY'
           import os
           import re
@@ -48,8 +53,9 @@ jobs:
           expected_ref = f"refs/heads/{os.environ['DEFAULT_BRANCH']}"
           if os.environ["DISPATCH_REF"] != expected_ref:
               raise SystemExit(
-                  "run releases from the default branch: "
-                  f"expected {expected_ref}, got {os.environ['DISPATCH_REF']}"
+                  "manual releases must use the repository default branch in the "
+                  f"Run workflow selector; expected {expected_ref!r}, "
+                  f"got {os.environ['DISPATCH_REF']!r}"
               )
 
           source_sha = subprocess.run(
@@ -58,9 +64,12 @@ jobs:
               text=True,
               stdout=subprocess.PIPE,
           ).stdout.strip()
+          if re.fullmatch(r"[0-9a-f]{40}", source_sha) is None:
+              raise SystemExit(f"Git did not resolve a canonical source SHA: {source_sha!r}")
           if source_sha != os.environ["DISPATCH_SHA"]:
               raise SystemExit(
-                  f"checked-out source {source_sha} differs from dispatch {os.environ['DISPATCH_SHA']}"
+                  f"checked-out source differs from dispatch SHA: "
+                  f"{source_sha!r} != {os.environ['DISPATCH_SHA']!r}"
               )
 
           with open("Cargo.toml", "rb") as stream:
@@ -69,50 +78,703 @@ jobs:
           if not isinstance(version, str) or re.fullmatch(stable_semver, version) is None:
               raise SystemExit(f"workspace version must be stable SemVer X.Y.Z, got {version!r}")
 
-          outputs = Path(os.environ["GITHUB_OUTPUT"])
-          with outputs.open("a", encoding="utf-8") as stream:
-              stream.write(f"source_sha={source_sha}\n")
-              stream.write(f"tag=daemon-v{version}\n")
-              stream.write(f"version={version}\n")
+          values = {
+              "source_sha": source_sha,
+              "version": version,
+              "tag": f"daemon-v{version}",
+              "title": f"daemon {version}",
+              "artifact": f"daemon-{version}.tar.zst",
+              "local_manifest": f"{version}.manifest.json",
+          }
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
+              for name, value in values.items():
+                  stream.write(f"{name}={value}\n")
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as stream:
+              for name, value in values.items():
+                  stream.write(f"{name.upper()}={value}\n")
           PY
 
-      - name: Refuse an existing release version
+      - name: Compare selected source with the latest release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_SHA: ${{ steps.identity.outputs.source_sha }}
-          TAG: ${{ steps.identity.outputs.tag }}
         run: |
-          set -eu
+          set -euo pipefail
+          previous_tag="$(
+            gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || true
+          )"
+          if [[ -z "$previous_tag" ]]; then
+            echo "No published release exists yet; this will be the first."
+            exit 0
+          fi
+          case "$previous_tag" in
+            daemon-v*) previous_version="${previous_tag#daemon-v}" ;;
+            *)
+              echo "::error::latest release has unexpected tag $previous_tag"
+              exit 1
+              ;;
+          esac
 
-          # A failed publish may leave a draft or its tag. They are resumable only when they point
-          # at this exact source; a published version is immutable.
+          CURRENT_VERSION="$VERSION" PREVIOUS_VERSION="$previous_version" python3 - <<'PY'
+          import os
+          import re
+
+          pattern = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
+          current = os.environ["CURRENT_VERSION"]
+          previous = os.environ["PREVIOUS_VERSION"]
+          if pattern.fullmatch(previous) is None:
+              raise SystemExit(f"latest release version is not stable SemVer: {previous!r}")
+          current_parts = tuple(int(part) for part in current.split("."))
+          previous_parts = tuple(int(part) for part in previous.split("."))
+          if current_parts <= previous_parts:
+              raise SystemExit(
+                  f"workspace version {current} must be newer than latest release {previous}"
+              )
+          PY
+
+          previous_sha="$(git rev-parse --verify "$previous_tag^{commit}")"
+          if ! git merge-base --is-ancestor "$previous_sha" "$SOURCE_SHA"; then
+            echo "::error::latest release $previous_tag ($previous_sha) is not an ancestor of $SOURCE_SHA"
+            exit 1
+          fi
+          if [[ "$previous_sha" == "$SOURCE_SHA" ]]; then
+            echo "::error::selected source has no commits after latest release $previous_tag"
+            exit 1
+          fi
+
+      - name: Create or resume the draft release
+        id: draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # A retry may find a tag created by a run that reached the final publication steps.
+          # It is resumable only when it still identifies the exact source selected above.
           if git show-ref --verify --quiet "refs/tags/$TAG"; then
             tag_sha="$(git rev-parse "$TAG^{commit}")"
-            if [ "$tag_sha" != "$SOURCE_SHA" ]; then
+            if [[ "$tag_sha" != "$SOURCE_SHA" ]]; then
               echo "::error::$TAG points at $tag_sha, not selected commit $SOURCE_SHA"
               exit 1
             fi
           fi
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            state="$(gh release view "$TAG" --json isDraft,targetCommitish --jq '[.isDraft, .targetCommitish] | @tsv')"
-            is_draft="$(printf '%s' "$state" | cut -f1)"
-            release_target="$(printf '%s' "$state" | cut -f2)"
-            if [ "$is_draft" != true ] || [ "$release_target" != "$SOURCE_SHA" ]; then
-              echo "::error::$TAG already exists; bump [workspace.package].version"
-              exit 1
-            fi
+          releases_json="$RUNNER_TEMP/releases.json"
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$releases_json"
+
+          release_id="$(RELEASES_JSON="$releases_json" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          pages = json.loads(Path(os.environ["RELEASES_JSON"]).read_text(encoding="utf-8"))
+          if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+              raise SystemExit("GitHub releases response is not a paginated array")
+          releases = [release for page in pages for release in page]
+          if any(not isinstance(release, dict) for release in releases):
+              raise SystemExit("GitHub releases response contains a non-object")
+
+          pending = [
+              release.get("tag_name")
+              for release in releases
+              if release.get("draft") is True
+              and release.get("tag_name") != os.environ["TAG"]
+          ]
+          if pending:
+              raise SystemExit(
+                  "resolve pending draft releases before continuing: "
+                  + ", ".join(repr(tag) for tag in pending)
+              )
+
+          matches = [release for release in releases if release.get("tag_name") == os.environ["TAG"]]
+          if not matches:
+              raise SystemExit(0)
+          if len(matches) != 1:
+              raise SystemExit(f"{os.environ['TAG']} resolves to multiple releases")
+
+          release = matches[0]
+          expected = {
+              "tag_name": os.environ["TAG"],
+              "target_commitish": os.environ["SOURCE_SHA"],
+              "name": os.environ["TITLE"],
+              "draft": True,
+              "prerelease": False,
+          }
+          actual = {name: release.get(name) for name in expected}
+          if actual != expected:
+              raise SystemExit(
+                  f"existing release is not the resumable draft for this source: {actual!r}"
+              )
+          release_id = release.get("id")
+          if isinstance(release_id, bool) or not isinstance(release_id, int) or release_id <= 0:
+              raise SystemExit(f"existing draft has invalid release ID {release_id!r}")
+          print(release_id, end="")
+          PY
+          )"
+
+          if [[ -z "$release_id" ]]; then
+            created_json="$RUNNER_TEMP/created-release.json"
+            gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
+              --raw-field tag_name="$TAG" \
+              --raw-field target_commitish="$SOURCE_SHA" \
+              --raw-field name="$TITLE" \
+              --field draft=true \
+              --field prerelease=false \
+              --field generate_release_notes=true > "$created_json"
+            release_id="$(CREATED_JSON="$created_json" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          release = json.loads(Path(os.environ["CREATED_JSON"]).read_text(encoding="utf-8"))
+          expected = {
+              "tag_name": os.environ["TAG"],
+              "target_commitish": os.environ["SOURCE_SHA"],
+              "name": os.environ["TITLE"],
+              "draft": True,
+              "prerelease": False,
+          }
+          actual = {name: release.get(name) for name in expected}
+          if actual != expected:
+              raise SystemExit(f"created draft has unexpected identity: {actual!r}")
+          release_id = release.get("id")
+          if isinstance(release_id, bool) or not isinstance(release_id, int) or release_id <= 0:
+              raise SystemExit(f"created draft has invalid release ID {release_id!r}")
+          print(release_id, end="")
+          PY
+            )"
           fi
 
-          echo "$TAG from $SOURCE_SHA: build → sign → verify → publish" \
-            >> "$GITHUB_STEP_SUMMARY"
+          rm -f -- "$releases_json" "$RUNNER_TEMP/created-release.json"
+          printf 'release_id=%s\n' "$release_id" >> "$GITHUB_OUTPUT"
+          printf 'RELEASE_ID=%s\n' "$release_id" >> "$GITHUB_ENV"
 
-  publish:
-    name: Build, verify, and publish
-    needs: prepare
-    uses: ./.github/workflows/_build-release.yml
-    with:
-      source_sha: ${{ needs.prepare.outputs.source_sha }}
-      tag: ${{ needs.prepare.outputs.tag }}
-      version: ${{ needs.prepare.outputs.version }}
-    secrets: inherit
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      # GStreamer and libudev for the target, unpacked from the robot's Debian packages.
+      # The cache key includes the package recipe, so changing that recipe invalidates the sysroot.
+      - name: Cache the aarch64 sysroot
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/duck-sysroot
+          key: duck-sysroot-${{ hashFiles('scripts/cross-sysroot.sh') }}
+
+      - name: Target GStreamer and libudev as a sysroot
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DUCK_SYSROOT="$HOME/.cache/duck-sysroot"
+          sh scripts/cross-sysroot.sh | tee /tmp/sysroot.log
+          eval "$(grep '^export' /tmp/sysroot.log)"
+          {
+            echo "PKG_CONFIG_SYSROOT_DIR=$PKG_CONFIG_SYSROOT_DIR"
+            echo "PKG_CONFIG_LIBDIR=$PKG_CONFIG_LIBDIR"
+            echo "PKG_CONFIG_ALLOW_CROSS=$PKG_CONFIG_ALLOW_CROSS"
+            echo "RUSTFLAGS=$RUSTFLAGS"
+          } >> "$GITHUB_ENV"
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.14.1
+
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked
+
+      - name: Build for the board
+        shell: bash
+        env:
+          DUCK_REVISION: ${{ steps.identity.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          export DUCK_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          cargo board --bins
+
+      - name: Package release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p staged
+          cp target/aarch64-unknown-linux-gnu/release/updaterd staged/
+          cp target/aarch64-unknown-linux-gnu/release/robotctl staged/
+          cp target/aarch64-unknown-linux-gnu/release/robotd staged/
+          cp target/aarch64-unknown-linux-gnu/release/configd staged/
+          cp target/aarch64-unknown-linux-gnu/release/btd staged/
+          cp target/aarch64-unknown-linux-gnu/release/padd staged/
+          cp target/aarch64-unknown-linux-gnu/release/mediad staged/
+          cp target/aarch64-unknown-linux-gnu/release/sounds staged/
+          cp target/aarch64-unknown-linux-gnu/release/pet-detect staged/
+          cp target/aarch64-unknown-linux-gnu/release/pet-features staged/
+          cp target/aarch64-unknown-linux-gnu/release/tofd staged/
+
+          cargo run -p xtask -- package \
+            --version "$VERSION" \
+            --channel daemon \
+            --bin-dir staged \
+            --out dist \
+            --base-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG" \
+            --revision "$SOURCE_SHA" \
+            --include "updater/systemd/updaterd.service=systemd/updaterd.service" \
+            --include "updater/systemd/sysusers.d/robot.conf=systemd/sysusers.d/robot.conf" \
+            --include "robotd/systemd/robotd.service=systemd/robotd.service" \
+            --include "hooks/postinstall=hooks/postinstall" \
+            --include "scripts/setup-openrb.sh=scripts/setup-openrb.sh" \
+            --include "scripts/setup-gstreamer.sh=scripts/setup-gstreamer.sh" \
+            --include "scripts/setup-npu.sh=scripts/setup-npu.sh" \
+            --include "deploy/overlays/rk3568-npu-enable.dts=deploy/overlays/rk3568-npu-enable.dts" \
+            --include "scripts/setup-rkaiq.sh=scripts/setup-rkaiq.sh" \
+            --include "scripts/rkaiq-modinfo-shim.c=scripts/rkaiq-modinfo-shim.c" \
+            --include "scripts/setup-login.sh=scripts/setup-login.sh" \
+            --include "scripts/setup-quiet-boot.sh=scripts/setup-quiet-boot.sh" \
+            --include "scripts/seed-policies.sh=scripts/seed-policies.sh" \
+            --include "scripts/seed-detector.sh=scripts/seed-detector.sh" \
+            --include "scripts/robot-rescue=scripts/robot-rescue" \
+            --include "scripts/robot-boot-check=scripts/robot-boot-check" \
+            --include "updater/systemd/robot-boot-check.service=systemd/robot-boot-check.service" \
+            --include "updater/systemd/robot-boot-check.timer=systemd/robot-boot-check.timer" \
+            --include "configd/systemd/configd.service=systemd/configd.service" \
+            --include "btd/systemd/btd.service=systemd/btd.service" \
+            --include "btd/systemd/sysusers.d/btd.conf=systemd/sysusers.d/btd.conf" \
+            --include "padd/systemd/padd.service=systemd/padd.service" \
+            --include "padd/systemd/sysusers.d/padd.conf=systemd/sysusers.d/padd.conf" \
+            --include "mediad/systemd/mediad.service=systemd/mediad.service" \
+            --include "mediad/systemd/sysusers.d/mediad.conf=systemd/sysusers.d/mediad.conf" \
+            --include "tof/systemd/tofd.service=systemd/tofd.service" \
+            --include "tof/systemd/sysusers.d/tofd.conf=systemd/sysusers.d/tofd.conf" \
+            --include "deploy/journald.conf.d/10-robot.conf=deploy/journald.conf.d/10-robot.conf" \
+            --include "docs/design/architecture.md=docs/architecture.md" \
+            --include "docs/design/updater-design.md=docs/updater-design.md" \
+            --include "deploy/README.md=docs/deploy.md" \
+            --include "pet-detect/models/pet_detect.onnx=models/pet_detect.onnx"
+
+          # A stock board downloads this bare binary to enter the update engine. It must be the
+          # same bytes as bin/updaterd inside the packaged artifact.
+          cp staged/updaterd dist/updaterd-bootstrap-aarch64
+
+      - name: Verify package and record asset identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          dist = Path("dist")
+          names = [
+              "manifest.json",
+              os.environ["LOCAL_MANIFEST"],
+              os.environ["ARTIFACT"],
+              "updaterd-bootstrap-aarch64",
+          ]
+          actual_names = sorted(path.name for path in dist.iterdir() if path.is_file())
+          if actual_names != sorted(names):
+              raise SystemExit(
+                  f"release must contain exactly {sorted(names)!r}; got {actual_names!r}"
+              )
+          def digest(path: Path) -> str:
+              value = hashlib.sha256()
+              with path.open("rb") as stream:
+                  for block in iter(lambda: stream.read(1024 * 1024), b""):
+                      value.update(block)
+              return value.hexdigest()
+
+          artifact = dist / os.environ["ARTIFACT"]
+          artifact_sha256 = digest(artifact)
+          artifact_size = artifact.stat().st_size
+          expected_url = (
+              f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/download/"
+              f"{os.environ['TAG']}/{os.environ['ARTIFACT']}"
+          )
+
+          manifests = [
+              (dist / "manifest.json", expected_url),
+              (dist / os.environ["LOCAL_MANIFEST"], os.environ["ARTIFACT"]),
+          ]
+          for path, expected_url_value in manifests:
+              value = json.loads(path.read_text(encoding="utf-8"))
+              expected = {
+                  "channel": "daemon",
+                  "version": os.environ["VERSION"],
+                  "url": expected_url_value,
+                  "sha256": artifact_sha256,
+                  "size": artifact_size,
+                  "source_revision": os.environ["SOURCE_SHA"],
+              }
+              actual = {name: value.get(name) for name in expected}
+              if actual != expected:
+                  raise SystemExit(f"{path} does not identify the built artifact: {actual!r}")
+
+          bootstrap = dist / "updaterd-bootstrap-aarch64"
+          staged_updater = Path("staged/updaterd")
+          if digest(bootstrap) != digest(staged_updater):
+              raise SystemExit("bootstrap updaterd differs from the updaterd packaged in staged/")
+
+          assets = []
+          for name in names:
+              path = dist / name
+              size = path.stat().st_size
+              if not 0 < size < 2**31:
+                  raise SystemExit(f"release asset has invalid size: {name!r}: {size}")
+              assets.append({"name": name, "size": size, "sha256": digest(path)})
+
+          metadata = Path(os.environ["RUNNER_TEMP"], "release-assets.json")
+          metadata.write_text(json.dumps(assets, sort_keys=True), encoding="utf-8")
+          for asset in assets:
+              print(f"{asset['sha256']}  dist/{asset['name']}")
+          PY
+
+      - name: Verify the way a robot would
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p verify/published verify/opt verify/var
+          cp "dist/$LOCAL_MANIFEST" verify/published/
+          cp "dist/$ARTIFACT" verify/published/
+
+          # Use the production restart and health settings. `updaterd install` must override them
+          # for a first install, because neither systemd units nor robotd exist before the archive
+          # lands. Keeping the real values here prevents a CI-only inert config from hiding drift.
+          cat > verify/updater.toml <<EOF
+          hw_rev = 1
+          state_dir = "$PWD/verify/var"
+
+          [component.daemon]
+          install_dir = "$PWD/verify/opt/daemon"
+          source = { type = "github_releases", repo = "$GITHUB_REPOSITORY", tag_prefix = "daemon-v" }
+          on_apply = { action = "restart", units = ["robotd"] }
+          health = { probe = "socket", timeout = "30s" }
+          EOF
+
+          # Let the real preinstall hook take its already-satisfied branch. The hosted runner is
+          # x86_64, so downloading the aarch64 ONNX Runtime here would neither load nor prove more.
+          onnx_target="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.metadata.onnxruntime.target')"
+          sudo touch "/usr/local/lib/libonnxruntime.so.${onnx_target}"
+          sudo ln -sfn "libonnxruntime.so.${onnx_target}" /usr/local/lib/libonnxruntime.so
+
+          # Build the host-native updater first, then run only that binary under sudo. Running
+          # cargo as root would leave root-owned files in the cached target directory.
+          cargo build -p updater --bin updaterd
+          sudo ./target/debug/updaterd install \
+            --config verify/updater.toml \
+            --from verify/published
+
+          for required in \
+            bin/updaterd \
+            bin/robotd \
+            bin/robotctl \
+            systemd/updaterd.service \
+            systemd/robotd.service \
+            systemd/sysusers.d/robot.conf \
+            deploy/journald.conf.d/10-robot.conf \
+            version.toml
+          do
+            if [[ ! -e "verify/opt/daemon/current/$required" ]]; then
+              echo "::error::release is missing $required"
+              exit 1
+            fi
+          done
+          test -x verify/opt/daemon/current/bin/updaterd
+          test -x verify/opt/daemon/current/bin/robotd
+
+          boot_sum="$(sha256sum dist/updaterd-bootstrap-aarch64 | cut -d' ' -f1)"
+          installed_sum="$(sha256sum verify/opt/daemon/current/bin/updaterd | cut -d' ' -f1)"
+          if [[ "$boot_sum" != "$installed_sum" ]]; then
+            echo "::error::updaterd-bootstrap-aarch64 does not match installed bin/updaterd"
+            exit 1
+          fi
+          grep -q "revision" verify/opt/daemon/current/version.toml
+          cat verify/opt/daemon/current/version.toml
+          echo "the updater accepted this hash-verified release"
+
+      - name: Upload exact assets to the draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > "$RUNNER_TEMP/draft.json"
+          DRAFT_JSON="$RUNNER_TEMP/draft.json" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          release = json.loads(Path(os.environ["DRAFT_JSON"]).read_text(encoding="utf-8"))
+          expected = {
+              "id": int(os.environ["RELEASE_ID"]),
+              "tag_name": os.environ["TAG"],
+              "target_commitish": os.environ["SOURCE_SHA"],
+              "name": os.environ["TITLE"],
+              "draft": True,
+              "prerelease": False,
+          }
+          actual = {name: release.get(name) for name in expected}
+          if actual != expected:
+              raise SystemExit(f"prepared draft identity changed before upload: {actual!r}")
+          PY
+
+          python3 - <<'PY' > "$RUNNER_TEMP/release-assets.tsv"
+          import json
+          import os
+          from pathlib import Path
+
+          assets = json.loads(
+              Path(os.environ["RUNNER_TEMP"], "release-assets.json").read_text(encoding="utf-8")
+          )
+          for asset in assets:
+              print(f"{asset['name']}\t{asset['size']}\t{asset['sha256']}")
+          PY
+
+          while IFS=$'\t' read -r name size sha256; do
+            gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?per_page=100" \
+              > "$RUNNER_TEMP/existing-assets.json"
+            existing_id="$(ASSET_NAME="$name" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          assets = json.loads(
+              Path(os.environ["RUNNER_TEMP"], "existing-assets.json").read_text(encoding="utf-8")
+          )
+          matches = [asset for asset in assets if asset.get("name") == os.environ["ASSET_NAME"]]
+          if len(matches) > 1:
+              raise SystemExit(f"duplicate draft assets named {os.environ['ASSET_NAME']!r}")
+          if matches:
+              asset_id = matches[0].get("id")
+              if isinstance(asset_id, bool) or not isinstance(asset_id, int) or asset_id <= 0:
+                  raise SystemExit(f"existing draft asset has invalid ID {asset_id!r}")
+              print(asset_id, end="")
+          PY
+            )"
+            if [[ -n "$existing_id" ]]; then
+              gh api --method DELETE \
+                "repos/$GITHUB_REPOSITORY/releases/assets/$existing_id" > /dev/null
+            fi
+
+            encoded_name="$(ASSET_NAME="$name" python3 - <<'PY'
+          import os
+          import urllib.parse
+          print(urllib.parse.quote(os.environ["ASSET_NAME"], safe=""), end="")
+          PY
+            )"
+            uploaded_json="$RUNNER_TEMP/uploaded-asset.json"
+            curl --fail-with-body --silent --show-error \
+              --request POST \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              --header "Content-Type: application/octet-stream" \
+              --upload-file "dist/$name" \
+              "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$encoded_name" \
+              > "$uploaded_json"
+
+            UPLOADED_JSON="$uploaded_json" ASSET_NAME="$name" ASSET_SIZE="$size" \
+              ASSET_SHA256="$sha256" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          uploaded = json.loads(Path(os.environ["UPLOADED_JSON"]).read_text(encoding="utf-8"))
+          expected = {
+              "name": os.environ["ASSET_NAME"],
+              "state": "uploaded",
+              "size": int(os.environ["ASSET_SIZE"]),
+              "digest": f"sha256:{os.environ['ASSET_SHA256']}",
+          }
+          actual = {name: uploaded.get(name) for name in expected}
+          if actual != expected:
+              raise SystemExit(f"GitHub returned an unexpected release asset: {actual!r}")
+          PY
+          done < "$RUNNER_TEMP/release-assets.tsv"
+
+      - name: Verify exact draft assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > "$RUNNER_TEMP/release.json"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          release = json.loads(
+              Path(os.environ["RUNNER_TEMP"], "release.json").read_text(encoding="utf-8")
+          )
+          expected_release = {
+              "id": int(os.environ["RELEASE_ID"]),
+              "tag_name": os.environ["TAG"],
+              "target_commitish": os.environ["SOURCE_SHA"],
+              "name": os.environ["TITLE"],
+              "draft": True,
+              "prerelease": False,
+          }
+          actual_release = {name: release.get(name) for name in expected_release}
+          if actual_release != expected_release:
+              raise SystemExit(f"draft release identity changed before publication: {actual_release!r}")
+
+          metadata = json.loads(
+              Path(os.environ["RUNNER_TEMP"], "release-assets.json").read_text(encoding="utf-8")
+          )
+          expected = {
+              asset["name"]: {
+                  "size": asset["size"],
+                  "digest": f"sha256:{asset['sha256']}",
+              }
+              for asset in metadata
+          }
+          assets = release.get("assets")
+          if not isinstance(assets, list) or any(not isinstance(asset, dict) for asset in assets):
+              raise SystemExit("release assets are not an array of objects")
+          actual = {
+              asset.get("name"): asset
+              for asset in assets
+              if isinstance(asset.get("name"), str)
+          }
+          if len(actual) != len(assets) or set(actual) != set(expected):
+              raise SystemExit(
+                  f"draft must contain exactly {sorted(expected)!r}; got {sorted(actual)!r}"
+              )
+          for name, identity in expected.items():
+              asset = actual[name]
+              if asset.get("state") != "uploaded":
+                  raise SystemExit(f"release asset is not uploaded: {name!r}")
+              if asset.get("size") != identity["size"]:
+                  raise SystemExit(
+                      f"release asset size differs from local build: {name!r}: "
+                      f"{asset.get('size')!r} != {identity['size']!r}"
+                  )
+              if asset.get("digest") != identity["digest"]:
+                  raise SystemExit(
+                      f"release asset digest differs from local build: {name!r}: "
+                      f"{asset.get('digest')!r} != {identity['digest']!r}"
+                  )
+          PY
+
+      - name: Create or verify the lightweight release tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          repository_owner="${GITHUB_REPOSITORY%%/*}"
+          repository_name="${GITHUB_REPOSITORY#*/}"
+          qualified_tag="refs/tags/$TAG"
+
+          query_tag() {
+            gh api graphql \
+              -f owner="$repository_owner" \
+              -f name="$repository_name" \
+              -f qualified="$qualified_tag" \
+              -f query='query($owner: String!, $name: String!, $qualified: String!) {
+                repository(owner: $owner, name: $name) {
+                  ref(qualifiedName: $qualified) { target { __typename oid } }
+                }
+              }' \
+              --jq '.data.repository.ref.target // {} |
+                if .oid == null then "" else [.__typename, .oid] | @tsv end'
+          }
+
+          tag_state="$(query_tag)"
+          if [[ -z "$tag_state" ]]; then
+            create_error="$RUNNER_TEMP/create-release-tag-error.txt"
+            if ! gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              --raw-field ref="$qualified_tag" \
+              --raw-field sha="$SOURCE_SHA" \
+              > /dev/null 2> "$create_error"; then
+              tag_state="$(query_tag)"
+              IFS=$'\t' read -r raced_type raced_sha <<< "$tag_state"
+              if [[ "$raced_type" != "Commit" || "$raced_sha" != "$SOURCE_SHA" ]]; then
+                cat "$create_error" >&2
+                exit 1
+              fi
+            fi
+            rm -f -- "$create_error"
+          fi
+
+          tag_state="$(query_tag)"
+          IFS=$'\t' read -r object_type current_sha <<< "$tag_state"
+          if [[ "$object_type" != "Commit" || "$current_sha" != "$SOURCE_SHA" ]]; then
+            echo "Release tag must be a lightweight tag at $SOURCE_SHA; got $object_type $current_sha." >&2
+            exit 1
+          fi
+
+      - name: Publish the verified release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          provenance="Built from \`$SOURCE_SHA\` by the manual release workflow.
+
+          Every published asset's size and SHA-256 digest was checked locally and against GitHub before publication."
+          notes="$(PROVENANCE="$provenance" ./scripts/ci-release-notes.sh)"
+
+          request_json="$RUNNER_TEMP/publish-release.json"
+          REQUEST_JSON="$request_json" NOTES="$notes" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          request = {
+              "name": os.environ["TITLE"],
+              "body": os.environ["NOTES"],
+              "draft": False,
+              "prerelease": False,
+              "make_latest": "true",
+          }
+          Path(os.environ["REQUEST_JSON"]).write_text(json.dumps(request), encoding="utf-8")
+          PY
+
+          published_json="$RUNNER_TEMP/published-release.json"
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            --input "$request_json" > "$published_json"
+          PUBLISHED_JSON="$published_json" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          release = json.loads(Path(os.environ["PUBLISHED_JSON"]).read_text(encoding="utf-8"))
+          expected = {
+              "id": int(os.environ["RELEASE_ID"]),
+              "tag_name": os.environ["TAG"],
+              "target_commitish": os.environ["SOURCE_SHA"],
+              "name": os.environ["TITLE"],
+              "draft": False,
+              "prerelease": False,
+          }
+          actual = {name: release.get(name) for name in expected}
+          if actual != expected:
+              raise SystemExit(f"published release differs from verified draft: {actual!r}")
+          PY
+
+          published_tag="$(
+            gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" \
+              --jq '.object | [.type, .sha] | @tsv'
+          )"
+          IFS=$'\t' read -r object_type published_sha <<< "$published_tag"
+          if [[ "$object_type" != "commit" || "$published_sha" != "$SOURCE_SHA" ]]; then
+            echo "Published tag must be a lightweight tag at $SOURCE_SHA; got $object_type $published_sha." >&2
+            exit 1
+          fi
+
+          latest_tag="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
+          if [[ "$latest_tag" != "$TAG" ]]; then
+            echo "Published release was not marked Latest: expected $TAG, got ${latest_tag:-missing}." >&2
+            exit 1
+          fi
+
+          {
+            echo "Published $TAG from $SOURCE_SHA"
+            echo
+            echo "Verified four exact release assets by byte size and SHA-256 before publication."
+          } >> "$GITHUB_STEP_SUMMARY"

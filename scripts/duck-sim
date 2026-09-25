@@ -338,10 +338,6 @@ TOML
         # `boot`'s business: these daemons are not units, so there is nothing to restart and
         # `on_apply` names nothing.
         #
-        # **The repo's own trust anchor, not an empty directory.** updaterd refuses to start
-        # without one — correctly, since a trust anchor nobody filled in verifies everything — and
-        # these are the three release keys install.sh puts on a robot.
-        #
         # Backticks in this heredoc are escaped, because it is unquoted: that is what expands the
         # paths, and it is also what would run a bare backtick pair as a command. The robotd.toml
         # heredoc above carries the same warning, written there after a bare pair was executed in
@@ -349,7 +345,6 @@ TOML
         # unescaped pair anyway. A prose warning cannot fail a build; SC2006 can, which is why
         # this script is in the shellcheck list now.
         cat > "$STATE/updater-$name.toml" <<TOML
-trusted_keys_dir = "$REPO/deploy/trusted_keys"
 hw_rev = 1
 state_dir = "$STATE/$name/updater"
 robot_socket = "$STATE/$name.sock"

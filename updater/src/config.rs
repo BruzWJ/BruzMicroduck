@@ -1,8 +1,8 @@
 //! Per-robot configuration.
 //!
 //! The engine is generic; everything robot-specific lives here. Adapting to a
-//! different robot should mean a new config file, new signing keys, and possibly
-//! a new health probe — not engine changes. See `docs/design/updater-design.md` §10.
+//! different robot should mean a new config file and possibly a new health probe —
+//! not engine changes. See `docs/design/updater-design.md` §10.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -27,13 +27,6 @@ pub struct Config {
     /// board.
     #[serde(skip)]
     pub loaded_from: Option<PathBuf>,
-
-    /// Directory of trusted minisign public keys. A signature is valid if it
-    /// verifies against *any* key in here.
-    ///
-    /// A set rather than one key so a lost or compromised key is survivable —
-    /// see `docs/design/updater-design.md` §5.4.
-    pub trusted_keys_dir: PathBuf,
 
     /// Single forward-compatibility guard. An artifact declaring a higher
     /// `min_hw_rev` than this is refused.
@@ -66,11 +59,6 @@ pub struct Config {
     /// `robotd` may legitimately be stopped, crashed, or not yet installed.
     #[serde(default = "default_robot_socket")]
     pub robot_socket: PathBuf,
-
-    /// Accept artifacts signed with a key marked dev-only. Off in production.
-    /// See `docs/design/updater-design.md` §15.
-    #[serde(default)]
-    pub allow_dev_keys: bool,
 
     /// Permit `--inject-fault`. Off in production; a client robot must not be able
     /// to be told to fail on purpose. See [`crate::faults`].
@@ -206,8 +194,7 @@ pub enum AutoApply {
 
     /// Any available release.
     ///
-    /// For canary and bench robots — §16.2's Tier 2 wants lab robots that track
-    /// `staging` and update on every candidate. On a client robot this takes the
+    /// For canary and bench robots. On a client robot this takes the
     /// "when does my robot restart" decision away from its owner, which is the decision
     /// the whole app-driven update flow exists to give them.
     All,
@@ -234,7 +221,7 @@ pub enum SourceConfig {
         repo: String,
         /// Tag prefix identifying the channel, e.g. `daemon-v`.
         tag_prefix: String,
-        /// Release asset holding the signed manifest.
+        /// Release asset holding the manifest.
         #[serde(default = "default_manifest_asset")]
         manifest_asset: String,
         /// Tag prefix for per-branch dev builds, so `--ref my-branch` resolves to
@@ -246,15 +233,6 @@ pub enum SourceConfig {
         /// resolving `latest` for the fleet.
         #[serde(default = "default_ref_tag_prefix")]
         ref_tag_prefix: String,
-        /// Tag prefix for release candidates, so `--staging` resolves to
-        /// `daemon-staging-v<version>`.
-        ///
-        /// A third prefix rather than a flag on `tag_prefix`, for the reason the second one
-        /// exists: the streams must not be confusable. A candidate is flagged as a prerelease
-        /// on GitHub precisely so `newest_version` cannot reach it, and giving that scan an
-        /// "unless…" would put the fleet one config typo away from tracking candidates.
-        #[serde(default = "default_staging_tag_prefix")]
-        staging_tag_prefix: String,
     },
     HfHub {
         /// `ORG/MODEL`.
@@ -276,11 +254,6 @@ pub enum SourceConfig {
 /// with a differently-named channel sets it explicitly, the same as `tag_prefix`.
 fn default_ref_tag_prefix() -> String {
     "daemon-dev-".to_owned()
-}
-
-/// Default prefix for release-candidate tags, matching what `release.yml` pushes.
-fn default_staging_tag_prefix() -> String {
-    "daemon-staging-v".to_owned()
 }
 
 fn default_manifest_asset() -> String {
@@ -535,15 +508,9 @@ mod tests {
         // with no such unit — and a teammate hitting that would have no reason to suspect the
         // packaging rather than their own branch.
         //
-        // `_build-release.yml`, not `release.yml`: the packaging recipe lives in the reusable
-        // workflow that both the staging and the stable path call, and `release.yml` is now only the
-        // entry point choosing between them. The assertion below fails loudly on a file it cannot
-        // parse, which is what caught this rename rather than silently passing.
-        let workflows = [
-            ".github/workflows/_build-release.yml",
-            ".github/workflows/dev.yml",
-        ]
-        .map(|w| {
+        // Stable packaging lives in the manual release entry point; development packaging has
+        // its own workflow because it publishes the moving branch build.
+        let workflows = [".github/workflows/release.yml", ".github/workflows/dev.yml"].map(|w| {
             (
                 w,
                 std::fs::read_to_string(repo.join(w)).unwrap_or_else(|_| panic!("{w} must exist")),
@@ -590,9 +557,9 @@ mod tests {
     /// values are asserted rather than reviewed.
     ///
     /// Every one of these is a single word or `true`/`false` away from being wrong in a way
-    /// no diff makes obvious: a robot that trusts dev keys, one that can be told to fail on
-    /// purpose, one that never polls and so can never be pulled off a withdrawn release, or
-    /// one whose update gate does not gate. All four look fine and behave fine right up to
+    /// no diff makes obvious: a robot that can be told to fail on purpose, one that never polls
+    /// and so can never be pulled off a withdrawn release, or one whose update gate does not
+    /// gate. All three look fine and behave fine right up to
     /// the moment they matter.
     #[test]
     fn shipped_config_is_safe_for_a_client_robot() {
@@ -603,10 +570,6 @@ mod tests {
             .expect("deploy/updater.toml must exist — scripts/install.sh installs it");
         let config = Config::from_toml(&text).expect("the shipped config must be valid");
 
-        assert!(
-            !config.allow_dev_keys,
-            "a client robot must not trust dev keys: it would install anything a teammate builds"
-        );
         assert!(
             !config.allow_fault_injection,
             "a client robot must not accept --inject-fault"
@@ -691,14 +654,7 @@ mod tests {
             daemon.health
         );
 
-        // The stable channel, not staging. A robot on `daemon-staging-v` would install
-        // every candidate build.
-        let SourceConfig::GithubReleases {
-            tag_prefix,
-            staging_tag_prefix,
-            ..
-        } = &daemon.source
-        else {
+        let SourceConfig::GithubReleases { tag_prefix, .. } = &daemon.source else {
             panic!(
                 "the shipped daemon source must be github_releases, got {:?}",
                 daemon.source
@@ -708,15 +664,6 @@ mod tests {
             tag_prefix, "daemon-v",
             "the shipped config must track the stable channel"
         );
-        // The shipped config names no staging prefix, so `--staging` on a customer robot
-        // depends on this default matching what `release.yml` actually pushes. A wrong
-        // default would fail with "no releases with tag prefix", which reads as "there is no
-        // candidate" rather than "this board is looking in the wrong place".
-        assert_eq!(
-            staging_tag_prefix, "daemon-staging-v",
-            "the default candidate prefix must match the tag release.yml pushes"
-        );
-
         // Only components that have somewhere real to fetch from. A component whose
         // source 404s makes the periodic check report a failure for something nobody has
         // shipped, which teaches whoever reads robot status to ignore failures.
@@ -784,7 +731,6 @@ mod tests {
     #[test]
     fn policy_library_defaults_to_the_board_and_can_be_moved() {
         let base = r#"
-            trusted_keys_dir = "/etc/robot/keys"
             hw_rev = 1
             state_dir = "/var/lib/robot/updater"
             [component.daemon]
@@ -817,7 +763,6 @@ mod tests {
     #[test]
     fn auto_apply_defaults_to_mandatory_and_parses_each_variant() {
         let base = r#"
-            trusted_keys_dir = "/etc/robot/keys"
             hw_rev = 1
             state_dir = "/var/lib/robot/updater"
             [component.daemon]
@@ -858,7 +803,6 @@ mod tests {
     fn health_timeout_accepts_humantime() {
         let config = Config::from_toml(
             r#"
-            trusted_keys_dir = "/etc/robot/keys"
             hw_rev = 1
             state_dir = "/var/lib/robot/updater"
             [component.daemon]
@@ -879,7 +823,6 @@ mod tests {
     fn config_with(extra_component: &str) -> Result<Config, crate::Error> {
         Config::from_toml(&format!(
             r#"
-            trusted_keys_dir = "/etc/robot/keys"
             hw_rev = 1
             state_dir = "/var/lib/robot/updater"
             {extra_component}
@@ -891,7 +834,6 @@ mod tests {
     fn rejects_state_dir_inside_install_dir() {
         let err = Config::from_toml(
             r#"
-            trusted_keys_dir = "/etc/robot/keys"
             hw_rev = 1
             state_dir = "/opt/robot/daemon/state"
             [component.daemon]
@@ -958,7 +900,6 @@ mod tests {
     fn rejects_empty_components() {
         let err = Config::from_toml(
             r#"
-            trusted_keys_dir = "/etc/robot/keys"
             hw_rev = 1
             state_dir = "/var/lib/robot/updater"
             "#,

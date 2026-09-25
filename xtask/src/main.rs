@@ -1,18 +1,11 @@
-//! Build tooling for packaging and signing robot releases.
+//! Build tooling for packaging robot releases.
 //!
-//! This is the **publisher** side of the update contract. It never ships to a robot —
-//! notably it links the full `minisign` crate (which can sign), while `updaterd` links
-//! only `minisign-verify` (which cannot).
-//!
-//! Written in Rust rather than as a shell script for one reason: it reuses the exact
-//! same `minisign`, `tar`, `zstd` and `sha2` crates the updater's tests use. A shell
-//! version would depend on separately-installed `minisign`/`tar`/`zstd` binaries whose
-//! behaviour could drift from what the robot verifies with — which is the last place a
-//! difference should be allowed to hide.
+//! This is the **publisher** side of the update contract. It never ships to a robot.
+//! Written in Rust so packaging uses the same `tar`, `zstd` and `sha2` formats the
+//! updater consumes instead of depending on separately-installed command-line tools.
 //!
 //! ```text
 //!   cargo xtask package --version 1.2.3 --channel daemon --bin-dir <dir> --out dist/
-//!   cargo xtask sign    --dir dist/ --key secret.key
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -21,19 +14,9 @@ use clap::{Parser, Subcommand};
 
 /// Files inside the artifact that the robot expects.
 const VERSION_FILE: &str = "version.toml";
-const SIG_SUFFIX: &str = ".minisig";
-
-#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-enum KeyKind {
-    /// Long-lived, encrypted at rest, trusted by every robot including customers'.
-    Release,
-    /// For signing branch builds. Unencrypted so CI needs no passphrase, and present
-    /// only in the trusted set of *developer* boards.
-    Dev,
-}
 
 #[derive(Parser)]
-#[command(about = "Package and sign robot releases", version)]
+#[command(about = "Package robot releases", version)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -41,7 +24,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Assemble a `.tar.zst` artifact and its unsigned manifest.
+    /// Assemble a `.tar.zst` artifact and its SHA-256 manifest.
     Package {
         /// Release version. Must match the crate version — see `--allow-version-drift`.
         #[arg(long)]
@@ -91,64 +74,6 @@ enum Command {
         #[arg(long, default_value_t = 19)]
         zstd_level: i32,
     },
-
-    /// Sign the artifact and manifest in `--dir` with a minisign secret key.
-    Sign {
-        #[arg(long, default_value = "dist")]
-        dir: PathBuf,
-
-        /// Secret key file. In CI, write the secret to a file first — passing a key on
-        /// a command line would put it in the process list.
-        #[arg(long)]
-        key: PathBuf,
-
-        /// Passphrase for an encrypted key. Prefer `MINISIGN_PASSWORD` in the
-        /// environment; a passphrase in argv is visible to every process on the box.
-        #[arg(long, env = "MINISIGN_PASSWORD", hide_env_values = true)]
-        password: Option<String>,
-    },
-
-    /// Generate a signing keypair.
-    ///
-    /// Two kinds, because they have different threat models and different lifetimes —
-    /// see the `keygen` function for why the release *spare* must be generated now.
-    Keygen {
-        /// `release` (encrypted, long-lived, trusted by every robot) or `dev`
-        /// (unencrypted so CI can use it non-interactively, never on a customer robot).
-        #[arg(long)]
-        kind: KeyKind,
-
-        /// Base name. Produces `<name>.pub` and `<name>.key`. A `dev` key is written as
-        /// `<name>.dev.pub` so the updater's dev-key gating recognises it.
-        #[arg(long)]
-        name: String,
-
-        /// Where to write them. Must be OUTSIDE the repository — see below.
-        #[arg(long)]
-        out: PathBuf,
-
-        /// Passphrase for a release key. Prefer the environment over argv.
-        #[arg(long, env = "MINISIGN_PASSWORD", hide_env_values = true)]
-        password: Option<String>,
-    },
-
-    /// Check that a keypair is usable, and that the public half matches the secret.
-    ///
-    /// Worth doing *before* relying on a key. A key that turns out to be unusable — bad
-    /// passphrase, mismatched pair, truncated file — is discovered either now, or at the
-    /// moment you need to sign a fix for a fleet of robots.
-    Keycheck {
-        /// Secret key to test.
-        #[arg(long)]
-        key: PathBuf,
-
-        /// Its public half. Defaults to the same path with `.key` → `.pub`.
-        #[arg(long)]
-        public: Option<PathBuf>,
-
-        #[arg(long, env = "MINISIGN_PASSWORD", hide_env_values = true)]
-        password: Option<String>,
-    },
 }
 
 fn main() -> std::process::ExitCode {
@@ -188,18 +113,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             allow_version_drift,
             zstd_level,
         }),
-        Command::Keygen {
-            kind,
-            name,
-            out,
-            password,
-        } => keygen(kind, &name, &out, password.as_deref()),
-        Command::Keycheck {
-            key,
-            public,
-            password,
-        } => keycheck(&key, public.as_deref(), password.as_deref()),
-        Command::Sign { dir, key, password } => sign_dir(&dir, &key, password.as_deref()),
     }
 }
 
@@ -349,7 +262,6 @@ fn package(args: PackageArgs) -> Result<(), Box<dyn std::error::Error>> {
         "version": args.version,
         "url": url,
         "sha256": digest,
-        "sig_url": format!("{url}{SIG_SUFFIX}"),
         "size": bytes.len(),
         "min_hw_rev": args.min_hw_rev,
         "schema_version": 1,
@@ -365,15 +277,10 @@ fn package(args: PackageArgs) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
 
     // A second manifest whose `url` is a bare filename, which is what `LocalDir`
-    // expects. Emitted here so both variants are signed in the same pass:
-    //
-    //  - CI verifies the release through the robot's own code path without needing the
-    //    signing key a second time (fewer places the key is handled is worth more than
-    //    one fewer file);
-    //  - a developer can drop artifact + this manifest into a directory and sideload it.
+    // expects. CI uses it to verify the release through the robot's own install path,
+    // and a developer can drop it beside the artifact for a sideload.
     let mut local = manifest.clone();
     local["url"] = serde_json::json!(artifact_name);
-    local["sig_url"] = serde_json::json!(format!("{artifact_name}{SIG_SUFFIX}"));
     let local_path = args.out.join(format!("{}.manifest.json", args.version));
     std::fs::write(&local_path, serde_json::to_vec_pretty(&local)?)?;
 
@@ -381,247 +288,6 @@ fn package(args: PackageArgs) -> Result<(), Box<dyn std::error::Error>> {
     println!("  sha256 {digest}");
     println!("  manifest {}", manifest_path.display());
     println!("  sideload manifest {}", local_path.display());
-    println!(
-        "\nnext: cargo xtask sign --dir {} --key <key>",
-        args.out.display()
-    );
-    Ok(())
-}
-
-/// Generate a keypair and explain what to do with each half.
-///
-/// **Why the release *spare* must exist now.** A robot verifies against the *set* of
-/// public keys baked into its image. If only one release key is baked in and it is
-/// later lost or compromised, there is no way to introduce a replacement over the air —
-/// the robot would have to be re-flashed by hand. Generating a second release key today
-/// and shipping both public keys from the first image means rotation is later just "sign
-/// with the other key". Cheap now, impossible to retrofit.
-///
-/// Refuses to write a secret key inside the repository. Committing a signing key is the
-/// one mistake here that cannot be undone by deleting the file.
-fn keygen(
-    kind: KeyKind,
-    name: &str,
-    out: &Path,
-    password: Option<&str>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let repo = std::env::current_dir()?;
-    let target = out.canonicalize().unwrap_or_else(|_| {
-        // Not created yet; resolve against cwd so the containment check still works.
-        if out.is_absolute() {
-            out.to_path_buf()
-        } else {
-            repo.join(out)
-        }
-    });
-    if target.starts_with(&repo) {
-        return Err(format!(
-            "refusing to write keys inside the repository ({}).\n\
-             A committed signing key cannot be un-leaked by deleting it later.\n\
-             Pick a path outside the working tree, e.g. --out ~/robot-keys",
-            repo.display()
-        )
-        .into());
-    }
-
-    std::fs::create_dir_all(&target)?;
-
-    // The `.dev.` infix is load-bearing, not decoration: `verify::KeyRing` treats a key
-    // whose filename ends in `.dev.pub` as usable only when `allow_dev_keys` is set.
-    let (pub_name, key_name) = match kind {
-        KeyKind::Release => (format!("{name}.pub"), format!("{name}.key")),
-        KeyKind::Dev => (format!("{name}.dev.pub"), format!("{name}.dev.key")),
-    };
-    let pub_path = target.join(&pub_name);
-    let key_path = target.join(&key_name);
-
-    for path in [&pub_path, &key_path] {
-        if path.exists() {
-            return Err(format!(
-                "{} already exists — refusing to overwrite a key",
-                path.display()
-            )
-            .into());
-        }
-    }
-
-    let comment = format!("robot {name} key");
-    let keypair = match kind {
-        KeyKind::Release => {
-            let password = password.map(str::to_owned).ok_or(
-                "a release key must be encrypted: set MINISIGN_PASSWORD or pass --password",
-            )?;
-            minisign::KeyPair::generate_encrypted_keypair(Some(password))?
-        }
-        // Unencrypted on purpose: CI signs non-interactively, and the secret store is
-        // what protects it. An encrypted key plus its passphrase in the same secret
-        // store buys little.
-        KeyKind::Dev => minisign::KeyPair::generate_unencrypted_keypair()?,
-    };
-
-    std::fs::write(&pub_path, keypair.pk.to_box()?.to_string())?;
-    write_private(&key_path, &keypair.sk.to_box(Some(&comment))?.to_string())?;
-
-    println!("wrote {}", pub_path.display());
-    println!("wrote {} (mode 0600)", key_path.display());
-    println!();
-    match kind {
-        KeyKind::Release => {
-            println!("This is a RELEASE key. It is the trust anchor for every robot.");
-            println!();
-            println!("  public  → commit it into deploy/trusted_keys so every robot image");
-            println!("            and the release verification job use the same trust anchor");
-            println!("  private → a password manager or offline store. Never in the repo,");
-            println!("            never on a robot, never in a shared drive.");
-            println!("            The CI secret MINISIGN_SECRET_KEY holds a copy for");
-            println!("            publishing; treat that copy as the exposed one.");
-            println!();
-            println!("Generate a SECOND release key now and ship both public keys:");
-            println!(
-                "  cargo xtask keygen --kind release --name release-2 --out {}",
-                out.display()
-            );
-            println!("Without a spare in the trusted set, a lost key means re-flashing by hand.");
-        }
-        KeyKind::Dev => {
-            println!("This is a DEV key, for signing branch builds.");
-            println!();
-            println!("  public  → trusted_keys_dir of DEVELOPER boards only, alongside");
-            println!("            allow_dev_keys = true in updater.toml");
-            println!("  private → shared with the team (password manager / CI secret)");
-            println!();
-            println!("It must NOT reach a customer robot: a robot that trusts this key");
-            println!("will install anything anyone on the team builds.");
-        }
-    }
-    Ok(())
-}
-
-/// Write a secret key readable only by its owner.
-///
-/// Set before the bytes are written, not after: a key that is briefly world-readable on
-/// a shared machine has already leaked.
-fn write_private(path: &Path, contents: &str) -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(contents.as_bytes())?;
-    file.sync_all()?;
-    Ok(())
-}
-
-/// Prove a keypair can sign, and that the two halves belong together.
-///
-/// Does a real sign-and-verify round trip rather than inspecting the files: a key that
-/// parses is not necessarily a key that works, and a `.pub` sitting next to a `.key` is
-/// not necessarily *its* `.pub`.
-fn keycheck(
-    key_path: &Path,
-    public_path: Option<&Path>,
-    password: Option<&str>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let default_public = key_path.with_extension("pub");
-    let public_path = public_path.unwrap_or(&default_public);
-
-    let key_text = std::fs::read_to_string(key_path)
-        .map_err(|e| format!("reading {}: {e}", key_path.display()))?;
-    let boxed = minisign::SecretKeyBox::from_string(&key_text)?;
-
-    // Try unencrypted first: that tells us which kind of key this is without needing to
-    // be told, and gets it right rather than guessing from the filename.
-    let (secret, encrypted) = match boxed.into_unencrypted_secret_key() {
-        Ok(secret) => (secret, false),
-        Err(_) => {
-            let text = std::fs::read_to_string(key_path)?;
-            let boxed = minisign::SecretKeyBox::from_string(&text)?;
-            let password = password
-                .map(str::to_owned)
-                .ok_or("this key is encrypted; set MINISIGN_PASSWORD or pass --password")?;
-            (boxed.into_secret_key(Some(password))?, true)
-        }
-    };
-
-    let public_text = std::fs::read_to_string(public_path)
-        .map_err(|e| format!("reading {}: {e}", public_path.display()))?;
-    let public = minisign::PublicKeyBox::from_string(&public_text)?.into_public_key()?;
-
-    // The actual test.
-    let probe = b"xtask keycheck round trip";
-    let signature = minisign::sign(None, &secret, &probe[..], None, None)?;
-    minisign::verify(
-        &public,
-        &signature,
-        std::io::Cursor::new(&probe[..]),
-        true,
-        false,
-        false,
-    )
-    .map_err(|e| format!("the public key does not verify this secret key's signature: {e}"))?;
-
-    println!("{}", key_path.display());
-    println!(
-        "  encrypted: {}",
-        if encrypted { "yes" } else { "no — dev key" }
-    );
-    println!("  public:    {}", public_path.display());
-    println!("  round trip: OK — this key can sign, and that .pub verifies it");
-
-    if !encrypted {
-        println!();
-        println!("  note: an unencrypted key is correct for a DEV key (CI signs without a");
-        println!("        passphrase) and wrong for a release key.");
-    }
-    Ok(())
-}
-
-/// Sign every artifact and manifest in `dir`.
-///
-/// Both are signed: the manifest so a robot can trust what it says, and the artifact so
-/// the bytes can be verified independently of it.
-fn sign_dir(
-    dir: &Path,
-    key_path: &Path,
-    password: Option<&str>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let key_text = std::fs::read_to_string(key_path)
-        .map_err(|e| format!("reading {}: {e}", key_path.display()))?;
-    let boxed = minisign::SecretKeyBox::from_string(&key_text)?;
-
-    // An unencrypted key is the CI case (the secret is already protected by the secret
-    // store); an encrypted one needs the passphrase. Guessing wrong gives a confusing
-    // error, so pick explicitly.
-    let secret = match password {
-        Some(password) => boxed.into_secret_key(Some(password.to_owned()))?,
-        None => boxed.into_unencrypted_secret_key()?,
-    };
-
-    let mut signed = 0;
-    for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-        if !path.is_file() || name.ends_with(SIG_SUFFIX) {
-            continue;
-        }
-
-        let bytes = std::fs::read(&path)?;
-        let signature = minisign::sign(None, &secret, bytes.as_slice(), None, None)?.to_string();
-        let sig_path = PathBuf::from(format!("{}{SIG_SUFFIX}", path.display()));
-        std::fs::write(&sig_path, signature)?;
-        println!("signed {name}");
-        signed += 1;
-    }
-
-    if signed == 0 {
-        return Err(format!("nothing to sign in {}", dir.display()).into());
-    }
     Ok(())
 }
 
@@ -719,10 +385,10 @@ mod tests {
     /// Every file that packages a release, which is where the `--include` list and the staged
     /// binaries live. Repository paths, because one of them is not a workflow.
     ///
-    /// Named once, because the tests below all read the same files and the recipe has moved before:
-    /// it used to sit in `release.yml`, and now lives in the called `_build-release.yml`. A test
-    /// that kept reading the old name would pass while guarding nothing, which is worse than
-    /// failing.
+    /// Named once, because the tests below all read the same files and the recipe has moved before.
+    /// The release recipe now lives directly in the sole manual `release.yml`; a test that kept
+    /// reading the deleted reusable workflow would pass while guarding nothing, which is worse
+    /// than failing.
     ///
     /// `scripts/dev-push.sh` is the third because it assembles the same artifact from its own copy
     /// of the same lists — a laptop build a board actually runs. `xtask/tests/artifact.rs` opens the
@@ -731,12 +397,13 @@ mod tests {
     /// skip.
     const PACKAGING_SITES: [&str; 3] = [
         ".github/workflows/dev.yml",
-        ".github/workflows/_build-release.yml",
+        ".github/workflows/release.yml",
         "scripts/dev-push.sh",
     ];
 
-    /// A release is one manual action that creates its own stable tag. These strings cross the
-    /// entry-point/called-workflow boundary, so neither file can assert the contract alone.
+    /// A release is one manual action that prepares a draft, checks the exact uploaded bytes, then
+    /// creates its own stable tag and publishes. It has no reusable-workflow or secret-backed
+    /// signing path to drift away from that one entry point.
     #[test]
     fn release_is_one_manual_stable_publish() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -744,8 +411,6 @@ mod tests {
             .expect("xtask/ has a parent");
         let entry = std::fs::read_to_string(root.join(".github/workflows/release.yml"))
             .expect("release.yml must exist");
-        let build = std::fs::read_to_string(root.join(".github/workflows/_build-release.yml"))
-            .expect("_build-release.yml must exist");
 
         assert!(entry.contains("workflow_dispatch:"));
         assert!(
@@ -755,12 +420,13 @@ mod tests {
         assert!(!entry.contains("daemon-staging-v"));
         assert!(!entry.contains("promote"));
         assert!(entry.contains("version = tomllib.load(stream)"));
-        assert!(entry.contains("source_sha: ${{ needs.prepare.outputs.source_sha }}"));
-
-        assert!(build.contains("gh release create \"$TAG\" dist/*"));
-        assert!(build.contains("--target \"$SOURCE_SHA\""));
-        assert!(build.contains("--latest"));
-        assert!(!build.contains("inputs.prerelease"));
+        assert!(entry.contains("--field draft=true"));
+        assert!(entry.contains("digest\": f\"sha256:"));
+        assert!(entry.contains("refs/tags/$TAG"));
+        assert!(entry.contains("\"make_latest\": \"true\""));
+        assert!(!entry.contains("secrets."));
+        assert!(!entry.contains("cargo run -p xtask -- sign"));
+        assert!(!root.join(".github/workflows/_build-release.yml").exists());
     }
 
     /// Where a unit's `ExecStart` points when it runs a program out of the live release.
@@ -885,16 +551,11 @@ mod tests {
     /// `install_*` steps only a fresh install performs, and why a board that only updates does
     /// not need them. Each of these is a decision belonging to the board rather than to a
     /// release, which is the only reason a release may leave it alone.
-    const FIRST_INSTALL_ONLY: [(&str, &str); 3] = [
+    const FIRST_INSTALL_ONLY: [(&str, &str); 2] = [
         (
             "install_config",
             "/etc/robot/*.toml belongs to the board: install.sh will not overwrite an existing \
              updater.toml, and an update must not either",
-        ),
-        (
-            "install_dev_key",
-            "a trust anchor is the operator's decision. A release that installed trusted keys \
-             would be granting itself trust",
         ),
         (
             "install_token_dropin",

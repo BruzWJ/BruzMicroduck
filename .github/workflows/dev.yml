@@ -1,15 +1,14 @@
-# Publish a signed build for every branch push, so a teammate's work can be installed on a
+# Publish a hash-verified build for every branch push, so a teammate's work can be installed on a
 # board with `robotctl update apply daemon --ref <branch>`.
 #
-# This is the dev channel from docs/project/roadmap.md M2. Two properties make it safe to run on
-# every push, and both are enforced somewhere other than this file:
+# This is the dev channel from docs/project/roadmap.md M2. Two properties keep it separate from
+# the stable fleet channel:
 #
-#   1. **Signed with `team.dev`, not `release-1`.** A customer robot refuses these outright:
-#      `allow_dev_keys = false` in the shipped config, *and* a trusted key is only usable as
-#      a dev key if its filename ends `.dev.pub`. Two independent conditions.
-#   2. **The version is a semver prerelease** (`0.1.0-dev.42.abc1234`), so it sorts *below*
+#   1. **The version is a semver prerelease** (`0.1.0-dev.42.abc1234`), so it sorts *below*
 #      the release it precedes and can never be what `latest` resolves to for the fleet.
 #      GitHub's prerelease flag below is the second, independent guard.
+#   2. **Its moving `daemon-dev-*` tag is outside the stable `daemon-v*` namespace.** Installing
+#      it requires an explicit `--ref` request from a locally authorised updater client.
 #
 # Deliberately does NOT run the board tests or publish a bootstrap asset. This is for boards
 # that already have a robot on them; `ci.yml` is what gates correctness, and a dev build that
@@ -34,9 +33,8 @@ env:
 
 jobs:
   publish:
-    # Not in a fork. A contributor's push runs this in their fork, where the dev key does not
-    # exist, so every run ended red at the signing step — a failure that says nothing about the
-    # change and hides one that does. `ci.yml` on the pull request is what checks their work.
+    # Not in a fork. Forks cannot publish releases in this repository; `ci.yml` on the pull
+    # request is what checks their work.
     if: ${{ !github.event.repository.fork }}
     runs-on: ubuntu-latest
     steps:
@@ -192,27 +190,6 @@ jobs:
           # a dev build.
           ls -l dist
 
-      # `team.dev`, never `release-1`. Written to a file rather than passed as an argument: a
-      # key on a command line is visible in the process list to anything else on the runner.
-      - name: Sign with the dev key
-        env:
-          MINISIGN_DEV_SECRET_KEY: ${{ secrets.MINISIGN_DEV_SECRET_KEY }}
-        run: |
-          # Lengths, not values — see the same guard in release.yml for why an empty secret
-          # is a real failure mode and "is not set" could not distinguish it.
-          echo "dev key length: ${#MINISIGN_DEV_SECRET_KEY}"
-          if [ -z "$MINISIGN_DEV_SECRET_KEY" ]; then
-            echo "::error::MINISIGN_DEV_SECRET_KEY is empty or unset — refusing to publish unsigned artifacts"
-            exit 1
-          fi
-          umask 077
-          printf '%s' "$MINISIGN_DEV_SECRET_KEY" > "$RUNNER_TEMP/dev.key"
-          # No MINISIGN_PASSWORD: a dev key is unencrypted so CI can sign non-interactively,
-          # which `xtask keycheck` reports as correct for a dev key and wrong for a release
-          # key.
-          cargo run -p xtask -- sign --dir dist --key "$RUNNER_TEMP/dev.key"
-          shred -u "$RUNNER_TEMP/dev.key" 2>/dev/null || rm -f "$RUNNER_TEMP/dev.key"
-
       # The tag moves; the version inside never repeats. That is what makes `--ref` mean
       # "whatever this branch last built" while every build stays individually addressable by
       # `--version`.
@@ -239,9 +216,8 @@ jobs:
           sudo robotctl update apply daemon --ref ${GITHUB_REF_NAME}
           \`\`\`
 
-          Signed with \`team.dev\`, so a customer robot refuses it. The board needs
-          \`team.dev.pub\` in its trusted keys and \`allow_dev_keys = true\` — see
-          docs/deploy.md.
+          This is outside the stable release channel. Installing it requires an explicit
+          \`--ref\` request from a locally authorised updater client.
 
           This tag moves on every push to the branch; the version inside does not.
           " \

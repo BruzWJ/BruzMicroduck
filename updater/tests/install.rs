@@ -17,8 +17,8 @@ use std::process::Output;
 
 use test_support::Publisher;
 
-/// A robot that has never been updated: published releases, trusted keys, an empty
-/// install tree, and a config carrying the **production** `on_apply` and `health`
+/// A robot that has never been updated: published releases, an empty install tree,
+/// and a config carrying the **production** `on_apply` and `health`
 /// settings.
 ///
 /// Production settings on purpose. A bootstrap that only worked against an inert config
@@ -41,7 +41,7 @@ impl FreshRobot {
         let install = root.join("opt/robot/daemon");
         // Deliberately NOT creating `install`: a fresh robot has no install tree, and the
         // engine creating it is part of what this tests.
-        let publisher = Publisher::new(root.join("keys"), published.clone());
+        let publisher = Publisher::new(published.clone());
 
         let fresh = Self {
             _dir: dir,
@@ -64,7 +64,6 @@ impl FreshRobot {
             self.config_path(),
             format!(
                 r#"
-trusted_keys_dir = "{keys}"
 hw_rev = 1
 state_dir = "{state}"
 robot_socket = "{root}/run/robotd.sock"
@@ -86,7 +85,6 @@ units  = ["robotd"]
 probe   = "socket"
 timeout = "2s"
 "#,
-                keys = self.root.join("keys").display(),
                 state = self.root.join("var/lib/robot/updater").display(),
                 root = self.root.display(),
                 install = self.install.display(),
@@ -216,10 +214,10 @@ fn lands_a_first_release_despite_a_production_config() {
 /// The one-liner installer's path: no `--from`, so the source in `/etc/robot/updater.toml`
 /// resolves `latest` itself.
 ///
-/// That is what keeps the shell script from having to parse a signed manifest to learn
+/// That is what keeps the shell script from having to parse the manifest to learn
 /// the version and the artifact URL — which it could not do without either `jq` or a
-/// hand-rolled JSON regex, and which would put a second, weaker reader of a signed
-/// document into the trust chain.
+/// hand-rolled JSON regex, and which would put a second, weaker reader of the release
+/// document into the install path.
 #[test]
 fn installs_from_the_configured_source_when_from_is_omitted() {
     let fresh = FreshRobot::new();
@@ -247,9 +245,8 @@ fn records_the_install_in_the_update_log() {
     );
 }
 
-/// Signature verification is not relaxed for the first install. This is the one place a
-/// bootstrap shortcut would be invisible and fatal: every later update's trust derives
-/// from the release landed here.
+/// SHA-256 verification is not relaxed for the first install. A bootstrap shortcut here
+/// would be invisible and fatal because every later update derives from this release.
 #[test]
 fn refuses_a_tampered_artifact() {
     let fresh = FreshRobot::new();
@@ -267,29 +264,6 @@ fn refuses_a_tampered_artifact() {
         None,
         "nothing may be live after a refused install"
     );
-}
-
-/// An unsigned-by-us release is refused for the same reason, via a key the robot does
-/// not trust rather than a corrupted byte.
-#[test]
-fn refuses_a_release_signed_by_an_untrusted_key() {
-    let fresh = FreshRobot::new();
-    fresh.publish("1.0.0");
-
-    // Re-sign everything with a key that was never installed.
-    let attacker = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
-    for name in ["daemon-1.0.0.tar.zst", "1.0.0.manifest.json"] {
-        let path = fresh.published.join(name);
-        let bytes = std::fs::read(&path).unwrap();
-        let sig = minisign::sign(None, &attacker.sk, bytes.as_slice(), None, None)
-            .unwrap()
-            .to_string();
-        std::fs::write(format!("{}.minisig", path.display()), sig).unwrap();
-    }
-
-    let out = fresh.install(&[]);
-    assert!(!out.status.success(), "{}", stderr(&out));
-    assert_eq!(fresh.live(), None);
 }
 
 /// The guard that keeps the forced `health = none` from ever applying to a working
@@ -417,20 +391,6 @@ fn missing_source_directory_is_reported_directly() {
         "got: {}",
         stderr(&out)
     );
-}
-
-/// The config on disk is the single source of truth for the trust anchor. An `install`
-/// that fell back to some built-in default when `trusted_keys_dir` was wrong would be a
-/// robot installing unverified code.
-#[test]
-fn a_config_with_no_trusted_keys_is_fatal() {
-    let fresh = FreshRobot::new();
-    fresh.publish("1.0.0");
-    std::fs::remove_file(fresh.publisher.key_file()).unwrap();
-
-    let out = fresh.install(&[]);
-    assert!(!out.status.success(), "{}", stderr(&out));
-    assert_eq!(fresh.live(), None);
 }
 
 /// Sanity on the harness itself: `CARGO_BIN_EXE_updaterd` must point at a binary that

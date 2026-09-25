@@ -395,7 +395,7 @@ connection drops. That is the update working. Reconnect and run `duckctl update 
 The connection dropping after an apply is the update working, not a failure. Reconnect and read
 `update status`.
 
-A branch build, an exact version, or the staging candidate:
+A branch build or an exact version:
 
 ```bash
 duckctl --name <robot-name> update apply --ref my-branch
@@ -403,10 +403,6 @@ duckctl --name <robot-name> update apply --ref my-branch
 
 ```bash
 duckctl --name <robot-name> update apply --version 0.5.1
-```
-
-```bash
-duckctl --name <robot-name> update apply --staging
 ```
 
 `--dry-run` verifies everything and stops before the swap. `--ref` and `--version` are alternatives;

@@ -1,8 +1,8 @@
 //! Config-driven update engine.
 //!
 //! The engine is robot-agnostic; everything robot-specific lives in
-//! [`config::Config`]. Adapting to another robot should mean a new config file,
-//! new signing keys, and possibly a new health probe — not a fork of this crate.
+//! [`config::Config`]. Adapting to another robot should mean a new config file and
+//! possibly a new health probe — not a fork of this crate.
 //! See `docs/design/updater-design.md` §10.
 //!
 //! Design docs: [`updater-design.md`] for the update system, [`architecture.md`]
@@ -81,31 +81,6 @@ pub enum Error {
         candidate: semver::Version,
     },
 
-    /// `--staging` resolved to a candidate older than what the board is running, which means
-    /// the staging channel has nothing newer to offer.
-    ///
-    /// Distinct from [`Self::WouldDowngrade`] because the operator's next move is different.
-    /// That one is a rollback-attack guard: it says a *mirror* may have gone backwards, and
-    /// the right response is to distrust the source. This one says the source is fine and the
-    /// channel is simply behind — usually because normal stable releases publish no candidate.
-    /// Answering "refusing to downgrade" sent the one
-    /// person who hit it looking for a broken mirror.
-    ///
-    /// Only [`crate::proto::Target::Staging`] reaches it. `StagingExact` is how someone names
-    /// an older candidate deliberately, so the message names that command as the way past.
-    #[error(
-        "the newest release candidate is {candidate}, and this board is already on \
-         {installed} — nothing more recent is available on the staging channel. A normal stable \
-         release publishes no candidate, so staging stays at the last \
-         version that had one. There is nothing here to test. To install this older candidate \
-         anyway, name it:\n  robotctl update apply {component} --staging --version {candidate}"
-    )]
-    StagingBehind {
-        component: String,
-        installed: semver::Version,
-        candidate: semver::Version,
-    },
-
     /// The candidate does not contain a binary an installed unit execs.
     ///
     /// Carries a preformatted message rather than its parts, because the useful half is the
@@ -173,8 +148,8 @@ pub enum Error {
     )]
     ReleaseNotReady { repo: String, tag: String },
 
-    /// Signature or hash mismatch. Never retried automatically — a failure here
-    /// means the bytes are not ours.
+    /// Digest mismatch. Never retried automatically: the downloaded bytes are not the
+    /// artifact the manifest identified.
     #[error("verification failed: {0}")]
     Verification(String),
 
@@ -260,24 +235,18 @@ impl Error {
         match self {
             Error::UnknownComponent(_) => code::UNKNOWN_COMPONENT,
             Error::NotInstalled { .. } => code::NOT_INSTALLED,
-            // Shares `NOT_INSTALLED` rather than minting a code, for the reason `StagingBehind`
-            // and `WouldOrphanUnit` share theirs: it is the same answer in a different noun —
+            // Shares `NOT_INSTALLED` rather than minting a code, for the reason
+            // `WouldOrphanUnit` shares its code: it is the same answer in a different noun —
             // the component is known, the specific thing named is not on this board — and what
             // the caller needs is the message, which names the runs that are.
             Error::NoSuchRun { .. } => code::NOT_INSTALLED,
             Error::WouldDowngrade { .. } => code::WOULD_DOWNGRADE,
-            // Shares the downgrade code rather than adding one, for the reason `WouldOrphanUnit`
-            // shares `INCOMPATIBLE` below: to a client this is the same answer — "refused, the
-            // target is older than what is installed" — and what a person needs is the message.
-            // A new code would be an `API_VERSION` bump for a refusal no client branches on.
-            Error::StagingBehind { .. } => code::WOULD_DOWNGRADE,
             Error::Busy | Error::LoginInFlight => code::BUSY,
             // The request is well-formed and refused because of what it did not say, which is
             // what `INVALID_PARAMS` is: passing `force` is the fix, and it is a parameter.
             Error::AlreadySignedIn(_) => code::INVALID_PARAMS,
             Error::Network(_) => code::NETWORK,
-            // Shares the network code rather than adding one, for the reason `StagingBehind`
-            // shares the downgrade code above — with a second reason here. To a client this is
+            // Shares the network code rather than adding one. To a client this is
             // the same answer as any other fetch that came up empty, and the one behaviour a
             // client should have is the one `NETWORK` already asks for: retry later. That is
             // exactly right for a release whose upload is still in flight, so a new code would

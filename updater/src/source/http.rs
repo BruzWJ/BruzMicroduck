@@ -86,7 +86,7 @@ pub fn client() -> Result<reqwest::Client, Error> {
         .map_err(|e| Error::Network(format!("could not build HTTP client: {e}")))
 }
 
-/// Fetch a small resource whole (manifests, signatures, API responses).
+/// Fetch a small resource whole (manifests and API responses).
 pub async fn get_bytes(
     client: &reqwest::Client,
     url: &str,
@@ -135,7 +135,7 @@ pub async fn get_bytes(
 /// Stream a URL to `dest`, reporting progress and resuming across retries.
 ///
 /// Returns the number of bytes written. Integrity is **not** checked here — the
-/// caller verifies the hash and signature, which is the authoritative check.
+/// caller verifies the SHA-256 from the manifest.
 /// Stream `url` to `dest`, resuming a partial file if one is there.
 ///
 /// `accept` exists for GitHub's release-asset API, which serves the *metadata* for an asset

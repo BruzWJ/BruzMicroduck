@@ -9,12 +9,6 @@
 # fact, and where the two files disagree the example's comments explain the option while
 # this file's comment explains the choice.
 
-# The trust anchor. All three release public keys go in here at install time, even
-# though only `release-1` signs today: a robot can verify only against the set baked
-# into it, so shipping the spares is the one chance to make key rotation possible
-# without physically re-flashing (docs/project/ci-setup.md).
-trusted_keys_dir = "/etc/robot/trusted_keys"
-
 hw_rev = 1
 
 # Outside every `install_dir`, so the record of what happened survives the swap or
@@ -23,11 +17,8 @@ state_dir = "/var/lib/robot/updater"
 
 robot_socket = "/run/robotd.sock"
 
-# Both false, and this is the file that makes them false on a client robot. `allow_dev_keys`
-# would let anything a teammate builds install itself; `allow_fault_injection` would let the
-# updater be told to fail on purpose. Developer boards override these locally — they are not
-# overridden by an update, because updates do not touch /etc.
-allow_dev_keys        = false
+# False on client robots: the updater cannot be told to fail on purpose. Developer boards may
+# override this locally; updates do not touch /etc.
 allow_fault_injection = false
 
 # What makes `min_supported` mean anything. Without a poll a robot only learns a floor
@@ -105,17 +96,9 @@ manifest_asset = "manifest.json"
 #
 # Separate from tag_prefix because the two streams must never be confusable: a dev tag
 # *moves* (it points at whatever that branch last built) while a release tag is immutable,
-# and `latest` for the fleet must never consider a dev tag. Installing one also requires
-# allow_dev_keys and the dev public key, so a client robot cannot take a branch build even
-# if it somehow resolved the tag.
+# and `latest` for the fleet must never consider a dev tag. Installing one requires an explicit
+# `--ref` request from a locally authorised updater client.
 # ref_tag_prefix = "daemon-dev-"
-
-# Where `--staging` looks if an operator manually publishes a signed release candidate. Shown for
-# completeness — this is the default, although the normal release workflow publishes stable only.
-#
-# Reaching one still takes a person with root typing `--staging`. A candidate is flagged as a
-# prerelease, which `latest` skips, so nothing here makes this robot *track* candidates.
-# staging_tag_prefix = "daemon-staging-v"
 
 # `updaterd` restarts neither itself nor `btd`, both of which ship in this same artifact:
 # restarting itself would kill the executor mid-update, and restarting `btd` would drop

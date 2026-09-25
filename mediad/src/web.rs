@@ -51,7 +51,7 @@ use duck_ipc_proto as proto;
 ///
 /// `include_str!` rather than a file read at request time, and that is a decision: installing it
 /// under `current/webclient/` would cost an `--include` line in three places that already drift
-/// (`_build-release.yml`, `dev.yml`, `scripts/dev-push.sh`), put a filesystem read behind a network
+/// (`release.yml`, `dev.yml`, `scripts/dev-push.sh`), put a filesystem read behind a network
 /// request in a unit running `ProtectSystem=strict`, and make "which page is this robot serving" a
 /// question with two answers. The cost is a rebuild to change a stylesheet, which is the right trade
 /// for a page that is part of the daemon's interface.

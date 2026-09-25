@@ -8,7 +8,6 @@ next to their service (`updater/systemd/`, `robotd/systemd/`); anything robot-wi
 | | |
 |---|---|
 | `updater.toml` | the config a client robot ships with, installed to `/etc/robot/updater.toml` |
-| `trusted_keys/` | release public keys — the trust anchor, installed to `/etc/robot/trusted_keys/` |
 | `journald.conf.d/10-robot.conf` | journal persistence and size caps |
 | `overlays/i2c3-qwiic.dts` | Radxa I2C3-M0 on header pins 3/5 for the SparkFun Qwiic sensor chain |
 | `audio/` | optional audio-HAT overlay, driver and mixer setup; not a sensor prerequisite |
@@ -20,7 +19,7 @@ under `/var/lib` is therefore the only durable record — which is what `archite
 designed it to be.
 
 > To just get a dev board working, [`docs/robot/install-dev.md`](../docs/robot/install-dev.md) is the short
-> procedure. Below is the trust chain, what ends up where, and where logs go.
+> procedure. Below is the install path, what ends up where, and where logs go.
 
 ## Quickstart
 
@@ -40,36 +39,24 @@ export DUCK_TOKEN=github_pat_replace_with_your_token
 ./scripts/provision-board.sh radxa@192.168.1.42
 ```
 
-`--no-dev-key` for a board that should only take releases, `--ref BRANCH` to provision from a
-branch, `--local` to send this clone's `provision.sh` rather than fetching it, which is what makes
-testing an unpushed change to it possible.
-
-`team.dev.pub` is committed at [`dev-key/`](dev-key/), not in `trusted_keys/` — carrying it to a
-board *is* the opt-in, so it must not ship with every robot. The script sends the committed copy;
-`--dev-key PATH` overrides it.
+`--ref BRANCH` provisions that branch's explicitly requested development build; `--local` sends
+this clone's `provision.sh` rather than fetching it, which is what makes testing an unpushed change
+to it possible.
 
 ### On the board, without a clone
 
-Three commands, the first from your machine, and what `provision-board.sh` is doing on your
-behalf above:
-
-```bash
-scp deploy/dev-key/team.dev.pub radxa@192.168.1.42:/tmp/
-```
+Two commands, and what `provision-board.sh` is doing on your behalf above:
 
 ```bash
 export DUCK_TOKEN=github_pat_replace_with_your_token
 ```
 
 ```bash
-curl -fsSL -H "Authorization: Bearer $DUCK_TOKEN" https://raw.githubusercontent.com/pollen-robotics/microduck/main/scripts/provision.sh -o /tmp/provision.sh && sudo DUCK_TOKEN="$DUCK_TOKEN" DUCK_DEV_KEY=/tmp/team.dev.pub sh /tmp/provision.sh
+curl -fsSL -H "Authorization: Bearer $DUCK_TOKEN" https://raw.githubusercontent.com/pollen-robotics/microduck/main/scripts/provision.sh -o /tmp/provision.sh && sudo DUCK_TOKEN="$DUCK_TOKEN" sh /tmp/provision.sh
 ```
 
 `provision.sh` runs `setup-board.sh`, `migrate-network.sh` and `install.sh` in order, warns for
-ten seconds, reboots — your SSH session ends there — and finishes on its own. It copies the dev
-key out of `/tmp` first, because `/tmp` does not survive that reboot; a key left there would
-produce a board that provisions cleanly and is silently *not* a dev board, surfacing weeks later
-as `--ref` being refused, which reads like a broken release.
+ten seconds, reboots — your SSH session ends there — and finishes on its own.
 
 Log back in and:
 
@@ -85,20 +72,14 @@ sudo tail -f /var/lib/robot/provision.log
 
 That log is the record of the half nobody watched, and it is a file rather than the journal on
 purpose: journald persistence is configured by a drop-in inside the release being installed, so
-during this exact window the journal can still be RAM-only. It ends with `DEV BOARD` only when
-the key really installed, so which kind of board you ended up with is a thing you can check
-rather than a thing you have to remember:
-
-```bash
-grep -c 'DEV BOARD' /var/lib/robot/provision.log
-```
+during this exact window the journal can still be RAM-only.
 
 No `newgrp robot` on either path, and that is deliberate rather than an omission: the `robot`
 group is created before the reboot, so the session you log back into already has it.
 
 ### Regular user, repository public
 
-No token and no dev key.
+No token is needed.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/pollen-robotics/microduck/main/scripts/provision.sh -o /tmp/provision.sh && sudo sh /tmp/provision.sh
@@ -137,7 +118,7 @@ the group before the reboot.
 
 Three scripts, kept apart because they answer to different things. `setup-board.sh` is OS-level
 bring-up — device-tree overlays, ONNX Runtime — which changes rarely and needs a reboot.
-`install.sh` installs a signed daemon release, which happens on every update; conflating the two
+`install.sh` installs a hash-verified daemon release, which happens on every update; conflating the two
 would mean every update re-litigating boot configuration. `migrate-network.sh` is the one that
 will not last: it exists only because Armbian's stock image ships netplan, and it gets deleted
 rather than maintained the day we build an image with NetworkManager in it.
@@ -148,8 +129,8 @@ drives NM over D-Bus — so until the migration runs, `robotctl net status` repo
 and nothing over Bluetooth can configure wifi. Why NM rather than what the image ships is in
 [`../docs/design/app-path-design.md`](../docs/design/app-path-design.md) §2.
 
-`provision.sh` runs them in order and holds the state that has to cross the reboot — the token,
-a dev-key path, and the boot id it uses to tell whether you have actually rebooted. It has no
+`provision.sh` runs them in order and holds the state that has to cross the reboot — the token
+and the boot id it uses to tell whether you have actually rebooted. It has no
 provisioning logic of its own, on purpose: three scripts with different lifetimes should not
 become one script whose parts cannot be removed separately.
 
@@ -173,12 +154,12 @@ backstop. If the backstop fired and restored netplan, re-cutting over unattended
 it, fail the same way, reboot, and go round again; it says so in the log and leaves wifi alone.
 The unit file stays on disk, disabled, as a record of what ran.
 
-The token is needed three times, and only the first two end with provisioning: fetching these
-scripts, fetching the release, and then permanently — `updaterd` reads `GITHUB_TOKEN` from a
-systemd drop-in on every later update check. Passing `DUCK_TOKEN` through is what makes updates
-work *after* provisioning, not just during it, and `provision.sh` ends by saying which of the two
-copies it removed and which one stayed. A board with no token installs fine and can then never
-fetch an update, which is most of what `updaterd` is for.
+While the repository is private, the token is needed three times, and only the first two end with
+provisioning: fetching these scripts, fetching the release, and then permanently — `updaterd`
+reads `GITHUB_TOKEN` from a systemd drop-in on every later update check. Passing `DUCK_TOKEN`
+through is what makes private-repository updates work *after* provisioning, not just during it,
+and `provision.sh` ends by saying which of the two copies it removed and which one stayed. Once
+the repository and release assets are public, a board with no token installs and updates normally.
 
 It also creates the `robot` group in its first phase, which is the only reason the flow above
 has no `newgrp robot` in it. `install.sh` does the same thing correctly and too late — by the
@@ -201,7 +182,7 @@ file is patched directly.
 The servo link is the OpenRB-150's USB CDC device, not a Radxa header UART. `setup-board.sh`
 delegates its host setup to `scripts/setup-openrb.sh`, which installs the ROBOTIS `2f5d:2202`
 udev rule, excludes that port from ModemManager probing, and creates the stable
-`/dev/openrb-dxl` name. Every signed release carries the same helper, and `hooks/postinstall`
+`/dev/openrb-dxl` name. Every release carries the same helper, and `hooks/postinstall`
 runs it before robotd restarts so already-provisioned boards receive the rule during an update.
 `setup-board.sh` also removes the retired `uart2-m0` overlay word from upgraded boards. The
 physical servo wiring, OpenRB firmware and power path are owned by
@@ -268,46 +249,20 @@ awkward:
 |---|---|
 | `DUCK_TOKEN` | token for a private repo — the fetch *and* the release assets |
 | `DUCK_REPO` | the repository, for a fork or a test repo |
-| `DUCK_REF` | the branch the scripts and trusted keys are read from; pin to a tag for a reproducible run |
+| `DUCK_REF` | the branch the provisioning scripts are read from; pin to a tag for a reproducible run |
 | `DUCK_CONFIG_REF` | where `updater.toml` comes from. Defaults to the tag of the release being installed, and `DUCK_REF` does not change it — a config field is only understood by binaries from its own version onwards, so pairing a branch's config with the last stable binary is how `updaterd` ends up refusing to start. Set this only to test a config change with a build that understands it. |
-| `DUCK_DEV_KEY` | path to `team.dev.pub` — makes this a dev board (below) |
 | `DUCK_FORCE_REINSTALL` | reinstall over a live release using the release's own `updaterd` |
 
 **How it installs itself.** An update needs the updater, and the updater arrives in an update.
 The way out is one bare `updaterd` binary, published as the `updaterd-bootstrap-aarch64` asset
 because a fresh board has no `zstd` to open a `.tar.zst` with. It then runs the *ordinary*
-engine — same verification, extraction, atomic swap, journal entry — so the store comes out in
+engine — same SHA-256 verification, extraction, atomic swap, journal entry — so the store comes out in
 exactly the state the resident daemon expects and no bootstrap-only path can drift from how
 later updates behave. `on_apply` and `health` are forced off for the duration, because the units
 live inside the release being installed; `updaterd install` refuses to run once a release *is*
 live, so that can never silently disable auto-rollback on a working robot. `--from <dir>`
 installs from local files instead: the offline and factory path, and what CI uses to verify a
 release before publishing it.
-
-### Making it a dev board, so `--ref <branch>` works
-
-The same two conditions gate a build pushed straight from a laptop with
-`scripts/dev-push.sh` — it is signed with the same dev key, so a board that refuses branch
-builds refuses those too.
-
-A board refuses branch builds twice over: `allow_dev_keys` is false, and a trusted key only
-counts as a dev key if its filename ends `.dev.pub`. Both halves are needed, they are independent
-checks, and doing one without the other leaves a board that still refuses branch builds — with a
-signature error that reads like a corrupt release. `DUCK_DEV_KEY` does both.
-
-It validates before changing anything: the file must exist, must look like a minisign public key,
-and `updater.toml` must already have an `allow_dev_keys` line to flip — that key is top-level, so
-appending one would land it inside whichever `[table]` came last. It installs the key as
-`team.dev.pub` whatever the source was called, because the `.dev.` infix is what classifies it; a
-key landing under any other name is trusted as a *release* key, and branch builds would then be
-accepted as reviewed.
-
-`team.dev.pub` is committed at [`dev-key/`](dev-key/), deliberately outside `trusted_keys/` —
-[`dev-key/README.md`](dev-key/README.md) explains why that is safe.
-
-The closing report says `DEV BOARD` when this is on, and prints the two commands to undo it.
-Never do it to a robot you ship.
-
 
 ### ⚠ While the repository is private, a robot needs a token
 
@@ -317,38 +272,23 @@ release API instead. `updaterd` reads `GITHUB_TOKEN` from its environment, which
 means a systemd drop-in, not a shell export.
 
 That is fine on a developer's board and **not** fine on a customer robot: a fleet-wide
-credential in an image is one that leaks and cannot be rotated without reflashing, which is
-the failure the tiered signing keys exist to avoid.
+credential in an image is one that leaks and cannot be rotated without updating every image.
 
 `install.sh` therefore writes the drop-in **only when `DUCK_TOKEN` was supplied** — mode 600,
 and it says so loudly. A customer robot installs from a public artifact repository and passes
-no token, so it never reaches that path. Without it `updaterd` would be installed, running,
-and unable to fetch a single update, which is most of what it is for.
+no token, so it never reaches that path. Without the drop-in, only a private-repository updater
+is unable to fetch; public GitHub releases need no token.
 
-Artifact hosting is therefore an open decision, not a settled one —
-[`../docs/design/updater-design.md`](../docs/design/updater-design.md) §6.1 has the options. The cheap one
-is a second, public repository holding only signed artifacts: signatures are what make an
-artifact safe to serve, not obscurity, and the source stays private.
+Artifact hosting is therefore public for production releases. The complete source and integrity
+contract is [`../docs/design/updater-design.md`](../docs/design/updater-design.md) §6.
 
-### The trust chain
+### Release integrity
 
-1. TLS to `raw.githubusercontent.com` for `install.sh`, `updater.toml` and the public keys.
-   These cannot come from a release: nothing can be verified until the keys are present.
-2. TLS to `github.com` for the bootstrap `updaterd`. **Not yet verified.**
-3. That binary verifies the manifest and the artifact against the keys from (1), and
-   refuses anything they do not sign.
-4. The installer then compares the bootstrap binary's `sha256` against
-   `current/bin/updaterd`, which came out of the verified artifact. Equal digests mean the
-   binary from (2) was genuine. `release.yml` asserts the two are the same bytes, so a
-   mismatch is a real finding rather than a packaging quirk.
-
-Everything else — both unit files, the journald drop-in, `robot.conf` — is taken out of the
-*installed* release rather than fetched from the repository, so it is the copy a signature
-was checked against.
-
-The residual trust is GitHub itself, which is also where the script came from; step (4)
-narrows that window rather than removing it. An install that wants none of it should use
-`--from` against files carried in by hand.
+The publication boundary, HTTPS requirement, SHA-256 verification order and offline-source rules
+are owned by [`updater-design.md` §5.4](../docs/design/updater-design.md#54-publication-authority-and-integrity).
+The install-specific extra check is that `install.sh` compares the downloaded bootstrap binary's
+SHA-256 with `current/bin/updaterd` after the ordinary engine has installed the release. Unit files,
+the journald drop-in and `robot.conf` all come from that artifact rather than separate downloads.
 
 ### Unattended updates
 
@@ -392,7 +332,6 @@ bad time" than a clock.
 
 ```
 /etc/robot/updater.toml                 config; never touched by an update
-/etc/robot/trusted_keys/release-*.pub   trust anchor
 /opt/robot/daemon/releases/<version>/   the release tree
 /opt/robot/daemon/current -> releases/<version>
 /etc/systemd/system/*.service           every unit the release ships, copied out of it

@@ -85,7 +85,7 @@ It also sits, kicks a ball, rolls forward on command, and quacks in a voice that
 | [microduck_rl](https://github.com/pollen-robotics/microduck_rl) | Where the policies come from: MuJoCo, PPO, domain randomisation, and the ONNX export this repo loads. |
 | [How it works](docs/design/architecture.md) | The whole system on one page — the daemons, the bus, how an update reaches a robot — then a page per part. |
 | [Set up a dev board](docs/robot/install-dev.md) | From a blank board to a robot that takes branch builds. |
-| [Dev cheat sheet](docs/robot/cheatsheet-dev.md) | Branch builds, release candidates, driving from a laptop, and the restart traps after an update. |
+| [Dev cheat sheet](docs/robot/cheatsheet-dev.md) | Branch builds, local pushes, and the restart traps after an update. |
 | [Push your branch](docs/robot/dev-push.md) | Build on your machine, install over ssh, about a minute. |
 | [The simulated duck](docs/robot/simulation.md) | No robot on the desk? `scripts/duck-sim` runs the real daemons against a body in MuJoCo — one duck in a window, or four as machines you log into. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Building, testing, layout, conventions, releasing. |
@@ -96,7 +96,7 @@ It also sits, kicks a ball, rolls forward on command, and quacks in a voice that
 Rust, no framework, one workspace. `robotd` owns the control loop and reaches the fifteen-servo
 TTL bus through a USB-connected OpenRB-150
 ([wiring and transport](docs/design/robotd-design.md#11-the-two-buses-and-who-owns-them)); `updaterd`
-installs signed releases and rolls them back when a robot comes up unhealthy; `configd` owns wifi
+verifies release hashes and rolls back when a robot comes up unhealthy; `configd` owns wifi
 and identity; `btd` is the Bluetooth path a phone uses; `padd` reads the gamepad; `mediad` streams
 the camera over WebRTC; `tofd` serves the head depth and optional head-IMU streams. They talk over
 one JSON-RPC contract on Unix sockets, and every client — the app, the console, the gamepad, your

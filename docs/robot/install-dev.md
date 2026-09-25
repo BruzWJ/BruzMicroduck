@@ -2,15 +2,11 @@
 
 Getting a board from nothing to a robot you can push branches to.
 
-A dev board trusts the team dev key, so it will install anything anyone on the team builds. A
-customer robot is set up differently and deliberately refuses those builds — everything here
-assumes a dev board, never a customer robot.
-
-Nothing is relaxed for a dev build: same signature and hash verification, same health gate, same
-auto-rollback. The only difference is which key signed it, and that is what keeps these builds
-off customer robots — they refuse a dev key twice over. `allow_dev_keys = false`, and a trusted
-key only counts as a dev key if its filename ends `.dev.pub`. Both halves of the setup below
-exist to flip exactly that.
+Nothing is relaxed for a development build: the artifact SHA-256, compatibility checks, health
+gate and auto-rollback are the same as a stable release. Development builds live under a separate
+GitHub prerelease/tag namespace and can be selected only by an explicit local `--ref` request;
+they are never considered by the stable update scan. The update contract is owned by
+[`updater-design.md`](../design/updater-design.md).
 
 ## Flash the board
 
@@ -38,8 +34,7 @@ ssh-copy-id radxa@192.168.1.42
 - A **GitHub token**, while this repository is private: its release assets are unreachable
   without one. Once it is public the token is optional and buys only a higher API rate limit
   (`docs/design/updater-design.md` §6.1).
-- A **clone of this repo**. The dev key it needs is committed at `deploy/dev-key/team.dev.pub`,
-  so there is nothing to ask anyone for.
+- A **clone of this repo**, which supplies the provisioning command and development tools.
 
 ## Install
 
@@ -53,8 +48,7 @@ export DUCK_TOKEN=github_pat_replace_with_your_token
 ./scripts/provision-board.sh --pause-btd-on-pair --name <MY_COOL_ROBOT_NAME> radxa@192.168.1.42
 ```
 
-That sends your dev key, starts provisioning, waits out the reboot, streams the log, and ends on
-`robotctl health`.
+That starts provisioning, waits out the reboot, streams the log, and ends on `robotctl health`.
 
 ### Why `--pause-btd-on-pair` is in that command
 
@@ -129,8 +123,7 @@ minute or two before provisioning, and check with `gh run list --branch BRANCH` 
 Other useful flags: `--name Ducky` names the robot instead of leaving it the `duck-7f3a` it derives
 from its own serial (`robotctl system set-name` changes it later, so this only saves a command),
 `--local` sends this clone's `provision.sh` instead of fetching it (which is how to test a change to
-the provisioning scripts without merging first), and `--no-dev-key` makes a board that only takes
-releases.
+the provisioning scripts without merging first).
 
 ## Check it worked
 
@@ -145,17 +138,7 @@ If the motor controller is attached, its stable path must resolve regardless of 
 readlink -f /dev/openrb-dxl
 ```
 
-The board only counts as a dev board if the key really installed, and that is a thing you can
-check rather than a thing you have to remember:
-
-```bash
-grep -c 'DEV BOARD' /var/lib/robot/provision.log
-```
-
-`1` means yes. `0` means the key did not land, and `--ref` will be refused later with an error
-that reads like a corrupt release. That is the failure this check exists to catch early.
-
-Then the real test — put a branch on it:
+Then the real test — put a branch on it explicitly:
 
 ```bash
 sudo robotctl update apply --ref main daemon
@@ -194,36 +177,6 @@ Three things stop it working, and it says which:
 - The robot reports its **wifi** address, so a board you reach over ethernet is not covered.
 
 `--no-ble` turns it off. A robot that has been given its own pairing PIN needs it in `DUCK_PIN`.
-
-## Making an existing board take dev builds
-
-For a board provisioned some other way, or one set up before you had the key. Both halves are
-needed: either alone leaves a board that still refuses branch builds.
-
-The easy way is to re-run the installer with the key, which validates it and flips the flag in
-one step:
-
-```bash
-sudo DUCK_TOKEN="$DUCK_TOKEN" DUCK_DEV_KEY=/tmp/team.dev.pub sh /tmp/install.sh
-```
-
-It installs the key as `team.dev.pub` whatever the source file was called. That name matters: the
-`.dev.` infix is what classifies a key as a dev key, and a key landing under any other name is
-trusted as a **release** key.
-
-By hand, if you would rather see each step:
-
-```bash
-sudo cp team.dev.pub /etc/robot/trusted_keys/team.dev.pub
-```
-
-```bash
-sudo sed -i 's/^allow_dev_keys.*/allow_dev_keys        = true/' /etc/robot/updater.toml
-```
-
-```bash
-sudo systemctl restart updaterd
-```
 
 ## The token, by hand
 
@@ -286,9 +239,9 @@ deliberately not on `PATH`:
 sudo /opt/robot/daemon/current/bin/updaterd install --from /media/usb/release
 ```
 
-The directory holds what a release is: `<version>.manifest.json`, its `.minisig`, the artifact
-and the artifact's `.minisig`. Signatures, hashes and compatibility are checked exactly as they
-are for a download — `--from` changes where the bytes come from, not what is trusted.
+The directory holds `<version>.manifest.json` and the artifact named by it. The artifact's SHA-256
+and compatibility are checked exactly as they are for a download — `--from` changes where the
+bytes come from, not which validation runs. The optional manifest size still informs preflight.
 
 That command refuses to run once a release is live, because it forces `on_apply` and the health
 gate off, and doing that to a working robot would silently disable auto-rollback. One situation
@@ -307,11 +260,11 @@ sudo /opt/robot/daemon/current/bin/updaterd install --from /media/usb/release --
 
 `--force` is itself refused while `robotd` is still answering, since the objection is about a
 *working* robot losing its safety net. It gives up auto-rollback for that one install and nothing
-else — signatures, hashes and compatibility are still checked, and
+else — the hash and compatibility are still checked, and
 `sudo robotctl update rollback daemon` is the recovery path if the release misbehaves.
 
 ## Going deeper
 
 [`deploy/README.md`](../../deploy/README.md) is the reference for what all of this actually does:
-the trust chain, what ends up where, the other ways in (on the board without a clone, by hand
+the install path, what ends up where, the other ways in (on the board without a clone, by hand
 step by step), where logs go and what survives a reboot.

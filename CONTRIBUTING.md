@@ -32,7 +32,7 @@ of the ToF driver's own tests do not run there, because there is no driver to ru
 targets only and `sensor.rs` offers a `Sensor` that cannot be opened. `tofd` still builds and
 `tofd --fake` still serves frames, which is the only way it runs off a board anyway.
 
-Those tests are also where the engine's failure paths are: a bad signature, a release that comes
+Those tests are also where the engine's failure paths are: a bad artifact hash, a release that comes
 up unhealthy, a post-install hook that fails, power loss between the swap and the health gate.
 Each drives the real engine with the fault injected rather than a mock of it, so
 `updater/tests/apply.rs` is the honest answer to "what does this actually guarantee" — more so
@@ -91,10 +91,10 @@ the libraries they drive — no sockets, no systemd, nothing starts them
 the tools
   robotctl/       the local CLI, including `monitor`
   duckctl/        the laptop-side client — never shipped, never cross-built
-  xtask/          package · sign — build tooling, never shipped
-  test-support/   signed-release fixtures for tests; never shipped
+  xtask/          package — build tooling, never shipped
+  test-support/   release fixtures for tests; never shipped
 
-deploy/         what a robot is configured with: updater.toml, robotd.toml, trust anchor, journald
+deploy/         what a robot is configured with: updater.toml, robotd.toml, journald
 hooks/          preinstall · postinstall — what runs inside an update, from the artifact,
                 and the only thing that runs on every board on every update: anything
                 install.sh does to a board belongs here too (updater-design.md §9.1)
@@ -155,14 +155,17 @@ Two or three seconds, treated as a moving thumbnail. Use a video where sound or 
 
 ## Releasing
 
-Releases are signed **in GitHub Actions**, never locally. Bump `[workspace.package].version` in
+Releases are built and published **in GitHub Actions**, never locally. Bump `[workspace.package].version` in
 `Cargo.toml`, commit and push it to the default branch, then open **Actions → release → Run
-workflow** and click **Run workflow**. There are no inputs.
+workflow** and click **Run workflow**. There are no inputs. GitHub only offers that action to
+people with write access to the repository, which is the release authorization boundary.
 
-The workflow reads that version, freezes the selected commit, builds for the board, signs the
-artifact, installs it through the real update engine as verification, and only then creates
+The workflow reads that version, freezes the selected commit, builds for the board, installs the
+artifact through the real update engine as verification, and only then creates
 `daemon-v<version>`, uploads the assets, and publishes one stable release. Do not create a tag or a
 GitHub release first. The workflow uses GitHub's own token; `DUCK_TOKEN` and a personal access token
 are not involved.
 
-[`docs/project/ci-setup.md`](docs/project/ci-setup.md) covers key custody, the secrets, and rotation.
+The workflow uses no release secrets or signing keys. The publication, asset-integrity and robot
+verification contract is owned by
+[`docs/design/updater-design.md`](docs/design/updater-design.md) §5.4 and §16.3.

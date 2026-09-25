@@ -68,14 +68,13 @@ export PKG_CONFIG_PATH="${PKG_CONFIG_PATH:-/usr/lib/aarch64-linux-gnu/pkgconfig}
 
 cargo zigbuild --release --target "aarch64-unknown-linux-gnu.$GLIBC_FLOOR" --bins
 
-# Releases for the engine to install, minted host-native: a release is signed manifests and
-# tarballs, which depend on the target architecture no more than the ones GitHub serves do.
+# Releases for the engine to install, minted host-native: manifests and tarballs depend on the
+# target architecture no more than the ones GitHub serves do.
 # Building this for aarch64 too would only mean a second cross-compile to produce identical
 # bytes.
 #
 # `--prefix` is the path *inside the container*, because that is where `updater.toml` is
-# read. Every version the checks need is minted in one run: one run is one signing key, and
-# releases signed by two different keys cannot sit in the same tree.
+# read. Every version the checks need is minted in one run so the fixture is self-contained.
 echo "==> minting release fixtures"
 rm -rf "$FIXTURE"
 cargo run -q -p test-support --example fake-release -- "$FIXTURE" --prefix /tmp/duck \
@@ -98,12 +97,8 @@ mkdir -p "$INSTALL_STAGED" "$INSTALL_RELEASE"
 # Both lists parsed from the workflow, for the reason xtask/tests/artifact.rs exists: a copy
 # kept here would be a third hand-maintained list to drift from the other two.
 #
-# `_build-release.yml`, because that is where the recipe lives: `release.yml` decides which channel
-# is being published and calls it, and holds no `cp` or `--include` line of its own. Parsing the
-# entry point instead produced an empty list and a failure two hundred lines later —
-# "the installed release has no systemd/updaterd.service" — so the emptiness is now checked here,
-# where it can name its own cause.
-PACKAGING_WORKFLOW=.github/workflows/_build-release.yml
+# The stable recipe lives directly in the one manually dispatched release workflow.
+PACKAGING_WORKFLOW=.github/workflows/release.yml
 
 staged_binaries="$(grep -o -- 'release/[a-z]* staged/' "$PACKAGING_WORKFLOW" \
     | sed 's|release/||; s| staged/||' | sort -u)"

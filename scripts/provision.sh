@@ -64,7 +64,6 @@ set -eu
 ENV_REPO="${DUCK_REPO:-}"
 ENV_REF="${DUCK_REF:-}"
 ENV_TOKEN="${DUCK_TOKEN:-}"
-ENV_DEV_KEY="${DUCK_DEV_KEY:-}"
 ENV_FORCE="${DUCK_FORCE_REINSTALL:-}"
 ENV_WEIRD_BLE="${DUCK_WEIRD_BLE:-}"
 ENV_GSTREAMER="${DUCK_GSTREAMER:-}"
@@ -97,10 +96,6 @@ TOKEN="$ENV_TOKEN"
 # end of phase 2. It is also the only thing here that is per-board rather than per-session, and an
 # exported name is exactly the kind of thing that is still set when the next board is provisioned.
 NAME=""
-
-# Path to `team.dev.pub`, to make this a dev board. Usually somewhere under /tmp because it
-# arrived by `scp`, which is why phase 1 copies it somewhere that survives the reboot.
-DEV_KEY="$ENV_DEV_KEY"
 
 # Passed straight through to install.sh.
 FORCE_REINSTALL="$ENV_FORCE"
@@ -169,10 +164,6 @@ RESUMED=0
 
 # Stop before the reboot instead of taking it, for anyone who wants the steps one at a time.
 NO_REBOOT="${DUCK_NO_REBOOT:-}"
-# Where a dev key is parked across the reboot. A public key, so 0644 is right; the point of
-# moving it is only that /tmp does not survive the reboot this asks for.
-DEV_KEY_KEPT="${STATE_DIR}/team.dev.pub"
-
 # Persisted copies the two board scripts leave behind, which is what phase 2 should prefer:
 # they are on disk, and re-fetching would be a second chance for the network to fail.
 SETUP_SELF=/usr/local/sbin/robot-setup-board
@@ -269,7 +260,6 @@ save_state() {
         kv DUCK_REPO "$REPO"
         kv DUCK_REF "$REF"
         kv DUCK_TOKEN "$TOKEN"
-        kv DUCK_DEV_KEY "$1"
         kv DUCK_FORCE_REINSTALL "$FORCE_REINSTALL"
         kv DUCK_WEIRD_BLE "$WEIRD_BLE"
         kv DUCK_GSTREAMER "$GSTREAMER"
@@ -293,7 +283,6 @@ load_state() {
     REPO="${ENV_REPO:-${DUCK_REPO:-$REPO}}"
     REF="${ENV_REF:-${DUCK_REF:-$REF}}"
     TOKEN="${ENV_TOKEN:-${DUCK_TOKEN:-}}"
-    DEV_KEY="${ENV_DEV_KEY:-${DUCK_DEV_KEY:-}}"
     FORCE_REINSTALL="${ENV_FORCE:-${DUCK_FORCE_REINSTALL:-}}"
     WEIRD_BLE="${ENV_WEIRD_BLE:-${DUCK_WEIRD_BLE:-}}"
     GSTREAMER="${ENV_GSTREAMER:-${DUCK_GSTREAMER:-1}}"
@@ -370,23 +359,6 @@ create_group() {
     else
         warn "could not add ${operator} to the robot group; robotctl will need sudo"
     fi
-}
-
-# Park a dev key somewhere that survives the reboot, and answer with where it went.
-#
-# The documented way to get one onto a board is `scp` into /tmp, and /tmp is cleared by the
-# reboot between the two phases. Without this, `DUCK_DEV_KEY=/tmp/team.dev.pub` produces a
-# board that provisions cleanly and is silently not a dev board — the failure only shows up
-# later as `--ref` being refused, which reads like a broken release.
-keep_dev_key() {
-    [ -n "$DEV_KEY" ] || return 0
-    [ -f "$DEV_KEY" ] || die "DUCK_DEV_KEY=${DEV_KEY} is not a readable file.
-  Pass the *public* half — team.dev.pub. install.sh validates it properly in phase 2; this
-  only checks it is there, because finding out after a reboot is worse."
-
-    mkdir -p "$STATE_DIR"
-    install -m 644 "$DEV_KEY" "$DEV_KEY_KEPT"
-    say "kept the dev key at ${DEV_KEY_KEPT} — /tmp does not survive the reboot"
 }
 
 # Install and enable the unit that finishes this after the reboot.
@@ -488,9 +460,6 @@ EOF
 
 phase_one() {
     say "phase 1: board and network"
-    # Before anything is changed: a mistyped dev-key path should cost nothing at all, and this
-    # is the only argument that can be wrong in a way nothing later would catch.
-    keep_dev_key
     create_group
 
     tmp=/tmp/setup-board.sh
@@ -502,11 +471,7 @@ phase_one() {
     fetch migrate-network.sh "$tmp"
     sh "$tmp"
 
-    if [ -n "$DEV_KEY" ]; then
-        save_state "$DEV_KEY_KEPT"
-    else
-        save_state ""
-    fi
+    save_state
 
     say "phase 1 done — both changes are staged, and a device-tree overlay and a network stack"
     say "cannot swap under a running kernel, so the rest happens after a reboot"
@@ -614,10 +579,6 @@ phase_two() {
     DUCK_TOKEN="$TOKEN"
     DUCK_FORCE_REINSTALL="$FORCE_REINSTALL"
     export DUCK_REPO DUCK_REF DUCK_TOKEN DUCK_FORCE_REINSTALL
-    if [ -n "$DEV_KEY" ]; then
-        DUCK_DEV_KEY="$DEV_KEY"
-        export DUCK_DEV_KEY
-    fi
     sh "$tmp"
 
     apply_asked_ref
@@ -691,8 +652,7 @@ apply_asked_ref() {
     journalctl -u updaterd -b --no-pager
     journalctl -u robotd -b --no-pager
   Common causes: CI has not published the build yet (gh run list --branch ${ASKED_REF}), the
-  branch has no build at all, or this is not a dev board so a dev-signed build is refused
-  (grep -c 'DEV BOARD' ${LOG})."
+  branch has no build at all, or the build failed compatibility or integrity checks."
             ;;
     esac
 }

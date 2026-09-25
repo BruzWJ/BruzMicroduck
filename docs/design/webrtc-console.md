@@ -70,7 +70,7 @@ listener; nothing in the unit changes.
 `include_str!("../webclient/index.html")`, served from memory.
 
 The alternative — install it under `/opt/robot/daemon/current/webclient/` and read it at
-request time — costs an `--include` line in *three* places (`_build-release.yml`, `dev.yml`,
+request time — costs an `--include` line in *three* places (`release.yml`, `dev.yml`,
 `scripts/dev-push.sh`), which `xtask`'s packaging tripwires exist to keep in step and which is
 exactly the list that has drifted before. It also puts a filesystem read behind a network request
 in a unit running `ProtectSystem=strict`, and it makes "which page is this robot serving" a

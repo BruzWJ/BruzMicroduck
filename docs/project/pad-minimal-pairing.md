@@ -223,10 +223,6 @@ export DUCK_TOKEN=github_pat_replace_with_your_token
 export DUCK_REF=pad-privacy-device-not-off
 ```
 
-```bash
-export DUCK_DEV_KEY=$HOME/team.dev.pub
-```
-
 Steps 1 and 2 need neither a token nor the network.
 
 ## Untested differences against `microduck_runtime`

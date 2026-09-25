@@ -62,7 +62,7 @@ mod exit {
     pub const BUSY: u8 = 4;
     /// Refused: incompatible, or preflight failed. Distinct so a test can assert
     /// "correctly rejected" rather than "something broke" — needed for the
-    /// bad-signature and wrong-hardware cases.
+    /// bad-hash and wrong-hardware cases.
     pub const REFUSED: u8 = 5;
     /// Not permitted to change this robot. Distinct from REFUSED: the request was
     /// well-formed and applicable, the caller just isn't allowed — so the fix is
@@ -1093,53 +1093,34 @@ enum UpdateCommand {
         /// Install what a branch last built, e.g. `--ref my-branch`.
         ///
         /// Resolves to the moving `daemon-dev-<ref>` tag CI publishes on every push, so the
-        /// exact version — `0.2.0-dev.17.abc1234` — never has to be typed. Dev builds are
-        /// signed with the team key, so a robot only accepts one if `allow_dev_keys` is on
-        /// and that key is in its trusted set: a customer robot refuses them.
+        /// exact version — `0.2.0-dev.17.abc1234` — never has to be typed. The explicit
+        /// `--ref` is the opt-in; the stable `latest` scan never selects these prereleases.
         ///
         /// `conflicts_with` version rather than a silent precedence: asking for both a ref
         /// and a version is a mistake worth reporting, not one to resolve by guessing.
         #[arg(long = "ref", value_name = "REF", conflicts_with = "version")]
         git_ref: Option<String>,
 
-        /// Install the release candidate from the staging channel.
-        ///
-        /// A candidate is a manually published prerelease under the configured staging prefix. It
-        /// is signed with the release key and carries the stable version it is testing. What makes
-        /// it unreachable otherwise is that it is flagged as a
-        /// prerelease, which a plain `apply` skips so that no robot drifts onto a build no
-        /// one has validated.
-        ///
-        /// This is that filter's only opt-in, and it is per-command on purpose: nothing on
-        /// the board is left switched on afterwards, so the next `apply` is back on stable.
-        /// Pair it with `--version` to name one candidate rather than the newest.
-        #[arg(long, conflicts_with = "git_ref")]
-        staging: bool,
-
         /// Install from a directory on this robot instead of from the configured source.
         ///
-        /// The laptop-to-board path: `scripts/dev-push.sh` builds, signs with the dev key,
-        /// copies the directory over and ends here. The directory holds what a release is —
-        /// `<version>.manifest.json`, its `.minisig`, the artifact and the artifact's
-        /// `.minisig` — which is what `cargo xtask package` writes.
+        /// The laptop-to-board path: `scripts/dev-push.sh` builds, copies the directory over and
+        /// ends here. The directory holds `<version>.manifest.json` and the artifact it names,
+        /// which is what `cargo xtask package` writes.
         ///
-        /// This is an ordinary apply: preflight, signature, hash, compatibility, the health
+        /// This is an ordinary apply: preflight, hash, compatibility, the health
         /// gate and auto-rollback all still run, and a build that does not come up is
         /// reverted. That is the whole difference from `updaterd install --from`, which
         /// forces the gate off and therefore refuses to touch a live release at all.
         ///
-        /// Being local relaxes nothing: a build installs because the dev key is in this
-        /// robot's trusted set and `allow_dev_keys` is on, so a customer robot refuses it
-        /// exactly as it refuses `--ref`.
+        /// Being local changes only where the bytes come from; the hash, compatibility, health
+        /// gate and rollback behaviour are unchanged.
         ///
         /// **Not under /tmp or /var/tmp.** `updaterd.service` sets `PrivateTmp=yes`, so the
         /// daemon that reads this directory has its own pair of those and neither is the one
         /// a shell copied into. Preflight names that case rather than letting it surface as a
         /// missing manifest in a directory the caller can plainly see.
         ///
-        /// `conflicts_with = "staging"` because a directory has no channels — the source
-        /// layer says so too, and being told at parse time is better than after a connection.
-        #[arg(long, value_name = "DIR", conflicts_with = "staging")]
+        #[arg(long, value_name = "DIR")]
         from: Option<PathBuf>,
 
         /// Verify everything, then stop before the symlink swap.
@@ -1147,7 +1128,7 @@ enum UpdateCommand {
         dry_run: bool,
 
         /// Proceed even if a telepresence session is active. Never bypasses
-        /// signature, hash, or compatibility checks.
+        /// hash or compatibility checks.
         #[arg(long)]
         interrupt_sessions: bool,
     },
@@ -4881,22 +4862,15 @@ fn main() -> ExitCode {
     }
 }
 
-/// Which build `apply` should move to, from the three flags that can name one.
+/// Which build `apply` should move to, from the two flags that can name one.
 ///
-/// Its own function so the tests exercise this decision rather than a copy of it. clap already
-/// refuses `--ref` beside either of the others, so the only pair reaching here together is
-/// `--staging --version`, which names one candidate rather than the newest.
-fn apply_target(
-    staging: bool,
-    version: Option<&semver::Version>,
-    git_ref: Option<&str>,
-) -> proto::Target {
-    match (staging, version, git_ref) {
-        (true, Some(version), _) => proto::Target::StagingExact(version.clone()),
-        (true, None, _) => proto::Target::Staging,
-        (false, Some(version), _) => proto::Target::Exact(version.clone()),
-        (false, None, Some(git_ref)) => proto::Target::Ref(git_ref.to_owned()),
-        (false, None, None) => proto::Target::Latest,
+/// Its own function so the tests exercise this decision rather than a copy of it. clap refuses
+/// `--ref` beside `--version`.
+fn apply_target(version: Option<&semver::Version>, git_ref: Option<&str>) -> proto::Target {
+    match (version, git_ref) {
+        (Some(version), _) => proto::Target::Exact(version.clone()),
+        (None, Some(git_ref)) => proto::Target::Ref(git_ref.to_owned()),
+        (None, None) => proto::Target::Latest,
     }
 }
 
@@ -5027,13 +5001,12 @@ fn run(cli: Cli) -> Result<(), Failure> {
             component: name,
             version,
             git_ref,
-            staging,
             from,
             dry_run,
             interrupt_sessions,
         } => proto::Call::Apply(proto::ApplyParams {
             component: proto::ComponentId::new(name),
-            target: apply_target(*staging, version.as_ref(), git_ref.as_deref()),
+            target: apply_target(version.as_ref(), git_ref.as_deref()),
             options: proto::ApplyOptions {
                 dry_run: *dry_run,
                 interrupt_sessions: *interrupt_sessions,
@@ -5944,45 +5917,6 @@ mod tests {
         assert!(version.is_none());
     }
 
-    /// `--staging` alone means the newest candidate; with `--version`, that one candidate.
-    ///
-    /// The pair is the only combination clap allows through, so the match that turns these
-    /// into a `Target` has one case that cannot be reached by argument parsing — asserted
-    /// here rather than trusted, because getting it backwards would install a *stable*
-    /// release while reporting that it installed a candidate.
-    #[test]
-    fn staging_selects_the_candidate_channel() {
-        let target = |args: &[&str]| {
-            let mut argv = vec!["robotctl", "update", "apply", "daemon"];
-            argv.extend_from_slice(args);
-            let cli = Cli::try_parse_from(argv).expect("must parse");
-            let Namespace::Update {
-                command:
-                    UpdateCommand::Apply {
-                        version,
-                        git_ref,
-                        staging,
-                        ..
-                    },
-            } = cli.namespace
-            else {
-                panic!("expected update apply");
-            };
-            apply_target(staging, version.as_ref(), git_ref.as_deref())
-        };
-
-        assert_eq!(target(&["--staging"]), proto::Target::Staging);
-        assert_eq!(
-            target(&["--staging", "--version", "0.3.0"]),
-            proto::Target::StagingExact(semver::Version::new(0, 3, 0))
-        );
-        assert_eq!(target(&[]), proto::Target::Latest);
-        assert_eq!(
-            target(&["--version", "0.3.0"]),
-            proto::Target::Exact(semver::Version::new(0, 3, 0))
-        );
-    }
-
     /// `--from` parses, and pairs with `--version` and `--ref`.
     ///
     /// The pairing is the point: the directory says *where* to read, the target says *which*
@@ -6026,24 +5960,6 @@ mod tests {
         );
     }
 
-    /// A directory has no channels, so `--from --staging` cannot mean anything.
-    #[test]
-    fn from_and_staging_are_refused_together() {
-        assert!(
-            Cli::try_parse_from([
-                "robotctl",
-                "update",
-                "apply",
-                "daemon",
-                "--from",
-                "/var/tmp/duck-sideload",
-                "--staging",
-            ])
-            .is_err(),
-            "--from with --staging must be refused"
-        );
-    }
-
     /// A path that is not there fails as bad usage, against the shell that typed it.
     ///
     /// `updaterd` would also refuse it, but three steps into an apply and with the path as it
@@ -6075,25 +5991,6 @@ mod tests {
         assert!(err.message.contains("nope"), "{}", err.message);
 
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// A candidate and a branch build are different streams under different keys, so asking
-    /// for both is a mistake to report rather than one to resolve by precedence.
-    #[test]
-    fn staging_and_ref_are_refused_together() {
-        assert!(
-            Cli::try_parse_from([
-                "robotctl",
-                "update",
-                "apply",
-                "daemon",
-                "--staging",
-                "--ref",
-                "my-branch",
-            ])
-            .is_err(),
-            "--staging with --ref must be refused"
-        );
     }
 
     /// A branch name with a slash must survive argument parsing untouched.

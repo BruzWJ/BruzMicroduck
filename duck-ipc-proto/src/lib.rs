@@ -423,7 +423,15 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// an `updaterd` that has not run its first check yet — every board for the minute after it
 /// starts, including the one right after the update that brought v35 in. Both warned. The attempt
 /// tells them apart, and its error is what the warning was pointing at the journal for.
-pub const API_VERSION: u32 = 37;
+///
+/// # v38 — GitHub-hosted release integrity and one release channel
+///
+/// Component releases now use GitHub/HTTPS as the publisher trust boundary and SHA-256 for
+/// downloaded artifact integrity. [`RunEvent::Manifest`] therefore no longer reports a Minisign
+/// key. [`Target`] also no longer carries the release-candidate-only `staging` variants.
+/// Releases are published directly to the stable channel; named versions and branch builds
+/// remain available through [`Target::Exact`] and [`Target::Ref`].
+pub const API_VERSION: u32 = 38;
 
 /// The observation width every policy this robot family runs is built against.
 ///
@@ -2826,21 +2834,6 @@ pub enum Target {
     /// install of one looks like a downgrade. Refusing them would make the flow useless,
     /// and an operator naming a ref is stating intent as explicitly as naming a version.
     Ref(String),
-    /// The newest manually published **release candidate** under the staging tag prefix.
-    ///
-    /// A candidate is unreachable any other way. It is flagged as a prerelease on GitHub, so
-    /// [`Target::Latest`] skips it by design — that filter is what keeps a robot from drifting
-    /// onto a build no one has validated, and it has no opt-out. This variant is the opt-*in*:
-    /// an operator with root saying "the one being tested", once.
-    ///
-    /// The candidate carries the stable version it is testing (`0.3.0`, not `0.3.0-rc1`) and is
-    /// signed with the release key. What separates the two streams is
-    /// the tag it lives under, which is why resolving this needs its own prefix rather than a
-    /// flag on the existing one.
-    Staging,
-    /// A named candidate, when the newest is not the one wanted — reinstalling the candidate a
-    /// board already ran after a rollback, or comparing two of them.
-    StagingExact(semver::Version),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -2851,17 +2844,15 @@ pub struct ApplyOptions {
     #[serde(default)]
     pub dry_run: bool,
     /// Skip *only* the "no active remote session" preflight check. Never bypasses
-    /// signature, hash or compatibility — those have no override.
+    /// hash or compatibility checks — those have no override.
     #[serde(default)]
     pub interrupt_sessions: bool,
     /// Take the release from this directory **on the robot** instead of the component's
     /// configured source. The laptop-to-board path: `scripts/dev-push.sh`.
     ///
-    /// Changes where the bytes come from, not what is trusted. The directory is read by
-    /// the same `LocalDir` source the tests and the offline installer use, so the
-    /// manifest signature, the artifact hash and the compatibility checks all still have
-    /// to pass — a locally built release installs because the dev key is in the robot's
-    /// trusted set, not because anything is skipped.
+    /// Changes where the bytes come from, not how they are processed. The directory is read by
+    /// the same `LocalDir` source the tests and offline installer use, so the artifact hash and
+    /// compatibility checks still have to pass.
     ///
     /// A `String` rather than a `PathBuf` because this is a JSON wire type: a path that
     /// is not UTF-8 cannot cross this socket in either form, and the plain type says so
@@ -3145,13 +3136,13 @@ pub struct ComponentStatus {
     pub reason: Option<String>,
     pub pinned: Option<semver::Version>,
     pub last_attempt: Option<LogEntry>,
-    /// When this component's update source last answered with a manifest that verified, unix
-    /// seconds. `None` on a board where it never has, and from an `updaterd` older than v35.
+    /// When this component's update source last answered with a valid manifest, unix seconds.
+    /// `None` on a board where it never has, and from an `updaterd` older than v35.
     ///
     /// A robot that cannot reach its source reads exactly like one with nothing to install: the
     /// scheduled check fails and every other field here stays the same. How long ago the source
-    /// last answered is what shows it. A source replaying an old signed manifest still answers,
-    /// so this does not catch that one; `updater-design.md` §8.4.2 has what would.
+    /// last answered is what shows it. A source replaying an old manifest still answers, so this
+    /// does not catch that one; `updater-design.md` §8.4.2 has what would.
     pub last_checked: Option<i64>,
     /// The last check of this component's source, answered or not. `None` before the first one
     /// on this board, and from an `updaterd` older than [`API_CHECK_ATTEMPT`].
@@ -3170,8 +3161,7 @@ pub struct CheckAttempt {
     /// synced, unlike [`ComponentStatus::last_checked`], because a clock TLS rejects is one of the
     /// reasons a check fails.
     pub at: i64,
-    /// Why the check got no answer: the fetch, the signature or the channel. `None` when it got
-    /// one.
+    /// Why the check got no answer: the fetch, manifest parse or channel. `None` when it got one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -3323,7 +3313,7 @@ pub enum RunEvent {
     /// The run opened: what was asked for, by whom, and what was live at the time.
     Began {
         component: ComponentId,
-        /// The target as the caller named it — `latest`, `0.1.4`, `ref my-branch`, `staging`,
+        /// The target as the caller named it — `latest`, `0.1.4`, `ref my-branch`,
         /// `dir /home/pi/push`. Rendered, not structured: it exists to be read back to whoever
         /// is asking "what did I actually run", and `Target` already carries the structure.
         target: String,
@@ -3340,14 +3330,12 @@ pub enum RunEvent {
         phase: Phase,
         detail: Option<String>,
     },
-    /// The manifest that passed its signature check — every fact that decides what follows.
+    /// The manifest selected for this run — every fact that decides what follows.
     Manifest {
         version: semver::Version,
         sha256: String,
         bytes: Option<u64>,
         url: Option<String>,
-        /// Which trusted key verified it. A set of keys is allowed, so which one matters.
-        signed_by: Option<String>,
         source_revision: Option<String>,
     },
     /// A hook ran, with its output verbatim. The richest thing in the file: this is the ONNX
@@ -6525,7 +6513,7 @@ mod tests {
         assert!(!serde_json::to_string(&open).unwrap().contains("psk"));
     }
 
-    /// `Target` must survive the wire in all five forms, and the three that carry data must
+    /// `Target` must survive the wire in all three forms, and the two that carry data must
     /// not be confusable. `latest` is a bare string while the others are single-key objects,
     /// which is what an externally-tagged enum with `rename_all = "snake_case"` produces —
     /// pinned here because this JSON is a contract with `btd` and the app, not an
@@ -6539,11 +6527,6 @@ mod tests {
                 r#"{"exact":"1.2.3"}"#,
             ),
             (Target::Ref("my-branch".into()), r#"{"ref":"my-branch"}"#),
-            (Target::Staging, r#""staging""#),
-            (
-                Target::StagingExact(semver::Version::new(0, 3, 0)),
-                r#"{"staging_exact":"0.3.0"}"#,
-            ),
         ];
         for (target, expected) in cases {
             let line = serde_json::to_string(&target).unwrap();

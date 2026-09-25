@@ -118,15 +118,10 @@ what closes it.
 
 ## Verifying on the board
 
-The board needs the dev key once, or `--ref` is refused. `install.sh` does both halves —
-installing the key and flipping `allow_dev_keys` — given the path to the public half:
-
-```bash
-sudo DUCK_TOKEN="$DUCK_TOKEN" DUCK_DEV_KEY=/tmp/team.dev.pub sh /tmp/install.sh
-```
-
-`team.dev.pub` is committed at `deploy/dev-key/`, outside `trusted_keys/` so nothing installs it
-by default. The by-hand equivalent is in [`../deploy/README.md`](../../deploy/README.md).
+This dated bring-up originally required a separate development key. That mechanism has been
+removed: the current updater accepts a development build only through an explicit `--ref` request
+from a locally authorized client, while the stable resolver excludes the development namespace.
+The current mechanism is [`updater-design.md`](../design/updater-design.md).
 
 Then:
 

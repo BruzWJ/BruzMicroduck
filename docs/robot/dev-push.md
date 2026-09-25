@@ -1,23 +1,14 @@
 # Build here, install on the board
 
 The loop between changing a line and watching the robot run it, with no push, no CI run and no
-tag. One command from a clone of this repo builds for the board, signs the result and installs it
+tag. One command from a clone of this repo builds for the board, packages the result and installs it
 over ssh — about a minute on an incremental build, against several for a push plus a CI run.
 
 `scripts/dev-push.sh` is that command. Everything below is a flag on it.
 
 ## Once, before the first push
 
-Three things, and then never again.
-
-**The board has to be a dev board.** The artifact is signed with the team dev key, so a customer
-robot refuses it exactly as it refuses `--ref`. [`install-dev.md`](install-dev.md) is how a board
-becomes one.
-
-**The dev signing key** goes at `~/.duck-keys/team.dev.key` — the secret half of the key CI signs
-branch builds with, which a team member has. Set `DUCK_DEV_SECRET_KEY` if yours lives elsewhere.
-
-**A toolchain that can build for the board.** Either install the cross-compiler:
+Install a toolchain that can build for the board. Either install the cross-compiler:
 
 ```bash
 cargo install cargo-zigbuild --locked
@@ -71,14 +62,13 @@ scripts/dev-push.sh radxa@192.168.1.42
 export DUCK_BOARD=radxa@192.168.1.42
 ```
 
-It cross-compiles the workspace, packages the same artifact a release does, signs it with the dev
-key, copies it to `~/duck-sideload` on the board, and applies it there through
+It cross-compiles the workspace, packages the same artifact a release does, copies it to
+`~/duck-sideload` on the board, and applies it there through
 `robotctl update apply --from`. Then it waits for the daemons to report the new release:
 
 ```
 ==> building 0.5.1-dev.local.1763400000.g7fc1444 for the board (zigbuild)
 ==> packaging
-==> signing with /Users/you/.duck-keys/team.dev.key
 ==> copying to radxa@192.168.1.42:/home/radxa/duck-sideload
 ==> applying on radxa@192.168.1.42
 ==> 0.5.1-dev.local.1763400000.g7fc1444 is live on radxa@192.168.1.42
@@ -111,7 +101,7 @@ robotctl version
 Two pushes of the same dirty tree never collide — the version carries the push's timestamp, not
 just the commit. The tree is expected to be dirty here.
 
-**This is an ordinary update.** The signature, the artifact hash, compatibility, the health gate
+**This is an ordinary update.** The artifact hash, compatibility, the health gate
 and auto-rollback all run: a build that does not come up is reverted and the board is back on what
 it was running. Going back on purpose is the ordinary command too:
 
@@ -180,8 +170,8 @@ sudo systemctl daemon-reload && sudo systemctl restart robotd
 scripts/dev-push.sh --dry-run radxa@192.168.1.42
 ```
 
-Builds, signs, copies, and then does everything the real apply does except the swap: signature,
-hash, compatibility, the extraction, and the check that no installed unit is left pointing at a
+Builds, packages, copies, and then does everything the real apply does except the swap: hash,
+compatibility, the extraction, and the check that no installed unit is left pointing at a
 binary this build does not contain. It stops before `current` moves, so the board keeps running what
 it was running and no daemon restarts.
 
@@ -238,9 +228,6 @@ ordinary command.
 
 ## When it does not work
 
-**`no dev signing key at ...`** — the board verifies this artifact like any release, so it has to
-be signed. Get `team.dev.key` from a team member, or point `DUCK_DEV_SECRET_KEY` at it.
-
 **`cargo-zigbuild is not installed`** — install it and zig, or use `--docker`.
 
 **`no libudev.so.1 on <board>`** — the first push copies that library off the board to link `padd`
@@ -263,16 +250,6 @@ neither is the one your shell copied into. Any other path works; the default, `~
 is one. On a board whose release predates that check, the same mistake reads as
 `no manifest for version <version> in <dir>` — for a directory whose `ls` lists exactly that
 manifest.
-
-**`verification failed: signature did not verify against any of N usable trusted key(s)`** — reads
-like a corrupt release, and usually means the board is not a dev board: the dev key never landed, or
-`allow_dev_keys` is off, either of which leaves that key out of the usable set. On the board:
-
-```bash
-grep -c 'DEV BOARD' /var/lib/robot/provision.log
-```
-
-`0` means the key is missing; [`install-dev.md`](install-dev.md) has both halves of the fix.
 
 **`could not reach <name> over Bluetooth`** — the robot has to be advertising and in range for
 the name path to resolve an address.
@@ -337,13 +314,12 @@ This should not have been necessary, so it is worth reading the journal for why 
 | `DUCK_PIN` | The robot's pairing PIN, if it is not the factory `000000`. Read by `duckctl`. |
 | `DUCK_BOARD_CACHE` | Where resolved addresses are cached. Default `~/.cache/duck/boards`. |
 | `DUCK_BOARD` | The board, by address, instead of an argument. `radxa@192.168.1.42`. |
-| `DUCK_DEV_SECRET_KEY` | The dev signing key. Default `~/.duck-keys/team.dev.key`. |
 | `DUCK_SIDELOAD_DIR` | Where the artifact lands on the board. Default `~/duck-sideload` there. Never under `/tmp` or `/var/tmp`: `updaterd` has private copies of both and would read those. |
 | `DUCK_CROSS_SYSROOT` | The cached libudev copy. Default `~/.cache/duck-cross/aarch64`. |
 
 ## What this deliberately does not do
 
-Nothing a release does for provenance. The version carries a timestamp rather than a tag, the
-artifact is signed with a key customer robots refuse, and nothing is published — so nobody else can
-install what you just ran. Cutting a release is still a tag and `release.yml`
+Nothing a release does for provenance. The version carries a timestamp rather than a tag and
+nothing is published, so nobody else can install what you just ran. Cutting a release is the
+permission-gated manual `release.yml` workflow
 ([`../../README.md`](../../README.md)).

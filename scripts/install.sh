@@ -16,33 +16,29 @@
 #
 # The circularity — "an update needs the updater, which arrives in an update" — is broken
 # by downloading one bare `updaterd` binary and running its `install` subcommand. That
-# runs the ordinary engine: signature verification, extraction, the atomic swap, the
+# runs the ordinary engine: SHA-256 verification, extraction, the atomic swap, the
 # journal entry. There is no bootstrap-specific install logic, so nothing here can drift
 # from how every later update behaves.
 #
 # Notably this script never parses a manifest. It hands `updaterd` the config and lets the
-# configured source resolve `latest`, because a shell script picking the version out of a
-# signed JSON document would be a second, weaker reader of that document.
+# configured source resolve `latest`, because a shell script picking the version out of the
+# release manifest would be a second reader of that document.
 #
-# For the same reason only two files come from the repository over raw.githubusercontent:
-# the config and the public keys, both needed *before* anything can be verified. The unit
-# files and the journald drop-in are taken out of the installed release instead — the same
-# bytes a signature was checked against.
+# Only the config comes from the repository over raw.githubusercontent. Unit files and the
+# journald drop-in are taken out of the installed release so provisioning and later updates
+# install the same bytes.
 #
-# ── chain of trust ───────────────────────────────────────────────────────────
+# ── release integrity ───────────────────────────────────────────────────────
 #
-#   1. TLS to raw.githubusercontent.com gets this script, the config and the public keys.
-#   2. TLS to github.com gets the bootstrap `updaterd`. It is NOT yet verified.
-#   3. That binary verifies the manifest and artifact against the keys from (1), and
-#      refuses to install anything they do not sign.
-#   4. Afterwards this script compares the bootstrap binary's sha256 against
-#      `current/bin/updaterd`, which came out of the verified artifact. Equal digests
-#      mean the binary from (2) was genuine after all. CI asserts the two are the same
-#      bytes, so a mismatch is a real finding, not a packaging quirk.
+#   1. TLS to raw.githubusercontent.com gets this script and the matching config.
+#   2. TLS to github.com gets the bootstrap `updaterd` and the release assets.
+#   3. The updater checks the artifact against the SHA-256 in the release manifest before
+#      extracting it.
+#   4. Afterwards this script compares the bootstrap binary's SHA-256 with
+#      `current/bin/updaterd`. CI asserts the two are byte-identical.
 #
-# The residual trust is GitHub itself, which is also where this script came from — step
-# (4) narrows it rather than removing it. An install that wants no such window should use
-# `updaterd install --from <dir>` against files carried in by hand.
+# As in the project's GitHub release workflow, publisher authenticity rests on GitHub account,
+# repository-permission and TLS security; hashes bind the downloaded bytes to the manifest.
 
 set -eu
 
@@ -51,11 +47,7 @@ set -eu
 # The repository releases are published from. Override for a fork or a test repo.
 REPO="${DUCK_REPO:-pollen-robotics/microduck}"
 
-# Branch the trusted keys are read from. Pin to a tag for a reproducible provisioning run.
-#
-# Deliberately *not* where the config comes from — see `CONFIG_REF` below. Keys and config age
-# differently: the key set only ever grows, so the newest is the safest, while a config field is
-# only understood by binaries from its own version onwards.
+# Branch the provisioning scripts are read from. Pin to a tag for a reproducible run.
 ENV_REF="${DUCK_REF:-}"
 REF="${ENV_REF:-main}"
 
@@ -99,17 +91,6 @@ TOKEN="${DUCK_TOKEN:-}"
 # `robotctl rollback` for that reason. Ordinary updates keep the gate.
 FORCE_REINSTALL="${DUCK_FORCE_REINSTALL:-}"
 
-# Trust the team dev key on this board, so `robotctl update apply --ref <branch>` works.
-#
-#   sudo DUCK_TOKEN=... DUCK_DEV_KEY=/path/to/team.dev.pub sh install.sh
-#
-# Operator-supplied on purpose, and never fetched. `deploy/trusted_keys/README.md` is
-# explicit that `team.dev.pub` stays out of the repository: a robot that trusts it installs
-# anything anyone on the team builds, unreviewed. Fetching it here would turn that from a
-# per-board decision into the default for every robot we image, which is precisely the
-# property that must not be automatic.
-DEV_KEY="${DUCK_DEV_KEY:-}"
-
 # Install everything and start nothing.
 #
 #   sudo DUCK_NO_START=1 DUCK_TOKEN=... sh install.sh
@@ -138,14 +119,8 @@ BOOTSTRAP_URL=""
 group_pending=0
 
 CONFIG_DIR=/etc/robot
-KEYS_DIR="${CONFIG_DIR}/trusted_keys"
 INSTALL_DIR=/opt/robot/daemon
 UNIT_DIR=/etc/systemd/system
-
-# Public keys expected in the image. All three, not just the one that signs today: a
-# robot verifies only against the set baked into it, so this is the single chance to make
-# key rotation possible without re-flashing by hand.
-KEYS="release-1.pub release-2.pub release-3.pub"
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -229,14 +204,9 @@ wait_for_clock() {
   certificate error. Check the network and systemd-timesyncd."
 }
 
-# The trust anchor and the one file an operator is expected to edit. Both come from the
-# repository over raw rather than from a release, because nothing can be verified until the keys
-# are here.
-#
-# But from *different refs*, and that distinction cost a board. The keys come from `REF`
-# (`main` by default) because the trusted set only ever grows, so the newest is the safest. The
-# config comes from the tag of the release actually being installed, because a config field is
-# only understood by binaries from its own version onwards — and pairing a config off `main`
+# The one file an operator is expected to edit comes from the tag of the release actually being
+# installed, because a config field is only understood by binaries from its own version onwards.
+# Pairing a config off `main`
 # with the last stable binary means every field added since that release breaks provisioning:
 #
 #   ERROR updaterd: invalid config error=TOML parse error at line 70
@@ -246,11 +216,10 @@ wait_for_clock() {
 # `deny_unknown_fields` is right — a typo in a robot's config should not be ignored — so the
 # fix belongs here, in what gets paired with what.
 #
-# An explicit `DUCK_REF` still wins for both: someone naming a ref is asking for that ref.
+# An explicit `DUCK_CONFIG_REF` still wins when testing a config change with a matching build.
 install_config() {
-    say "installing config and trusted keys"
+    say "installing config"
 
-    # Where the *config* comes from, as opposed to the keys and the scripts.
     if [ -n "$CONFIG_REF" ]; then
         config_raw="https://raw.githubusercontent.com/${REPO}/${CONFIG_REF}"
         warn "config from ${CONFIG_REF} because DUCK_CONFIG_REF asked for it. If that ref has
@@ -262,33 +231,29 @@ install_config() {
         config_raw="$RAW"
     fi
 
-    mkdir -p "$KEYS_DIR"
-    chmod 755 "$CONFIG_DIR" "$KEYS_DIR"
-
-    for key in $KEYS; do
-        # Only release-1 signs today; the spares are the rotation path and may not be
-        # committed yet. A missing spare is not fatal, a missing release-1 is.
-        if fetch "${RAW}/deploy/trusted_keys/${key}" "${KEYS_DIR}/${key}"; then
-            chmod 644 "${KEYS_DIR}/${key}"
-        else
-            rm -f "${KEYS_DIR}/${key}"
-            if [ "$key" = "release-1.pub" ]; then
-                die "cannot fetch ${key} from ${RAW}/deploy/trusted_keys/
-  Without it nothing can be verified, so there is nothing safe to install."
-            fi
-            warn "no ${key} published yet; skipping"
-        fi
-    done
+    mkdir -p "$CONFIG_DIR"
+    chmod 755 "$CONFIG_DIR"
 
     # Never overwritten. This is the file an operator edits to point a bench robot at a
-    # different channel or to allow dev keys, and clobbering that on a re-run is a
-    # surprise nobody wants twice.
+    # different channel, and clobbering that on a re-run is a surprise nobody wants twice.
     if [ -f "${CONFIG_DIR}/updater.toml" ]; then
         warn "keeping the existing ${CONFIG_DIR}/updater.toml"
     else
         fetch "${config_raw}/deploy/updater.toml" "${CONFIG_DIR}/updater.toml"
         sed -i "s|\"ORG/duck-daemon\"|\"${REPO}\"|" "${CONFIG_DIR}/updater.toml"
         chmod 644 "${CONFIG_DIR}/updater.toml"
+    fi
+
+    # API v38 removed the Minisign keyring. These two old top-level fields are rejected by
+    # `deny_unknown_fields`, so a preserved pre-v38 config must be migrated before the new
+    # bootstrap updater reads it. Delete only the exact retired assignments; every operator
+    # choice in the file remains untouched.
+    if grep -Eq '^(trusted_keys_dir|allow_dev_keys)[[:space:]]*=' "${CONFIG_DIR}/updater.toml"; then
+        sed -i \
+            -e '/^trusted_keys_dir[[:space:]]*=/d' \
+            -e '/^allow_dev_keys[[:space:]]*=/d' \
+            "${CONFIG_DIR}/updater.toml"
+        say "removed retired Minisign settings from ${CONFIG_DIR}/updater.toml"
     fi
 
     if grep -q '"ORG/' "${CONFIG_DIR}/updater.toml"; then
@@ -307,7 +272,7 @@ install_config() {
 }
 
 # Land the first release through the real engine. `--config` is the config installed
-# above, so there is one statement of where keys live, where state lives and which channel
+# above, so there is one statement of where state lives and which channel
 # this robot tracks — rather than a copy of those values here that could disagree with the
 # one the daemon reads a minute later.
 # Find the bootstrap asset's API download URL on the latest stable release.
@@ -408,7 +373,7 @@ bootstrap_first_release() {
 
   If that rolls back because the installed updaterd is too old to accept the new release,
   re-install through the release's own updaterd. This stops the daemons and runs without a
-  health gate, so it cannot auto-roll-back — signatures and hashes are still verified:
+  health gate, so it cannot auto-roll-back — the artifact hash is still verified:
 
     sudo DUCK_TOKEN="$DUCK_TOKEN" DUCK_FORCE_REINSTALL=1 sh /tmp/install.sh
 
@@ -427,7 +392,7 @@ EOF
     fi
     chmod +x "${tmp}/updaterd"
 
-    say "installing the first release (verifying signatures)"
+    say "installing the first release (verifying SHA-256)"
     # GITHUB_TOKEN, not DUCK_TOKEN: the engine reads that name, and it needs one for the
     # same reason this script does — a private repo's API answers 404 to an unauthenticated
     # caller. Exported only for this command, deliberately: nothing is written to disk, so
@@ -450,19 +415,17 @@ EOF
         die "the install reported success but nothing is live"
     fi
 
-    # Close the loop on the one unverified download. The installed binary came out of a
-    # signature-verified artifact; if the bootstrap binary matches it byte for byte, the
-    # bootstrap binary was genuine too.
+    # The bootstrap asset and the copy installed from the archive must be byte-identical.
     boot_sum="$(sha256sum "${tmp}/updaterd" | cut -d' ' -f1)"
     installed_sum="$(sha256sum "${INSTALL_DIR}/current/bin/updaterd" | cut -d' ' -f1)"
     if [ "$boot_sum" != "$installed_sum" ]; then
-        die "the bootstrap binary does not match bin/updaterd in the verified release.
+        die "the bootstrap binary does not match bin/updaterd in the hash-verified release.
   bootstrap: ${boot_sum}
   installed: ${installed_sum}
-  The installed release is signed and safe, but the binary that installed it was not the
-  one this release contains. Treat that as a compromised download and investigate."
+  GitHub served two different binaries for one release. Treat that as a compromised or
+  inconsistent download and investigate."
     fi
-    say "bootstrap binary verified against the signed release"
+    say "bootstrap binary matches the installed release"
 
     rm -rf "$tmp"
     trap - EXIT INT TERM
@@ -472,8 +435,8 @@ EOF
 # that is what makes their 0660 sockets mean "the robot group" rather than "root only".
 # systemd fails the unit outright if the group is missing.
 #
-# Taken from the installed release rather than from the repository, so it is the copy a
-# signature was checked against.
+# Taken from the installed release rather than from the repository, so provisioning uses the
+# same copy as every later update.
 create_group() {
     say "creating the robot group and the service accounts"
 
@@ -574,48 +537,6 @@ add_operator_to_group() {
     else
         warn "could not add ${operator} to the robot group; robotctl will need sudo"
     fi
-}
-
-# Make this a developer board: trust the dev key, and allow dev-signed releases.
-#
-# Both halves are needed and they are independent checks in the updater — a trusted key only
-# counts as a dev key if its filename ends `.dev.pub`, and a dev key is only honoured when
-# `allow_dev_keys` is on. Doing one without the other silently produces a board that still
-# refuses branch builds, with a signature error that reads like a corrupt release.
-install_dev_key() {
-    [ -n "$DEV_KEY" ] || return 0
-
-    [ -f "$DEV_KEY" ] || die "DUCK_DEV_KEY=${DEV_KEY} is not a readable file.
-  Pass the *public* half — team.dev.pub. If you only have the secret key:
-    minisign -R -s <secret> -p team.dev.pub"
-
-    # Checked here rather than discovered at verification time, where the error names the
-    # release and not the key, and sends you looking at the wrong thing.
-    if ! head -1 "$DEV_KEY" | grep -q 'untrusted comment:'; then
-        die "${DEV_KEY} does not look like a minisign public key.
-  Expected a two-line file beginning 'untrusted comment:'. A secret key or a signature
-  will be accepted by this file copy and then fail every verification."
-    fi
-
-    config="${CONFIG_DIR}/updater.toml"
-    if ! grep -q '^allow_dev_keys' "$config"; then
-        die "${config} has no allow_dev_keys setting to enable.
-  It is a top-level key, so it cannot be safely appended — a line added at the end would
-  land inside whichever [table] comes last. Add it by hand near trusted_keys_dir."
-    fi
-
-    # The filename is load-bearing, so it is ours to choose rather than the caller's: a key
-    # installed under any other name is classified as a *release* key, and branch builds
-    # would then be trusted as though they had been reviewed.
-    install -m 644 "$DEV_KEY" "${KEYS_DIR}/team.dev.pub"
-    sed -i 's/^allow_dev_keys.*/allow_dev_keys        = true/' "$config"
-
-    say "dev mode: trusting team.dev.pub and allowing dev-signed releases"
-    warn "this board will now install any branch build anyone on the team pushes, without
-  review. Never do this to a robot you ship. To undo:
-    sudo rm ${KEYS_DIR}/team.dev.pub
-    sudo sed -i 's/^allow_dev_keys.*/allow_dev_keys        = false/' ${config}
-    sudo systemctl restart updaterd"
 }
 
 # The units live inside the release, so this can only run after the release is installed.
@@ -741,7 +662,7 @@ install_units() {
     # the prompt.
     #
     # Run from the installed release rather than written here, like the sysusers files above: it is
-    # the copy a signature was checked against, and it is the same file `hooks/postinstall` runs on
+    # the installed copy, and it is the same file `hooks/postinstall` runs on
     # every update. That second caller is the point — a step only this script performs reaches no
     # board that was provisioned before it was written (`docs/design/updater-design.md` §9.1), and
     # anything added here must go in that script rather than in a function beside this call.
@@ -967,17 +888,6 @@ EOF
         printf '\nTab-completion is installed; open a new shell to pick it up.\n'
     fi
 
-    # Only on a board that is actually in dev mode. Printing it everywhere would advertise a
-    # capability most boards correctly refuse, and the failure then looks like a broken
-    # release rather than a board that was never meant to take one.
-    if [ -f "${KEYS_DIR}/team.dev.pub" ]; then
-        cat <<'EOF'
-
-DEV BOARD: trusts team.dev.pub and accepts dev-signed branch builds.
-
-  sudo robotctl update apply daemon --ref BRANCH   install what a branch last built
-EOF
-    fi
 }
 
 
@@ -998,14 +908,13 @@ check_board() {
 #
 # Only when a token was supplied, and never on a customer robot: those install from a public
 # artifact repository and pass no token, so they never reach this path. A fleet-wide
-# credential baked into an image is one that leaks and cannot be rotated without reflashing —
-# the failure the tiered signing keys exist to avoid (deploy/README.md).
+# credential baked into an image is one that leaks and cannot be rotated without reflashing.
 #
 # Without this, `updaterd` is installed, running, and unable to fetch a single update — which
 # is most of what it is for.
 install_token_dropin() {
     if [ -z "$TOKEN" ]; then
-        say "no token supplied; updaterd will not be able to fetch updates"
+        say "no token supplied; public GitHub releases remain available"
         return 0
     fi
 
@@ -1038,7 +947,6 @@ main() {
     # Before install_config, which needs to know which release it is pairing a config with.
     resolve_bootstrap_asset
     install_config
-    install_dev_key
     bootstrap_first_release
     # Straight after, not at install_units: the release's postinstall hook has already enabled and
     # started everything by this point.

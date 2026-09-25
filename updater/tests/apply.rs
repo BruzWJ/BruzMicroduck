@@ -18,7 +18,6 @@ use updater::engine::{ApplyOptions, Engine};
 use updater::faults::Faults;
 use updater::proto::{ApplyResult, CheckResult, Outcome, Target};
 use updater::robot::{AbsentRobot, Health, RobotClient, SafeToRestart};
-use updater::verify::KeyRing;
 
 // ── fixture ──────────────────────────────────────────────────────────────────
 
@@ -175,7 +174,7 @@ impl Fixture {
         let releases = root.join("published");
         let install = root.join("opt/robot/daemon");
         std::fs::create_dir_all(&install).unwrap();
-        let publisher = Publisher::new(root.join("keys"), releases.clone());
+        let publisher = Publisher::new(releases.clone());
 
         Self {
             _dir: dir,
@@ -194,7 +193,7 @@ impl Fixture {
         }
     }
 
-    /// As [`Self::publish`], but lets the caller mutate the manifest before it is signed —
+    /// As [`Self::publish`], but lets the caller mutate the manifest before it is written —
     /// for compatibility and floor tests.
     fn publish_with(
         &self,
@@ -234,8 +233,8 @@ impl Fixture {
         dir
     }
 
-    /// Publish `version` into the sideload directory *only*, signed with the same key: a
-    /// local build is signed with a trusted dev key, which is the whole reason it installs.
+    /// Publish `version` into the sideload directory only. The explicit local path is the
+    /// operator's authorization boundary; the artifact is still checked against its digest.
     fn publish_sideload(&self, version: &str) {
         self.publisher.release(version).dir(self.sideload()).write();
     }
@@ -266,15 +265,9 @@ impl Fixture {
             .exists()
     }
 
-    /// Keys are written once at construction, never here — otherwise a test that
-    /// swaps the trusted key would have it silently restored on the next
-    /// `engine()` call.
     fn config(&self, extra: &str) -> Config {
-        let keys_dir = self.root.join("keys");
-
         Config::from_toml(&format!(
             r#"
-trusted_keys_dir = "{keys}"
 hw_rev = 1
 state_dir = "{state}"
 
@@ -285,7 +278,6 @@ on_apply = {{ action = "none" }}
 health = {{ probe = "socket", timeout = "2s" }}
 {extra}
 "#,
-            keys = keys_dir.display(),
             state = self.root.join("var/lib/robot/updater").display(),
             install = self.install.display(),
             published = self.releases.display(),
@@ -295,12 +287,11 @@ health = {{ probe = "socket", timeout = "2s" }}
 
     fn engine(&self, robot: Box<dyn RobotClient>, faults: Faults, extra: &str) -> Engine {
         let config = self.config(extra);
-        let keys = KeyRing::load(&config.trusted_keys_dir, config.allow_dev_keys).unwrap();
         // No deferred restarts: this file runs dozens of engines in parallel, and a `fork` in any one
         // of them hands copies of the *others*' update locks to a child, which surfaced as
         // `got Busy` in whichever test held a lock at that moment. See
         // `Engine::without_deferred_restarts`.
-        Engine::new(config, keys, robot, faults)
+        Engine::new(config, robot, faults)
             .unwrap()
             .without_deferred_restarts()
     }
@@ -582,15 +573,15 @@ async fn a_check_of_an_unknown_component_records_nothing() {
     assert!(!attempts.exists(), "{}", attempts.display());
 }
 
-/// **A manifest that does not verify is not an answer either.** The fetch worked and the signature
-/// did not, and a source serving something unsigned has told this robot nothing.
+/// **A manifest that does not parse and validate is not an answer either.** A source serving an
+/// invalid document has not identified a usable release.
 #[tokio::test]
-async fn a_manifest_that_does_not_verify_is_not_an_answer() {
+async fn a_manifest_that_does_not_parse_is_not_an_answer() {
     let fx = Fixture::new();
     fx.publish("1.0.0", None);
     let manifest = fx.releases.join("1.0.0.manifest.json");
     let mut bytes = std::fs::read(&manifest).unwrap();
-    bytes.push(b' ');
+    bytes.push(b'x');
     std::fs::write(&manifest, bytes).unwrap();
     let engine = fx.engine_healthy();
 
@@ -667,33 +658,6 @@ async fn refuses_tampered_artifact() {
     );
     assert_eq!(fx.live_version(), None, "nothing may be installed");
     assert_eq!(fx.staging_leftovers(), 0);
-}
-
-#[tokio::test]
-async fn refuses_artifact_signed_by_an_untrusted_key() {
-    let fx = Fixture::new();
-    fx.publish("1.0.0", None);
-
-    // Replace the trusted key with an unrelated one.
-    let other = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
-    let other_pk = other
-        .pk
-        .to_box()
-        .unwrap()
-        .to_string()
-        .lines()
-        .next_back()
-        .unwrap()
-        .to_owned();
-    std::fs::write(fx.root.join("keys/prod.pub"), other_pk).unwrap();
-
-    let mut engine = fx.engine_healthy();
-    let err = apply_latest(&mut engine).await.unwrap_err();
-    assert!(
-        matches!(err, updater::Error::Verification(_)),
-        "got {err:?}"
-    );
-    assert_eq!(fx.live_version(), None);
 }
 
 #[tokio::test]
@@ -2046,8 +2010,7 @@ async fn select_missing_version_reports_not_installed() {
 }
 
 /// **#8** Nothing refused a downgrade, so a stale or reverted mirror serving an old
-/// but still-validly-signed manifest would walk the fleet backwards — the classic
-/// rollback attack on a signed-artifact scheme.
+/// but otherwise valid manifest would walk the fleet backwards.
 #[tokio::test]
 async fn latest_refuses_to_downgrade() {
     let fx = Fixture::new();
@@ -2055,7 +2018,7 @@ async fn latest_refuses_to_downgrade() {
     let mut engine = fx.engine_healthy();
     apply_latest(&mut engine).await.unwrap();
 
-    // The mirror reverts to only offering 1.0.0 — properly signed, just old.
+    // The mirror reverts to only offering 1.0.0 — valid, just old.
     fx.unpublish("2.0.0");
     fx.publish("1.0.0", None);
 
@@ -2450,8 +2413,8 @@ async fn a_ref_may_move_backwards_where_latest_may_not() {
     assert_eq!(fx.live_version().as_deref(), Some("0.2.0"));
 }
 
-/// A dev build still has to verify. Signing with the team key is a *different key*, never a
-/// relaxed check, so a tampered dev artifact is refused exactly like a tampered release.
+/// A dev build still has to match its manifest digest, so a tampered dev artifact is refused
+/// exactly like a tampered stable release.
 #[tokio::test]
 async fn a_ref_is_verified_like_anything_else() {
     let fx = Fixture::new();
@@ -2592,7 +2555,7 @@ async fn a_sideloaded_build_that_does_not_come_up_is_rolled_back() {
     );
 }
 
-/// **A local directory is not a relaxed one.** Same signature check, same hash, same refusal.
+/// **A local directory is not a relaxed one.** Same hash check, same refusal.
 ///
 /// Worth pinning separately from the `--ref` case: `--from` is the one path where the bytes
 /// never crossed a network, and "it came off my own laptop" is exactly the argument that
@@ -2726,21 +2689,15 @@ async fn an_apply_writes_a_transcript_its_log_entry_points_at() {
     }
 
     // And the manifest facts are the ones a person is reading it for.
-    let manifest = transcript
+    let version = transcript
         .events
         .iter()
         .find_map(|record| match &record.event {
-            updater::proto::RunEvent::Manifest {
-                version, signed_by, ..
-            } => Some((version.clone(), signed_by.clone())),
+            updater::proto::RunEvent::Manifest { version, .. } => Some(version.clone()),
             _ => None,
         })
         .expect("the manifest must be recorded");
-    assert_eq!(manifest.0, semver::Version::new(1, 0, 0));
-    assert!(
-        manifest.1.is_some(),
-        "which key admitted it is the point of recording it"
-    );
+    assert_eq!(version, semver::Version::new(1, 0, 0));
 }
 
 /// With no run named, the most recent — the one someone debugging has just caused.

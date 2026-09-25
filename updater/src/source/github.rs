@@ -7,9 +7,9 @@
 //! soon as you publish a patch to an older line.
 //! See `docs/design/updater-design.md` §6.
 //!
-//! Nothing here is trusted. Tags, release names and asset URLs are all attacker- or
-//! mistake-influenced; the only thing that makes an artifact acceptable is the
-//! minisign signature the caller checks afterwards.
+//! Release metadata and assets are accepted from GitHub over HTTPS. The engine
+//! verifies the downloaded artifact against the SHA-256 recorded in the manifest
+//! before extracting it.
 
 use std::path::Path;
 
@@ -17,15 +17,12 @@ use serde::Deserialize;
 
 use crate::Error;
 use crate::manifest::Manifest;
-use crate::source::{FetchedArtifact, ProgressSink, SignedBytes, Source, http};
+use crate::source::{FetchedArtifact, FetchedManifest, ProgressSink, Source, http};
 
 /// Releases fetched per page when scanning for the newest tag. One page is plenty
 /// for any real channel; further pages are fetched only if a page comes back full.
 const PER_PAGE: usize = 100;
 const MAX_PAGES: usize = 5;
-
-/// The signature that accompanies every signed file.
-const SIG_SUFFIX: &str = ".minisig";
 
 /// What the release-asset API needs to return bytes rather than JSON metadata.
 const OCTET_STREAM: &str = "application/octet-stream";
@@ -35,7 +32,6 @@ pub struct GithubReleases {
     tag_prefix: String,
     manifest_asset: String,
     ref_tag_prefix: String,
-    staging_tag_prefix: String,
     client: reqwest::Client,
 }
 
@@ -72,13 +68,11 @@ impl GithubReleases {
         tag_prefix: String,
         manifest_asset: String,
         ref_tag_prefix: String,
-        staging_tag_prefix: String,
     ) -> Self {
         Self {
             repo,
             tag_prefix,
             ref_tag_prefix,
-            staging_tag_prefix,
             manifest_asset,
             // A failure here means a broken TLS setup, which is fatal for every
             // request anyway; fall back to a default client so construction stays
@@ -98,11 +92,6 @@ impl GithubReleases {
     /// not exist, failing with "release not found" instead of anything informative.
     fn ref_tag_for(&self, git_ref: &str) -> String {
         format!("{}{}", self.ref_tag_prefix, git_ref)
-    }
-
-    /// The tag a release candidate lives under: `daemon-staging-v` + the version.
-    fn staging_tag_for(&self, version: &semver::Version) -> String {
-        format!("{}{}", self.staging_tag_prefix, version)
     }
 
     /// The release behind `tag`, with its assets.
@@ -148,29 +137,6 @@ impl GithubReleases {
     /// never become `latest` for the fleet, and relying on someone remembering a
     /// checkbox is not a safeguard.
     async fn newest_version(&self) -> Result<semver::Version, Error> {
-        self.newest_under(&self.tag_prefix, false).await
-    }
-
-    /// The newest release candidate, which is the same scan with the prerelease flag allowed.
-    ///
-    /// Only the *GitHub* flag is allowed, never a semver prerelease: candidates carry the plain
-    /// stable version they test (`0.3.0`), while dev builds carry `0.3.0-dev.17.abc`
-    /// and live under a third prefix. So the two exclusions in [`Self::newest_under`] are not
-    /// redundant here — dropping one still excludes branch builds, which is the point.
-    async fn newest_staging_version(&self) -> Result<semver::Version, Error> {
-        self.newest_under(&self.staging_tag_prefix, true).await
-    }
-
-    /// Highest version among tags carrying `prefix`.
-    ///
-    /// `allow_flagged_prerelease` is the whole difference between the stable channel and the
-    /// staging one, and it is a parameter rather than a field so that the call site — one of
-    /// exactly two — states which channel it means.
-    async fn newest_under(
-        &self,
-        prefix: &str,
-        allow_flagged_prerelease: bool,
-    ) -> Result<semver::Version, Error> {
         let mut best: Option<semver::Version> = None;
 
         for page in 1..=MAX_PAGES {
@@ -185,10 +151,10 @@ impl GithubReleases {
 
             let count = releases.len();
             for release in releases {
-                if release.draft || (release.prerelease && !allow_flagged_prerelease) {
+                if release.draft || release.prerelease {
                     continue;
                 }
-                if let Some(version) = version_under(prefix, &release.tag_name)
+                if let Some(version) = version_under(&self.tag_prefix, &release.tag_name)
                     // A semver prerelease is a dev build, whatever the release was flagged as.
                     && version.pre.is_empty()
                     && best.as_ref().is_none_or(|b| version > *b)
@@ -205,8 +171,8 @@ impl GithubReleases {
 
         best.ok_or_else(|| {
             Error::Network(format!(
-                "no releases in {} with tag prefix {prefix:?}",
-                self.repo
+                "no releases in {} with tag prefix {:?}",
+                self.repo, self.tag_prefix
             ))
         })
     }
@@ -252,14 +218,18 @@ impl GithubReleases {
         Some((tag.to_owned(), name.to_owned()))
     }
 
-    /// Where to actually fetch a URL from a signed manifest, and with which `Accept`.
+    /// Where to actually fetch a URL from a release manifest, and with which `Accept`.
     ///
     /// A private repo's `releases/download/...` URL 404s even with a token, so one of ours is
     /// re-resolved through the release API. Anything else is fetched verbatim — a manifest
-    /// pointing at a CDN keeps working, and the bytes are hash- and signature-checked either
-    /// way.
+    /// pointing at an HTTPS CDN keeps working, and the bytes are hash-checked either way.
     async fn resolve_download(&self, url: &str) -> Result<(String, Option<&'static str>), Error> {
         let Some((tag, name)) = self.split_release_url(url) else {
+            if !url.starts_with("https://") {
+                return Err(Error::Verification(format!(
+                    "release artifact URL must use HTTPS, got {url:?}"
+                )));
+            }
             return Ok((url.to_owned(), None));
         };
 
@@ -269,63 +239,36 @@ impl GithubReleases {
         Ok((api_url, Some(OCTET_STREAM)))
     }
 
-    async fn signed_manifest(&self, tag: &str) -> Result<SignedBytes<Manifest>, Error> {
+    async fn manifest(&self, tag: &str) -> Result<FetchedManifest, Error> {
         let release = self.release_for_tag(tag).await?;
 
         let manifest_url = self.asset_url(&release, &self.manifest_asset)?;
-        let sig_name = format!("{}{SIG_SUFFIX}", self.manifest_asset);
-        let sig_url = self.asset_url(&release, &sig_name)?;
-
         let bytes = http::get_bytes(&self.client, &manifest_url, Some(OCTET_STREAM)).await?;
-        let signature = http::get_bytes(&self.client, &sig_url, Some(OCTET_STREAM)).await?;
 
-        // Parsed for convenience only; the *bytes* are what the caller verifies,
-        // since the signature covers exactly what was received.
         let parsed: Manifest = serde_json::from_slice(&bytes)
             .map_err(|e| Error::Corrupt(format!("manifest at {manifest_url}: {e}")))?;
 
-        Ok(SignedBytes {
-            bytes,
-            signature,
-            parsed,
-        })
+        Ok(FetchedManifest { bytes, parsed })
     }
 }
 
 #[async_trait::async_trait]
 impl Source for GithubReleases {
-    async fn latest_manifest(&self) -> Result<SignedBytes<Manifest>, Error> {
+    async fn latest_manifest(&self) -> Result<FetchedManifest, Error> {
         let version = self.newest_version().await?;
         let tag = self.tag_for(&version);
         tracing::debug!(repo = %self.repo, %tag, "resolved latest");
-        self.signed_manifest(&tag).await
+        self.manifest(&tag).await
     }
 
-    async fn manifest_for(
-        &self,
-        version: &semver::Version,
-    ) -> Result<SignedBytes<Manifest>, Error> {
-        self.signed_manifest(&self.tag_for(version)).await
+    async fn manifest_for(&self, version: &semver::Version) -> Result<FetchedManifest, Error> {
+        self.manifest(&self.tag_for(version)).await
     }
 
-    async fn manifest_at_ref(&self, git_ref: &str) -> Result<SignedBytes<Manifest>, Error> {
+    async fn manifest_at_ref(&self, git_ref: &str) -> Result<FetchedManifest, Error> {
         let tag = self.ref_tag_for(git_ref);
         tracing::debug!(repo = %self.repo, %tag, %git_ref, "resolving ref");
-        self.signed_manifest(&tag).await
-    }
-
-    async fn staging_manifest(&self) -> Result<SignedBytes<Manifest>, Error> {
-        let version = self.newest_staging_version().await?;
-        let tag = self.staging_tag_for(&version);
-        tracing::debug!(repo = %self.repo, %tag, "resolved newest candidate");
-        self.signed_manifest(&tag).await
-    }
-
-    async fn staging_manifest_for(
-        &self,
-        version: &semver::Version,
-    ) -> Result<SignedBytes<Manifest>, Error> {
-        self.signed_manifest(&self.staging_tag_for(version)).await
+        self.manifest(&tag).await
     }
 
     async fn fetch_artifact(
@@ -341,46 +284,27 @@ impl Source for GithubReleases {
                 source: e,
             })?;
 
-        // The filename comes from a signed manifest, but the signature is only
-        // checked *after* download — so treat it as untrusted here and refuse
-        // anything that isn't a bare name.
+        // Treat the filename as untrusted and refuse anything that is not a bare name.
         let artifact_name = safe_file_name(&manifest.url)?;
         let artifact = dest_dir.join(&artifact_name);
-        let signature = dest_dir.join(format!("{artifact_name}{SIG_SUFFIX}"));
 
         let (artifact_url, accept) = self.resolve_download(&manifest.url).await?;
-        let bytes =
-            http::download_to(&self.client, &artifact_url, &artifact, accept, &progress).await?;
+        http::download_to(&self.client, &artifact_url, &artifact, accept, &progress).await?;
 
-        let (sig_url, sig_accept) = self.resolve_download(&manifest.sig_url).await?;
-        let sig_bytes = http::get_bytes(&self.client, &sig_url, sig_accept).await?;
-        tokio::fs::write(&signature, &sig_bytes)
-            .await
-            .map_err(|e| Error::Io {
-                path: signature.clone(),
-                source: e,
-            })?;
-
-        Ok(FetchedArtifact {
-            artifact,
-            signature,
-            bytes,
-        })
+        Ok(FetchedArtifact { artifact })
     }
 }
 
 /// Parse a version out of a tag carrying `prefix`, or `None` if the tag is not one of ours.
 ///
-/// Free-standing because two prefixes now feed it — stable and staging — and a method reading
-/// `self.tag_prefix` invited exactly the bug where a staging scan silently measured stable tags.
+/// Free-standing so tests can pin that only tags with the configured prefix are releases.
 fn version_under(prefix: &str, tag: &str) -> Option<semver::Version> {
     semver::Version::parse(tag.strip_prefix(prefix)?).ok()
 }
 
 /// Extract a filename from a URL, refusing anything that could escape `dest_dir`.
 ///
-/// A manifest is signed, but this runs *before* verification, and a compromised
-/// publisher is exactly the case where writing to an arbitrary path would matter.
+/// A manifest is remote input, so it must never choose an arbitrary local path.
 pub(crate) fn safe_file_name(url: &str) -> Result<String, Error> {
     let tail = url.rsplit('/').next().unwrap_or_default();
     let tail = tail.split(['?', '#']).next().unwrap_or_default();
@@ -411,7 +335,6 @@ mod tests {
             "daemon-v".into(),
             "manifest.json".into(),
             "daemon-dev-".into(),
-            "daemon-staging-v".into(),
         )
     }
 
@@ -421,36 +344,6 @@ mod tests {
         let v = semver::Version::new(1, 4, 2);
         assert_eq!(s.tag_for(&v), "daemon-v1.4.2");
         assert_eq!(version_under(&s.tag_prefix, "daemon-v1.4.2"), Some(v));
-    }
-
-    #[test]
-    fn staging_tags_round_trip() {
-        let s = source();
-        let v = semver::Version::new(0, 3, 0);
-        assert_eq!(s.staging_tag_for(&v), "daemon-staging-v0.3.0");
-        assert_eq!(
-            version_under("daemon-staging-v", "daemon-staging-v0.3.0"),
-            Some(v)
-        );
-    }
-
-    /// The two channels must not read each other's tags.
-    ///
-    /// This is the failure that would matter and would not look like one: a staging scan that
-    /// silently matched `daemon-v*` would report the newest *stable* release as the candidate,
-    /// and `--staging` would install what a plain `apply` already installs while claiming to
-    /// test something. It holds because `daemon-staging-v0.3.0` does not start with `daemon-v`
-    /// — an accident of naming, so it is pinned here rather than left to be re-derived.
-    #[test]
-    fn the_two_channels_cannot_read_each_others_tags() {
-        assert_eq!(version_under("daemon-v", "daemon-staging-v0.3.0"), None);
-        assert_eq!(version_under("daemon-staging-v", "daemon-v0.3.0"), None);
-        // And neither reads a dev build, which is what keeps `--staging` from resolving to a
-        // branch someone pushed.
-        assert_eq!(
-            version_under("daemon-staging-v", "daemon-dev-my-branch"),
-            None
-        );
     }
 
     /// A ref becomes a dev tag, and the ref is appended verbatim.
@@ -475,8 +368,6 @@ mod tests {
         assert_eq!(version_under(&s.tag_prefix, "daemon-dev-my-branch"), None);
         // Even when the dev tag ends in something version-shaped.
         assert_eq!(version_under(&s.tag_prefix, "daemon-dev-0.2.0"), None);
-        // And the staging stream stays separate too.
-        assert_eq!(version_under(&s.tag_prefix, "daemon-staging-v0.2.0"), None);
     }
 
     /// Another channel's tags in the same repo must be ignored, not misparsed.
@@ -507,14 +398,14 @@ mod tests {
 
     /// A release whose build has not uploaded yet must not read as a broken release.
     ///
-    /// This is what an operator hits by running `update apply --staging` in the minutes after
-    /// publishing, and the old answer — `network error: ... has no asset named "manifest.json"
+    /// This is what an operator sees if a release becomes visible before its assets finish
+    /// uploading. The old answer — `network error: ... has no asset named "manifest.json"
     /// (has: )` — pointed at the two things that were not wrong: the release, and the network.
     #[test]
     fn an_empty_release_says_its_build_has_not_finished() {
         let release = Release {
             id: 1,
-            tag_name: "daemon-staging-v0.5.1".into(),
+            tag_name: "daemon-v0.5.1".into(),
             draft: false,
             prerelease: true,
             assets: vec![],
@@ -528,9 +419,9 @@ mod tests {
 
         let msg = err.to_string();
         // The tag, so it is clear *which* release, and where to watch it land.
-        assert!(msg.contains("daemon-staging-v0.5.1"), "{msg}");
+        assert!(msg.contains("daemon-v0.5.1"), "{msg}");
         assert!(
-            msg.contains("https://github.com/ORG/robot-daemon/releases/tag/daemon-staging-v0.5.1"),
+            msg.contains("https://github.com/ORG/robot-daemon/releases/tag/daemon-v0.5.1"),
             "{msg}"
         );
         // And none of the vocabulary that sent people debugging the wrong thing.
@@ -540,9 +431,8 @@ mod tests {
 
     /// **A manifest must not redirect the asset lookup at another repository.**
     ///
-    /// `resolve_download` runs before the manifest's signature is checked, so a URL naming a
-    /// foreign repo must be left alone rather than turned into an API request carrying our
-    /// token.
+    /// A URL naming a foreign repository must be left alone rather than turned into an API
+    /// request carrying our token.
     #[test]
     fn only_our_own_release_urls_are_split() {
         let s = source();

@@ -214,11 +214,11 @@ So the twin runs **the host's architecture**:
 
 * **x86 host** — an amd64 container and a native build. Real units, real hardening, real journal;
   everything except CI's exact bytes.
-* **arm64 host (Apple Silicon)** — an arm64 container running the robot's own signed artifact,
-  natively. Full provenance, no emulation, identical commands.
+* **arm64 host (Apple Silicon)** — an arm64 container running the robot's own published artifact,
+  natively. The same bytes, no emulation, identical commands.
 
 The consequence for the update path is small and worth stating plainly: `robotctl update apply` runs
-end to end — preflight, signature, artifact hash, compatibility, health gate, auto-rollback — because
+end to end — preflight, artifact hash, compatibility, health gate, auto-rollback — because
 that is how `dev-push.sh` installs. What an x86 twin cannot do is install a *published* release.
 `board-test.sh` already covers the real artifact on the real architecture in CI.
 

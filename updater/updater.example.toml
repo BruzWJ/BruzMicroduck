@@ -1,18 +1,12 @@
 # Example /etc/robot/updater.toml — the annotated reference.
 #
 # The engine is generic; this file is the only robot-specific part. Adapting to
-# another robot should mean a new copy of this file, new signing keys, and
-# possibly a different health probe. See docs/design/updater-design.md §10.
+# another robot should mean a new copy of this file and possibly a different health
+# probe. See docs/design/updater-design.md §10.
 #
 # NOT what ships. `deploy/updater.toml` is the file `scripts/install.sh` installs on a
 # robot; this one documents every option, including several deliberately absent there.
 # Where the two differ, the difference is the point — read the comments in both.
-
-# Trusted minisign public keys. A signature is valid if it verifies against ANY
-# key here. A *set* rather than one key so a lost or compromised key is
-# survivable (§5.4). An empty directory is a fatal error, not an empty
-# allow-list.
-trusted_keys_dir = "/etc/robot/trusted_keys"
 
 # Single forward-compatibility guard. v1 targets one hardware configuration, so
 # this is one integer and not a capability matrix (§5.6).
@@ -31,9 +25,6 @@ state_dir = "/var/lib/robot/updater"
 # An absent or silent socket is a normal state, not an error — robotd may be stopped,
 # crashed, or not yet installed (architecture.md §1.1).
 robot_socket = "/run/robotd.sock"
-
-# Accept artifacts signed with a dev-only key. Never true on a client robot.
-allow_dev_keys = false
 
 # Permit `updaterd --inject-fault ...`. Never true on a client robot: it lets the
 # updater be told to fail on purpose. Fault injection is compiled into the shipped
@@ -87,8 +78,7 @@ check_interval = "6h"
 # an endless apply/rollback loop that re-downloads and rewrites the eMMC every interval.
 auto_apply = "mandatory"
 
-# Bounds on what an artifact may expand to. Not a security boundary — the signature
-# already established provenance — but a guard against an accidentally enormous
+# Bounds on what an artifact may expand to. A guard against an accidentally enormous
 # artifact filling the eMMC. Raise for model bundles: several ONNX policies are
 # legitimately far larger than a daemon binary, and a too-low ceiling rejects a
 # genuine release. Omitted = built-in defaults (2 GiB, 50k entries).
@@ -113,9 +103,8 @@ manifest_asset = "manifest.json"
 #
 # Separate from tag_prefix because the two streams must never be confusable: a dev tag
 # *moves* (it points at whatever that branch last built) while a release tag is immutable,
-# and `latest` for the fleet must never consider a dev tag. Installing one also requires
-# allow_dev_keys and the dev public key, so a client robot cannot take a branch build even
-# if it somehow resolved the tag.
+# and `latest` for the fleet must never consider a dev tag. Installing one requires an explicit
+# `--ref` request from a locally authorised updater client.
 # ref_tag_prefix = "daemon-dev-"
 
 # NOTE the omissions here. `updaterd` restarts NEITHER itself NOR `btd`, even though
@@ -206,8 +195,8 @@ probe = "none"
 # CI tests can't drift from production behaviour (§16.1), and backs the dev
 # sideload flow (§15).
 #
-# Signature verification is NOT relaxed: sideloading works because the dev key is
-# in the trusted set, not because checks are skipped.
+# Digest and compatibility verification are not relaxed. Naming a local directory is the
+# operator's explicit authorization to install from that source.
 #
 # [component.daemon.source]
 # type = "local_dir"

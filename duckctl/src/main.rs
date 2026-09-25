@@ -1272,15 +1272,10 @@ enum Update {
         version: Option<duck_ipc_proto::semver::Version>,
         /// Install what a branch last built, e.g. `--ref my-branch`.
         ///
-        /// A dev build, so a robot only accepts one if the team key is in its trusted set and
-        /// `allow_dev_keys` is on: a customer robot refuses it.
+        /// A dev build is never selected automatically; naming the branch is the operator's
+        /// explicit authorization to install it.
         #[arg(long = "ref", value_name = "REF", conflicts_with = "version")]
         git_ref: Option<String>,
-        /// Install the release candidate from the staging channel.
-        ///
-        /// Pair it with `--version` to name one candidate rather than the newest.
-        #[arg(long, conflicts_with = "git_ref")]
-        staging: bool,
         /// Verify everything, then stop before the symlink swap.
         #[arg(long)]
         dry_run: bool,
@@ -2349,15 +2344,12 @@ fn update_request_line(update: &Update) -> Result<(String, Duration), Box<dyn st
             component: c,
             version,
             git_ref,
-            staging,
             dry_run,
         } => {
-            let target = match (version.clone(), git_ref, staging) {
-                (Some(version), _, true) => proto::Target::StagingExact(version),
-                (Some(version), _, false) => proto::Target::Exact(version),
-                (None, Some(git_ref), _) => proto::Target::Ref(git_ref.clone()),
-                (None, None, true) => proto::Target::Staging,
-                (None, None, false) => proto::Target::Latest,
+            let target = match (version.clone(), git_ref) {
+                (Some(version), _) => proto::Target::Exact(version),
+                (None, Some(git_ref)) => proto::Target::Ref(git_ref.clone()),
+                (None, None) => proto::Target::Latest,
             };
             (
                 proto::method::APPLY,
@@ -3417,13 +3409,6 @@ mod tests {
         assert!(wire(&[]).contains(r#""target":"latest""#));
         assert!(wire(&["--version", "0.5.1"]).contains(r#""target":{"exact":"0.5.1"}"#));
         assert!(wire(&["--ref", "my-branch"]).contains(r#""target":{"ref":"my-branch"}"#));
-        assert!(wire(&["--staging"]).contains(r#""target":"staging""#));
-        assert!(
-            wire(&["--staging", "--version", "0.6.0"])
-                .contains(r#""target":{"staging_exact":"0.6.0"}"#),
-            "a named candidate, which is neither of the two flags on its own"
-        );
-
         let plain = wire(&[]);
         assert!(plain.contains(r#""method":"update.apply""#), "{plain}");
         assert!(

@@ -75,7 +75,7 @@ exercised daily, so the API an app will use cannot quietly rot. `tofd` is the od
 two head sensors, publishes their streams, and reads nothing from another service (§1).
 
 **Releases are swapped, not patched.** A build lands as a whole directory under
-`/opt/robot/daemon/releases/<version>/`; `updaterd` verifies its signature, moves the
+`/opt/robot/daemon/releases/<version>/`; `updaterd` verifies its SHA-256, moves the
 `current` symlink, restarts the units, and then asks `robotd` whether it is healthy. If not,
 it puts the old release back on its own. A crash-loop that gets past that is caught by a boot
 counter ([`updater-design.md`](updater-design.md)).
@@ -108,10 +108,10 @@ whole rule, and it is why per-board config is not shipped in the release.
 How a change reaches a robot, end to end:
 
 ```text
-  push a branch ──► CI builds and signs a release ──► robotctl update apply
+  run release workflow ──► GitHub builds and publishes ──► robotctl update apply
                                                             │
                                                             ▼
-                                          updaterd: verify signature, unpack,
+                                          updaterd: verify SHA-256, unpack,
                                           move `current`, restart the units
                                                             │
                                                             ▼
@@ -273,7 +273,7 @@ operation runs, timing out a peer query or a subprocess, cancelling in-flight wo
 
 CPU-bound and long-running filesystem work stays **synchronous**, and the async
 caller hands it to `spawn_blocking`. In the updater that is specifically: SHA-256
-over the artifact, minisign stream verification, `zstd`+`tar` extraction, and
+over the artifact, `zstd`+`tar` extraction, and
 recursive deletes of extracted trees. On a Pi these run for seconds; left on an
 async worker they would stall the IPC tasks that are supposed to keep answering
 `status`/`subscribe` during an update.

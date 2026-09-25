@@ -5,9 +5,7 @@
 #         scripts/dev-push.sh --name duck-c51b       # find the board over Bluetooth
 #         DUCK_ROBOT=duck-c51b scripts/dev-push.sh
 #
-# Requires the team dev secret key, and one of two build toolchains — `cargo-zigbuild` plus
-# `zig`, or `--docker`. The board must be a dev board (`allow_dev_keys = true` and
-# `team.dev.pub` in its trusted keys — `deploy/README.md`).
+# Requires one of two build toolchains — `cargo-zigbuild` plus `zig`, or `--docker`.
 #
 # **Two ways to build, same artifact.** The default cross-compiles here with `cargo zigbuild`:
 # fastest, and what CI uses. `--docker` builds inside the board's own userland instead, where
@@ -20,16 +18,15 @@
 # other people install.
 #
 # **It is an ordinary update.** The board applies this through `robotctl update apply`, so
-# preflight, the signature, the artifact hash, compatibility, the health gate and auto-rollback
+# preflight, the artifact hash, compatibility, the health gate and auto-rollback
 # all run exactly as they do for a release — a local build that does not come up is reverted and
 # the board is back on what it was running. That is the reason `--from` exists as an option on
 # `apply` rather than reusing `updaterd install --from`, which has to force the gate off and so
 # refuses to touch a live release at all.
 #
 # **What it deliberately does not do** is anything a release does for provenance. The version
-# carries a timestamp, not a tag; the artifact is signed with the dev key, which a customer
-# robot refuses; nothing is published, so nobody else can install what you just ran. Cutting a
-# release is still a tag and `release.yml`.
+# carries a timestamp, not a tag, and nothing is published, so nobody else can install what you
+# just ran. Cutting a release is still the permission-gated manual `release.yml` workflow.
 #
 # The version is `<crate>-dev.local.<epoch>.g<sha7>`: a prerelease, so it sorts below the
 # release it precedes and can never look like an upgrade for the fleet, and unique per *push*
@@ -42,10 +39,6 @@ cd "$(dirname "$0")/.."
 # Where the artifact lands on the board. Empty here and resolved after the board is known,
 # because the default is a path on *that* machine — see the block below the argument parsing.
 REMOTE_DIR="${DUCK_SIDELOAD_DIR:-}"
-
-# The secret half of `team.dev`, the same key `dev.yml` signs branch builds with. Named apart
-# from `DUCK_DEV_KEY`, which the provisioning scripts use for the *public* half.
-KEY="${DUCK_DEV_SECRET_KEY:-$HOME/.duck-keys/team.dev.key}"
 
 BOOTSTRAP=no
 DRY_RUN=no
@@ -239,13 +232,6 @@ elif ! docker version >/dev/null 2>&1; then
     exit 1
 fi
 
-if [ ! -f "$KEY" ]; then
-    echo "no dev signing key at $KEY" >&2
-    echo "The board verifies this artifact like any release, so it has to be signed." >&2
-    echo "Get team.dev.key from a team member, or set DUCK_DEV_SECRET_KEY." >&2
-    exit 1
-fi
-
 # ── the C dependencies, and where the target's copies come from ────────────────────────
 #
 # This used to `scp` libudev.so.1 off the board and hand-write a `.pc` beside it, which worked
@@ -400,9 +386,6 @@ cargo run -p xtask -- package \
     --include "deploy/README.md=docs/deploy.md" \
     --include "pet-detect/models/pet_detect.onnx=models/pet_detect.onnx"
 
-
-echo "==> signing with $KEY"
-cargo run -p xtask -- sign --dir dist --key "$KEY"
 
 # Replaced rather than added to: a directory holding two builds makes "the newest one here"
 # ambiguous to read, and nothing on the board needs yesterday's push.

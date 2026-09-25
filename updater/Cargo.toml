@@ -3,7 +3,7 @@ name = "updater"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Signed, health-gated, rollback-safe updates for the robot daemon"
+description = "Hash-verified, health-gated, rollback-safe updates for the robot daemon"
 
 # Library + the `updaterd` daemon binary.
 #
@@ -59,7 +59,6 @@ fs4 = { version = "1.1.0", features = ["sync"] }
 humantime-serde = "1.1.1"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-minisign-verify = "0.2.5"
 sha2 = "0.11.0"
 tar = "0.4.46"
 zstd = "0.13.3"
@@ -72,7 +71,6 @@ test-support = { path = "../test-support" }
 async-trait.workspace = true
 axum = "0.8.9"
 clap = { version = "4.6.4", features = ["derive"] }
-minisign = "0.9.1"
 semver.workspace = true
 serde_json.workspace = true
 sha2 = "0.11.0"

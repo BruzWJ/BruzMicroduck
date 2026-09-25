@@ -7,7 +7,7 @@ Read-only commands need no privilege. Anything that **changes** the robot needs 
 `--allow-user`/`--allow-group` for `configd`, `allow_uids`/`allow_gids` in `updater.toml` for
 `updaterd`).
 
-Branch builds, release candidates and the restart traps after an update are in
+Branch builds, local pushes and the restart traps after an update are in
 [`cheatsheet-dev.md`](cheatsheet-dev.md) — they need a dev board. The same robot over Bluetooth from
 a laptop, with no network and no ssh, is [`duckctl.md`](duckctl.md).
 
@@ -995,10 +995,10 @@ run 42 · daemon · 2025-08-27 13:06:40 UTC
   asked for latest, from github.com/pollen-robotics/microduck, onto 0.1.3
   requested by uid=1000 gid=1000 pid=2317
 
-  13:06:41      +1s  manifest     0.1.4 · 184.2 MB · sha256 3f9a1c2b… · signed by release.pub · rev 88efc03
+  13:06:41      +1s  manifest     0.1.4 · 184.2 MB · sha256 3f9a1c2b… · rev 88efc03
   13:06:41           downloading
   13:07:58   +1m17s  note         downloaded 184.2 MB to /opt/robot/daemon/staging/0.1.4/dl/…
-  13:08:02      +4s  note         hash matches; signature verifies against release.pub
+  13:08:02      +4s  note         artifact hash matches the manifest
   13:08:20     +18s  pre-hook
   13:10:12   +1m52s  hook         hooks/preinstall
                                  │ onnxruntime 1.20.1 already present
@@ -1020,7 +1020,7 @@ of it is the fix. `--no-journal` prints that line without trying, and `--json` g
 alone.
 
 The component is `daemon` — one component covering every binary. `apply daemon` installs what the
-stable channel offers; branch builds and release candidates need
+stable channel offers; branch builds and local pushes need
 [`cheatsheet-dev.md`](cheatsheet-dev.md).
 
 ### Switching without a download
