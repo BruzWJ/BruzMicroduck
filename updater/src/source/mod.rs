@@ -30,15 +30,13 @@ pub type ProgressSink = tokio::sync::mpsc::UnboundedSender<(u64, Option<u64>)>;
 pub trait Source: Send + Sync {
     /// Fetch the manifest the source currently advertises as newest.
     ///
-    /// Returns the raw bytes alongside the parsed manifest: the signature covers
-    /// the bytes, so verification must happen against exactly what was received,
-    /// not against a re-serialization.
-    async fn latest_manifest(&self) -> Result<SignedBytes<Manifest>, Error>;
+    /// Returns the raw bytes alongside the parsed manifest so the exact document
+    /// supplied by the source can be retained with the installed release.
+    async fn latest_manifest(&self) -> Result<FetchedManifest, Error>;
 
     /// Fetch the manifest for an exact version. Backs
     /// `robotctl update apply --version X`.
-    async fn manifest_for(&self, version: &semver::Version)
-    -> Result<SignedBytes<Manifest>, Error>;
+    async fn manifest_for(&self, version: &semver::Version) -> Result<FetchedManifest, Error>;
 
     /// Fetch the manifest a named ref currently points at. Backs
     /// `robotctl update apply --ref my-branch`.
@@ -46,36 +44,14 @@ pub trait Source: Send + Sync {
     /// Defaulted rather than required because "a ref" is not meaningful for every source: a
     /// local directory has no refs, and a source that cannot resolve one should say so
     /// rather than guess. Sources that *can* override it.
-    async fn manifest_at_ref(&self, git_ref: &str) -> Result<SignedBytes<Manifest>, Error> {
+    async fn manifest_at_ref(&self, git_ref: &str) -> Result<FetchedManifest, Error> {
         Err(Error::Incompatible(format!(
             "this source cannot resolve the ref {git_ref:?}; \
              only a github_releases source publishes per-branch builds"
         )))
     }
 
-    /// Fetch the newest release candidate. Backs `robotctl update apply --staging`.
-    ///
-    /// Defaulted for the same reason as [`Source::manifest_at_ref`]: a channel split is a
-    /// property of how a source publishes, and a local directory has no candidates to offer.
-    async fn staging_manifest(&self) -> Result<SignedBytes<Manifest>, Error> {
-        Err(Error::Incompatible(
-            "this source has no staging channel; \
-             only a github_releases source publishes release candidates"
-                .to_owned(),
-        ))
-    }
-
-    /// Fetch one named candidate. Backs `--staging --version X`.
-    async fn staging_manifest_for(
-        &self,
-        version: &semver::Version,
-    ) -> Result<SignedBytes<Manifest>, Error> {
-        Err(Error::Incompatible(format!(
-            "this source has no staging channel, so it cannot resolve the candidate {version}"
-        )))
-    }
-
-    /// Download the artifact and its detached signature into `dest_dir`.
+    /// Download the artifact into `dest_dir`.
     ///
     /// Streams to disk — must not assume the artifact fits in memory — and is
     /// cancel-safe: dropping the future must leave only staging garbage, never a
@@ -88,22 +64,19 @@ pub trait Source: Send + Sync {
     ) -> Result<FetchedArtifact, Error>;
 }
 
-/// Bytes as received, plus what they parsed into.
+/// A manifest as received, plus its parsed representation.
 ///
-/// Keeping both is what lets signature verification run over the exact received
-/// bytes.
+/// Keeping both preserves the exact source document in the installed release
+/// while letting the engine make typed compatibility decisions.
 #[derive(Debug, Clone)]
-pub struct SignedBytes<T> {
+pub struct FetchedManifest {
     pub bytes: Vec<u8>,
-    pub signature: Vec<u8>,
-    pub parsed: T,
+    pub parsed: Manifest,
 }
 
 #[derive(Debug, Clone)]
 pub struct FetchedArtifact {
     pub artifact: PathBuf,
-    pub signature: PathBuf,
-    pub bytes: u64,
 }
 
 /// Build a source from config.
@@ -114,13 +87,11 @@ pub fn from_config(config: &SourceConfig) -> Box<dyn Source> {
             tag_prefix,
             manifest_asset,
             ref_tag_prefix,
-            staging_tag_prefix,
         } => Box::new(GithubReleases::new(
             repo.clone(),
             tag_prefix.clone(),
             manifest_asset.clone(),
             ref_tag_prefix.clone(),
-            staging_tag_prefix.clone(),
         )),
         SourceConfig::HfHub {
             repo,

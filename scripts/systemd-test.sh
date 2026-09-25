@@ -72,7 +72,7 @@ BIN=target/docker/release
 # ── the fixture ──
 #
 # One to start on, one to move to, then one per injection.
-echo "==> minting the signed releases"
+echo "==> minting release fixtures"
 rm -rf "$FIXTURE"
 mkdir -p "$WORK"
 cargo run -q -p test-support --example systemd-fixture -- "$FIXTURE" \

@@ -126,8 +126,8 @@ current: 1 thread    0.00 s CPU at start → 0.00 s after 20 s
 The difference is four parked threads' worth of stacks — memory, not heat. Switching flavours
 would buy none of the CPU this page is about, and would cost something real: on
 `current_thread`, a synchronous call on the async path blocks the whole runtime including the IPC
-socket, and `updaterd` has several (`engine.rs` reads a signature, writes the embedded manifest,
-and scans a unit directory inline; only the heavy verification is on `spawn_blocking`).
+socket, and `updaterd` has several (`engine.rs` writes the embedded manifest and scans a unit
+directory inline; only the heavy hashing and extraction are on `spawn_blocking`).
 
 ## What still needs a board
 

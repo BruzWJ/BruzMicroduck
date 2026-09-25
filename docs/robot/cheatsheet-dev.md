@@ -38,22 +38,11 @@ A merge does not publish instantly: CI has to build `main` before `--ref main` r
 gh run list --branch main
 ```
 
-## Release candidates
+## Before the stable release
 
-The normal release workflow does not create a candidate channel. If an operator has deliberately
-published a signed prerelease under `daemon-staging-v<version>`, install it with:
-
-```
-sudo robotctl update apply --staging daemon
-```
-
-```
-sudo robotctl update apply --staging --version 0.3.0 daemon
-```
-
-A candidate is signed with the release key and carries the stable version it is testing. What makes
-it unreachable without the flag is that it is flagged as a prerelease: a plain `apply` skips it.
-`--staging` is that filter's explicit per-command opt-in and leaves nothing switched on afterwards.
+There is no separate candidate-release or promotion workflow. Test the selected commit through its
+branch build (`--ref <branch>`) or `scripts/dev-push.sh`, then run the one manual stable release
+workflow. This keeps one release object, one tag and one publishing decision per version.
 
 ## After an update — the part that bites
 

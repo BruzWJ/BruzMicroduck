@@ -13,7 +13,7 @@ scp scripts/setup-board.sh scripts/migrate-network.sh pierre@192.168.1.42:~/
 ```
 
 ```bash
-scp scripts/install.sh deploy/dev-key/team.dev.pub pierre@192.168.1.42:~/
+scp scripts/install.sh pierre@192.168.1.42:~/
 ```
 
 ## Before the reboot
@@ -77,10 +77,6 @@ The reboot starts a new shell, which is why the token and ref are exported again
 daemon. `install.sh` reads the same settings from the environment, and `sudo -E` gets them through:
 
 ```bash
-export DUCK_DEV_KEY=$HOME/team.dev.pub
-```
-
-```bash
 sudo -E sh ~/install.sh
 ```
 
@@ -89,8 +85,11 @@ For a live motor bus, connect the SBC to an OpenRB-150 running ROBOTIS's factory
 terminal-block power and the `VIN(DXL)` jumper are documented once in
 [`robotd-design.md` §1.1](../design/robotd-design.md#11-the-two-buses-and-who-owns-them).
 
-Drop `DUCK_DEV_KEY` for a board that should only take releases. Set `DUCK_REF` to a branch to
-install what that branch last built.
+To install what a branch last built after the stable bootstrap, name it explicitly:
+
+```bash
+sudo robotctl update apply --ref <branch> daemon
+```
 
 `DUCK_WEIRD_BLE=1` on the `setup-board.sh` runs above is `--weird-ble`: for a board whose Bluetooth
 cannot bond a gamepad at all. See [`pair-a-gamepad.md`](pair-a-gamepad.md).

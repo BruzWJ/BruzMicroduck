@@ -1,7 +1,8 @@
 //! Pre/post-install hooks.
 //!
-//! Hooks ship *inside* the signed artifact, so no unsigned code ever runs. Same
-//! idea as dpkg's `postinst`; see `docs/design/updater-design.md` §9.
+//! Hooks ship *inside* the digest-verified artifact, so only code identified by the
+//! release manifest runs. Same idea as dpkg's `postinst`; see
+//! `docs/design/updater-design.md` §9.
 //!
 //! Ordering:
 //! ```text

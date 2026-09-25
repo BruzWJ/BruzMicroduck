@@ -20,7 +20,6 @@ use updater::engine::{ApplyOptions, Engine};
 use updater::faults::Faults;
 use updater::proto::{ApplyResult, Target};
 use updater::robot::{Health, RobotClient, SafeToRestart, SocketRobotClient};
-use updater::verify::KeyRing;
 
 // ── locating and running the real robotd ─────────────────────────────────────
 
@@ -152,7 +151,7 @@ impl Drop for Robotd {
 /// Deliberately a slimmer copy of `apply.rs`'s fixture rather than a shared module:
 /// these tests need a real socket path threaded through the config, and coupling the two
 /// suites' setup would mean every change to one risks the other. The duplication is a
-/// signed tarball builder and a config template — cheap, and it keeps each file readable
+/// release builder and a config template — cheap, and it keeps each file readable
 /// on its own.
 struct Fixture {
     _dir: tempfile::TempDir,
@@ -167,7 +166,7 @@ impl Fixture {
         let root = dir.path().to_path_buf();
         let install = root.join("opt/robot/daemon");
         std::fs::create_dir_all(&install).unwrap();
-        let publisher = Publisher::new(root.join("keys"), root.join("published"));
+        let publisher = Publisher::new(root.join("published"));
 
         Self {
             _dir: dir,
@@ -204,7 +203,6 @@ impl Fixture {
     fn engine(&self) -> Engine {
         let config = Config::from_toml(&format!(
             r#"
-trusted_keys_dir = "{keys}"
 hw_rev = 1
 state_dir = "{state}"
 robot_socket = "{socket}"
@@ -215,7 +213,6 @@ source = {{ type = "local_dir", path = "{published}" }}
 on_apply = {{ action = "none" }}
 health = {{ probe = "socket", timeout = "3s" }}
 "#,
-            keys = self.root.join("keys").display(),
             state = self.root.join("var/lib/robot/updater").display(),
             socket = self.socket().display(),
             install = self.install.display(),
@@ -227,9 +224,8 @@ health = {{ probe = "socket", timeout = "3s" }}
         // key that stopped reaching the client would fail here too.
         let robot: Box<dyn RobotClient> =
             Box::new(SocketRobotClient::new(config.robot_socket.clone()));
-        let keys = KeyRing::load(&config.trusted_keys_dir, config.allow_dev_keys).unwrap();
         // As in the updater's own tests: no forks in a binary running engines in parallel.
-        Engine::new(config, keys, robot, Faults::none())
+        Engine::new(config, robot, Faults::none())
             .unwrap()
             .without_deferred_restarts()
     }

@@ -24,7 +24,6 @@ use updater::faults::Faults;
 use updater::ipc::Server;
 use updater::proto::{self, method};
 use updater::robot::{Health, RobotClient, SafeToRestart};
-use updater::verify::KeyRing;
 
 // ── fixture ──────────────────────────────────────────────────────────────────
 
@@ -72,7 +71,7 @@ impl Harness {
         let root = dir.path().to_path_buf();
         std::fs::create_dir_all(root.join("opt/robot/daemon")).unwrap();
         std::fs::create_dir_all(root.join("var/lib/robot/updater")).unwrap();
-        let publisher = Publisher::new(root.join("keys"), root.join("published"));
+        let publisher = Publisher::new(root.join("published"));
 
         // Per-process socket path: several of these harnesses run concurrently, and a shared
         // path makes them fight over the same socket.
@@ -86,8 +85,8 @@ impl Harness {
         }
     }
 
-    /// Publish a signed release, optionally corrupting the artifact afterwards so the
-    /// signature no longer matches.
+    /// Publish a release, optionally corrupting the artifact afterwards so its digest
+    /// no longer matches.
     fn publish(&self, version: &str, tamper: bool) {
         self.publish_with(version, tamper, |_| {});
     }
@@ -117,7 +116,6 @@ impl Harness {
     fn engine_with(&self, healthy: bool, faults: Faults, extra: &str) -> Engine {
         let config = Config::from_toml(&format!(
             r#"
-trusted_keys_dir = "{keys}"
 hw_rev = 1
 state_dir = "{state}"
 
@@ -129,19 +127,16 @@ source = {{ type = "local_dir", path = "{published}" }}
 on_apply = {{ action = "none" }}
 health = {{ probe = "socket", timeout = "2s" }}
 "#,
-            keys = self.root.join("keys").display(),
             state = self.root.join("var/lib/robot/updater").display(),
             install = self.root.join("opt/robot/daemon").display(),
             published = self.publisher.releases.display(),
             extra = extra,
         ))
         .unwrap();
-        let keys = KeyRing::load(&config.trusted_keys_dir, false).unwrap();
         // `without_deferred_restarts` for the same reason as `apply.rs`: engines run in parallel here
         // and a fork in one holds another's update lock until it execs.
         Engine::new(
             config,
-            keys,
             Box::new(FakeRobot {
                 healthy: Arc::new(AtomicBool::new(healthy)),
             }),
@@ -1119,7 +1114,7 @@ async fn an_allowed_uid_may_mutate() {
     let fx = Harness::new();
     fx.publish("1.0.0", false);
 
-    let me = std::fs::metadata(fx.root.join("keys"))
+    let me = std::fs::metadata(&fx.root)
         .map(|m| {
             use std::os::unix::fs::MetadataExt;
             m.uid()

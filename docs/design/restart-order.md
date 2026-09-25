@@ -101,10 +101,10 @@ live path.
 | # | step | restarts anything? |
 |---|---|---|
 | 1 | preflight: clock, robot stopped, no live session | no |
-| 2 | fetch manifest, verify its signature, channel / pin / downgrade / compatibility checks | no |
+| 2 | fetch manifest, then perform channel / pin / downgrade / compatibility checks | no |
 | 3 | preflight again, now for disk space (the requirement comes from the manifest) | no |
 | 4 | download to `releases/.staging-<ver>/dl/` | no |
-| 5 | verify sha256, then verify the artifact signature | no |
+| 5 | verify the artifact size and SHA-256 | no |
 | 6 | extract to `releases/.staging-<ver>/root/`, write `.updater-manifest.json` | no |
 | 7 | **`hooks/preinstall`** (cwd = the staged tree) — installs ONNX Runtime if below the floor, then runs the release's `scripts/setup-gstreamer.sh` for `mediad`'s stack | no |
 
@@ -141,7 +141,7 @@ the same, for the same reason.
 
 ### Step 11 in detail — `hooks/postinstall`
 
-The hook ships inside the signed artifact and runs with the release directory as its cwd. In order:
+The hook ships inside the hash-verified artifact and runs with the release directory as its cwd. In order:
 
 1. `install` every `systemd/sysusers.d/*.conf` to `/usr/lib/sysusers.d/`, then run
    `systemd-sysusers`. Accounts before units, because a unit naming a missing `User=` fails to start
@@ -262,7 +262,7 @@ adapter rather than failing.
 
 1. Log the startup identity line at `warn` — version, revision, **`exe` path**, pid. The `exe` path is
    what tells you which release directory the process actually came from.
-2. Load `/etc/robot/updater.toml` and the trusted keys. Either failing is fatal.
+2. Load `/etc/robot/updater.toml`. Failure is fatal.
 3. Construct the engine.
 4. `--self-test` returns here, before any state is touched.
 5. `Engine::recover_on_start`, **before the socket is served**, so a robot that booted into a bad
@@ -390,7 +390,7 @@ unchanged: a stopped unit and a daemon that published nothing are still not stal
 
 `scripts/install.sh` on a bare board, in order (`main`):
 
-1. Write `/etc/robot/updater.toml` and the trusted keys.
+1. Write `/etc/robot/updater.toml`.
 2. `bootstrap_first_release`: fetch a standalone `updaterd` binary and run
    `updaterd install [--from <dir>]`. That is the ordinary `Engine::apply` with two settings forced,
    because on a board with no release they are facts rather than policy: `on_apply = none` (the units

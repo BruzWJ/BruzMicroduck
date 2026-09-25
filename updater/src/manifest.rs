@@ -1,4 +1,4 @@
-//! The signed manifest describing one release.
+//! The manifest describing one release.
 //!
 //! See `docs/design/updater-design.md` §5.3. Fields that cannot be retrofitted onto
 //! already-shipped robots are present from the first release even while unused —
@@ -21,9 +21,6 @@ pub struct Manifest {
 
     /// Lowercase hex SHA-256 of the artifact.
     pub sha256: String,
-
-    /// Detached minisign signature of the artifact.
-    pub sig_url: String,
 
     /// Compressed artifact size, if the publisher recorded it. Used only for the
     /// preflight space estimate — the authoritative integrity check is `sha256`.
@@ -176,7 +173,6 @@ mod tests {
             version: semver::Version::new(1, 0, 0),
             url: "artifact.tar.zst".into(),
             sha256: "00".repeat(32),
-            sig_url: "artifact.tar.zst.minisig".into(),
             size: None,
             min_hw_rev: 0,
             schema_version: 1,

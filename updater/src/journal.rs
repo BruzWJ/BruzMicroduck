@@ -260,15 +260,15 @@ impl Pins {
     }
 }
 
-/// When each component's update source last answered with a manifest that verified, and how the
-/// last check went.
+/// When each component's update source last answered with a valid manifest, and how the last
+/// check went.
 ///
 /// A robot that cannot reach its source (a blocked host, a DNS that stopped resolving, a clock TLS
 /// will not accept) looks like a robot with nothing to install: the scheduled check fails, and
 /// every other answer about the robot stays the same. How long ago the source last answered is the
 /// one thing that differs, so it is written down here and `update.status` reports it
-/// (`docs/design/updater-design.md` §8.4.2, option 3). A source replaying an old signed manifest
-/// still answers, and this does not catch that one; expiry would.
+/// (`docs/design/updater-design.md` §8.4.2, option 3). A source replaying an old manifest still
+/// answers, and this does not catch that one; expiry would.
 ///
 /// Only the source's latest counts. An exact version is one a source that stopped moving still
 /// serves.

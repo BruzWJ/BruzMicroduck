@@ -1,73 +1,28 @@
-//! Publishing signed releases, for tests.
+//! Publishing releases, for tests.
 //!
-//! Four test files each grew their own copy of this: generate a keypair, build a
-//! `.tar.zst`, sign it, write a manifest, sign that. Changing the manifest format meant
-//! editing all four, and they had already drifted on details like whether tar mtimes were
-//! fixed.
+//! Four test files each grew their own copy of this: build a `.tar.zst`, hash it and
+//! write a manifest. Changing the manifest format meant editing all four, and they had
+//! already drifted on details like whether tar mtimes were fixed.
 //!
-//! Uses the same `minisign`, `tar`, `zstd` and `sha2` crates the engine verifies with, so a
+//! Uses the same `tar`, `zstd` and `sha2` crates the engine verifies with, so a
 //! fixture cannot produce an artifact the real code rejects for a reason the fixture invented.
 
 use std::path::{Path, PathBuf};
 
-/// A directory of signed releases, plus the key that signed them.
-///
 /// Backs the `local_dir` source, which is what lets a test drive the real engine end to end
 /// with no network.
 pub struct Publisher {
-    /// The trusted-keys directory the engine should be pointed at.
-    pub keys_dir: PathBuf,
     /// Where published releases land — the `local_dir` source path.
     pub releases: PathBuf,
-    keypair: minisign::KeyPair,
 }
 
 impl Publisher {
-    /// Generate a keypair and write its public half into `keys_dir` as `prod.pub`.
-    ///
-    /// Unencrypted, because a test that had to type a passphrase would be a test nobody runs.
-    pub fn new(keys_dir: PathBuf, releases: PathBuf) -> Self {
-        std::fs::create_dir_all(&keys_dir).unwrap();
+    pub fn new(releases: PathBuf) -> Self {
         std::fs::create_dir_all(&releases).unwrap();
-
-        let keypair = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
-        let publisher = Self {
-            keys_dir,
-            releases,
-            keypair,
-        };
-        std::fs::write(publisher.key_file(), publisher.public_key()).unwrap();
-        publisher
+        Self { releases }
     }
 
-    /// The file the public key was written to — for a test that removes or replaces the
-    /// trust anchor, which should not have to know the filename.
-    pub fn key_file(&self) -> PathBuf {
-        self.keys_dir.join("prod.pub")
-    }
-
-    /// The public key line, for tests that swap or compare the trust anchor.
-    pub fn public_key(&self) -> String {
-        self.keypair
-            .pk
-            .to_box()
-            .unwrap()
-            .to_string()
-            .lines()
-            .next_back()
-            .unwrap()
-            .to_owned()
-    }
-
-    /// A detached minisign signature over `data`.
-    pub fn sign(&self, data: &[u8]) -> Vec<u8> {
-        minisign::sign(None, &self.keypair.sk, data, None, None)
-            .unwrap()
-            .to_string()
-            .into_bytes()
-    }
-
-    /// Publish a signed release on the `daemon` channel.
+    /// Publish a release on the `daemon` channel.
     pub fn publish(&self, version: &str) {
         self.release(version).write();
     }
@@ -88,7 +43,7 @@ impl Publisher {
         }
     }
 
-    /// Corrupt a published artifact *after* signing: a tampered mirror or truncated transfer.
+    /// Corrupt a published artifact after hashing: a tampered mirror or truncated transfer.
     pub fn tamper(&self, channel: &str, version: &str) {
         self.tamper_in(&self.releases, channel, version);
     }
@@ -110,9 +65,7 @@ impl Publisher {
     pub fn unpublish(&self, channel: &str, version: &str) {
         for name in [
             format!("{version}.manifest.json"),
-            format!("{version}.manifest.json.minisig"),
             format!("{channel}-{version}.tar.zst"),
-            format!("{channel}-{version}.tar.zst.minisig"),
         ] {
             let _ = std::fs::remove_file(self.releases.join(name));
         }
@@ -121,25 +74,17 @@ impl Publisher {
     /// Point a name at an already-published version, the way CI's moving
     /// `daemon-dev-<branch>` tag does.
     ///
-    /// Copies the manifest and its signature, so the bytes and the signature still
-    /// correspond: a ref is a pointer, never a re-signing.
+    /// A ref is a pointer, never a second manifest shape.
     pub fn point_ref_at(&self, git_ref: &str, version: &str) {
-        for (from, to) in [
-            (
-                format!("{version}.manifest.json"),
-                format!("{git_ref}.manifest.json"),
-            ),
-            (
-                format!("{version}.manifest.json.minisig"),
-                format!("{git_ref}.manifest.json.minisig"),
-            ),
-        ] {
-            std::fs::copy(self.releases.join(from), self.releases.join(to)).unwrap();
-        }
+        std::fs::copy(
+            self.releases.join(format!("{version}.manifest.json")),
+            self.releases.join(format!("{git_ref}.manifest.json")),
+        )
+        .unwrap();
     }
 }
 
-/// Edits a manifest in place before it is signed.
+/// Edits a manifest before it is written.
 type ManifestEdit<'a> = Box<dyn FnOnce(&mut serde_json::Value) + 'a>;
 
 /// A release being described. Nothing is written until [`Release::write`].
@@ -153,7 +98,7 @@ pub struct Release<'a> {
 }
 
 impl<'a> Release<'a> {
-    /// Publish into a different directory, signed with the same key.
+    /// Publish into a different directory.
     ///
     /// Model releases need their own remote: one shared directory would let the daemon's
     /// `latest` resolve to a model manifest, since `local_dir` picks the newest version it
@@ -183,14 +128,14 @@ impl<'a> Release<'a> {
         self.file("hooks/postinstall", script.as_bytes(), 0o755)
     }
 
-    /// Mutate the manifest before it is signed — for compatibility floors and
+    /// Mutate the manifest before it is written — for compatibility floors and
     /// `min_supported`. Applied last, so it can override anything.
     pub fn manifest(mut self, edit: impl FnOnce(&mut serde_json::Value) + 'a) -> Self {
         self.edit = Some(Box::new(edit));
         self
     }
 
-    /// Write the artifact, the manifest, and a detached signature for each.
+    /// Write the artifact and its SHA-256 manifest.
     ///
     /// The manifest is named `<version>.manifest.json`, which is what the `local_dir` source
     /// resolves.
@@ -218,18 +163,11 @@ impl<'a> Release<'a> {
         drop(builder); // completes the zstd frame
 
         let bytes = std::fs::read(&artifact).unwrap();
-        std::fs::write(
-            out_dir.join(format!("{artifact_name}.minisig")),
-            self.publisher.sign(&bytes),
-        )
-        .unwrap();
-
         let mut manifest = serde_json::json!({
             "channel": self.channel,
             "version": self.version,
             "url": artifact_name,
             "sha256": sha256_hex(&bytes),
-            "sig_url": format!("{artifact_name}.minisig"),
             "size": bytes.len(),
             "schema_version": 1,
         });
@@ -237,15 +175,9 @@ impl<'a> Release<'a> {
             edit(&mut manifest);
         }
 
-        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
         std::fs::write(
             out_dir.join(format!("{}.manifest.json", self.version)),
-            &manifest_bytes,
-        )
-        .unwrap();
-        std::fs::write(
-            out_dir.join(format!("{}.manifest.json.minisig", self.version)),
-            self.publisher.sign(&manifest_bytes),
+            serde_json::to_vec(&manifest).unwrap(),
         )
         .unwrap();
     }

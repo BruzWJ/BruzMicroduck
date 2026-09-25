@@ -4,15 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Build tooling: package, sign and publish robot releases"
+description = "Build tooling for packaging robot releases"
 
 # Deliberately a separate crate, not a subcommand of `updater`: this never ships to a
-# robot. In particular it links the *full* `minisign` crate (which can sign), while the
-# updater links only `minisign-verify` (which cannot) — the daemon has no business
-# being able to sign anything.
+# robot.
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
-minisign = "0.9"
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true

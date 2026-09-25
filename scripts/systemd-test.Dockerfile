@@ -6,7 +6,7 @@
 #
 # `systemd` and `dbus` only. The point is a real init with real cgroups and real transient timers,
 # and everything else the update needs — the binaries, the units, the hook — arrives inside the
-# signed releases the harness mints, exactly as it does on a board.
+# release fixtures the harness mints, exactly as it does on a board.
 FROM debian:trixie-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends systemd dbus \

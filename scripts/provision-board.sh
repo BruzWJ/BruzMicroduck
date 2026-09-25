@@ -41,10 +41,6 @@
 #                     different one and ssh refuses outright — see `probe`.
 #   --local           send this clone's scripts/provision.sh instead of having the board fetch
 #                     it. What makes testing an unpushed branch possible.
-#   --no-dev-key      do not install the team dev key, for a board that should only take
-#                     releases. The default is to send this clone's
-#                     deploy/dev-key/team.dev.pub.
-#   --dev-key PATH    somewhere else to find it.
 #   --no-ble          do not use Bluetooth to re-find the board. See below for what that costs.
 #   --pause-btd-on-pair
 #                     for a Radxa Zero 3W that pairs a gamepad only while `btd` is out of the way.
@@ -108,10 +104,6 @@
 #     ethernet lease that moves is still a lease nothing here can find.
 set -eu
 
-# Committed, so a new developer needs nothing from anybody to provision a dev board. `--dev-key`
-# overrides it for a key handed over out of band.
-DEV_KEY_DEFAULT="$(dirname "$0")/../deploy/dev-key/team.dev.pub"
-
 # One source for the whole two-phase install. `provision.sh` persists this value across the
 # reboot and passes it to setup-board.sh and install.sh; forwarding it below is therefore as
 # important as using it for the initial provision.sh URL.
@@ -122,8 +114,6 @@ HOST=""
 HOST_ONLY=""
 FORGET_KEY=""
 REF=""
-DEV_KEY="$DEV_KEY_DEFAULT"
-NO_DEV_KEY=""
 USE_LOCAL=""
 NO_BLE=""
 WEIRD_BLE=""
@@ -202,8 +192,6 @@ while [ $# -gt 0 ]; do
         --name)       ROBOT_NAME="${2:?--name needs a name}"; shift 2 ;;
         --board)      BOARD="${2:?--board needs a board}"; shift 2 ;;
         --forget-host-key) FORGET_KEY=1; shift ;;
-        --dev-key)    DEV_KEY="${2:?--dev-key needs a path}"; shift 2 ;;
-        --no-dev-key) NO_DEV_KEY=1; shift ;;
         --no-ble)     NO_BLE=1; shift ;;
         --no-gstreamer) NO_GSTREAMER=1; shift ;;
         --no-rkaiq)   NO_RKAIQ=1; shift ;;
@@ -639,14 +627,6 @@ if [ -z "${DUCK_TOKEN:-}" ]; then
   This is sufficient while the repository and its release assets are public."
 fi
 
-if [ -n "$NO_DEV_KEY" ]; then
-    DEV_KEY=""
-elif [ ! -f "$DEV_KEY" ]; then
-    die "${DEV_KEY} is not a readable file. It ships with the repository, so a clone should
-  always have it — pass --dev-key PATH for a key from somewhere else, or --no-dev-key for a
-  board that should only take releases."
-fi
-
 # ── arrange the Bluetooth fallback, while ssh still works ────────────────────
 #
 # All of it happens here, before anything has been changed, because every part of it needs a working
@@ -696,12 +676,6 @@ fi
 
 # ── put what the board needs where the board can reach it ────────────────────
 
-if [ -n "$DEV_KEY" ]; then
-    say "sending the dev key"
-    scp -q -o StrictHostKeyChecking=accept-new "$DEV_KEY" "$(scp_target /tmp/team.dev.pub)" \
-        || die "could not copy ${DEV_KEY} to ${HOST}"
-fi
-
 # The local copy is the whole point of `--local`: it provisions a board with a `provision.sh`
 # that has not been pushed anywhere, which is the only way to test a change to it without
 # merging first. Everything the script then fetches still comes from --ref, so a full test of a
@@ -731,7 +705,6 @@ echo
 
 _env="DUCK_REPO='${REPO}' DUCK_TOKEN='${DUCK_TOKEN:-}'"
 [ -z "$REF" ]     || _env="${_env} DUCK_REF='${REF}'"
-[ -z "$DEV_KEY" ] || _env="${_env} DUCK_DEV_KEY=/tmp/team.dev.pub"
 [ -z "$WEIRD_BLE" ] || _env="${_env} DUCK_WEIRD_BLE=1"
 [ -z "$BOARD" ]     || _env="${_env} DUCK_BOARD=${BOARD}"
 [ -z "$PAUSE_BTD" ]  || _env="${_env} DUCK_PAUSE_BTD=1"
