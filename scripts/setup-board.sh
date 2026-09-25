@@ -3,7 +3,7 @@
 #
 # Split from `install.sh` on purpose. This does OS-level bring-up — device-tree overlays,
 # ONNX Runtime — which changes rarely, needs a reboot, and belongs to the *board*.
-# `install.sh` installs a signed daemon release, which happens on every update and belongs
+# `install.sh` installs a hash-verified daemon release, which happens on every update and belongs
 # to the *software*. Conflating them would mean every update re-litigating boot config.
 #
 # Idempotent, and safe to re-run. It never reboots on its own: if it changes anything that

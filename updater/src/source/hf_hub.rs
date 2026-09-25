@@ -1,8 +1,8 @@
 //! Hugging Face Hub source — the model channel.
 //!
 //! Files resolve at `https://huggingface.co/{repo}/resolve/{revision}/{file}`.
-//! **HF signs nothing for us**, so we publish our own minisign signature alongside
-//! every artifact and verify that. See `docs/design/updater-design.md` §5.1.
+//! Artifacts are accepted over HTTPS and checked against the SHA-256 in their
+//! manifest before extraction.
 //!
 //! Two things differ from GitHub Releases and shape the code:
 //!
@@ -19,9 +19,7 @@ use serde::Deserialize;
 
 use crate::Error;
 use crate::manifest::Manifest;
-use crate::source::{FetchedArtifact, ProgressSink, SignedBytes, Source, http};
-
-const SIG_SUFFIX: &str = ".minisig";
+use crate::source::{FetchedArtifact, FetchedManifest, ProgressSink, Source, http};
 
 pub struct HfHub {
     repo: String,
@@ -64,21 +62,15 @@ impl HfHub {
         format!("v{version}")
     }
 
-    async fn signed_manifest(&self, revision: &str) -> Result<SignedBytes<Manifest>, Error> {
+    async fn manifest(&self, revision: &str) -> Result<FetchedManifest, Error> {
         let manifest_url = self.resolve_url(revision, &self.manifest_file);
-        let sig_url = format!("{manifest_url}{SIG_SUFFIX}");
 
         let bytes = http::get_bytes(&self.client, &manifest_url, None).await?;
-        let signature = http::get_bytes(&self.client, &sig_url, None).await?;
 
         let parsed: Manifest = serde_json::from_slice(&bytes)
             .map_err(|e| Error::Corrupt(format!("manifest at {manifest_url}: {e}")))?;
 
-        Ok(SignedBytes {
-            bytes,
-            signature,
-            parsed,
-        })
+        Ok(FetchedManifest { bytes, parsed })
     }
 
     /// Does the repo have a tag for this version?
@@ -104,16 +96,13 @@ impl HfHub {
 
 #[async_trait::async_trait]
 impl Source for HfHub {
-    async fn latest_manifest(&self) -> Result<SignedBytes<Manifest>, Error> {
+    async fn latest_manifest(&self) -> Result<FetchedManifest, Error> {
         // `revision` is usually a moving branch, so this is "whatever it points at
         // now". The manifest's `version` is what we record as installed.
-        self.signed_manifest(&self.revision).await
+        self.manifest(&self.revision).await
     }
 
-    async fn manifest_for(
-        &self,
-        version: &semver::Version,
-    ) -> Result<SignedBytes<Manifest>, Error> {
+    async fn manifest_for(&self, version: &semver::Version) -> Result<FetchedManifest, Error> {
         let tag = Self::tag_for(version);
         if !self.tag_exists(&tag).await? {
             return Err(Error::Network(format!(
@@ -121,17 +110,17 @@ impl Source for HfHub {
                 self.repo
             )));
         }
-        let signed = self.signed_manifest(&tag).await?;
+        let fetched = self.manifest(&tag).await?;
 
         // A tag whose manifest disagrees with it means the publisher tagged the wrong
         // commit. Refusing beats installing something other than what was asked for.
-        if signed.parsed.version != *version {
+        if fetched.parsed.version != *version {
             return Err(Error::Corrupt(format!(
                 "tag {tag} contains a manifest for version {} — the tag and manifest disagree",
-                signed.parsed.version
+                fetched.parsed.version
             )));
         }
-        Ok(signed)
+        Ok(fetched)
     }
 
     async fn fetch_artifact(
@@ -150,37 +139,24 @@ impl Source for HfHub {
         // A model manifest's `url` is a path *within the repo*, unlike GitHub's
         // absolute asset URLs — so resolve it against the same revision the manifest
         // came from, keeping the artifact and its manifest consistent.
-        let (artifact_url, sig_url) = if manifest.url.starts_with("https://") {
-            (manifest.url.clone(), manifest.sig_url.clone())
+        let artifact_url = if manifest.url.starts_with("https://") {
+            manifest.url.clone()
+        } else if manifest.url.contains("://") {
+            return Err(Error::Verification(format!(
+                "model artifact URL must use HTTPS, got {:?}",
+                manifest.url
+            )));
         } else {
-            (
-                self.resolve_url(&self.revision, &manifest.url),
-                self.resolve_url(&self.revision, &manifest.sig_url),
-            )
+            self.resolve_url(&self.revision, &manifest.url)
         };
 
-        // Untrusted until the signature is checked, so refuse anything that isn't a
-        // bare filename.
+        // Remote input must not choose an arbitrary local path.
         let artifact_name = super::github::safe_file_name(&manifest.url)?;
         let artifact = dest_dir.join(&artifact_name);
-        let signature = dest_dir.join(format!("{artifact_name}{SIG_SUFFIX}"));
 
-        let bytes =
-            http::download_to(&self.client, &artifact_url, &artifact, None, &progress).await?;
+        http::download_to(&self.client, &artifact_url, &artifact, None, &progress).await?;
 
-        let sig_bytes = http::get_bytes(&self.client, &sig_url, None).await?;
-        tokio::fs::write(&signature, &sig_bytes)
-            .await
-            .map_err(|e| Error::Io {
-                path: signature.clone(),
-                source: e,
-            })?;
-
-        Ok(FetchedArtifact {
-            artifact,
-            signature,
-            bytes,
-        })
+        Ok(FetchedArtifact { artifact })
     }
 }
 

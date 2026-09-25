@@ -24,8 +24,7 @@ pub enum Check {
     /// The clock is plausible.
     ///
     /// A board with no battery-backed RTC boots with a wrong clock, and HTTPS
-    /// then fails cert-date validation before any download can start. minisign
-    /// itself is time-independent, but TLS is not.
+    /// then fails certificate-date validation before any download can start.
     Clock,
     /// Not mid-motion.
     RobotStopped,
@@ -39,8 +38,8 @@ pub enum Check {
     /// its own `/var/tmp`. A release copied to either from a shell — the obvious place to put
     /// one, and where `scripts/dev-push.sh` used to put it — is therefore not the one this
     /// process sees, and every message downstream is a lie: "no manifest for version X in
-    /// /var/tmp/duck-sideload", against a directory whose `ls` shows that exact manifest, its
-    /// signature and the artifact. Nothing in that output points at the namespace, and the
+    /// /var/tmp/duck-sideload", against a directory whose `ls` shows that exact manifest and
+    /// artifact. Nothing in that output points at the namespace, and the
     /// caller has done nothing wrong.
     ///
     /// So it is a named check rather than a better error message further down: it fails before

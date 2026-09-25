@@ -55,7 +55,6 @@ updater = { path = "../updater" }
 # pull dev-dependencies, so the shipped binary has no test-util in it.
 tokio = { workspace = true, features = ["test-util"] }
 test-support = { path = "../test-support" }
-minisign = "0.9.1"
 semver.workspace = true
 sha2 = "0.11.0"
 tar = "0.4.46"

@@ -59,10 +59,9 @@ const STAGED: &str = " staged/";
 ///
 /// `dev.yml` first, deliberately: it is the one that runs on every push and the one whose output
 /// reaches a board during development.
-/// `_build-release.yml` rather than `release.yml`: the recipe lives in the called workflow, while
-/// `release.yml` validates the selected source and version. A constant that kept naming the old file
-/// would have left every assertion here vacuous — which is why the parse below fails loudly when it
-/// matches nothing.
+/// The release recipe lives directly in the sole manual `release.yml`. A constant that kept naming
+/// the deleted reusable workflow would have left every assertion here vacuous — which is why the
+/// parse below fails loudly when it matches nothing.
 ///
 /// `scripts/dev-push.sh` is the third, and it is not a workflow — it is the laptop-to-board path,
 /// which assembles the same artifact from the same lists so that what a developer runs on a board
@@ -73,7 +72,7 @@ const STAGED: &str = " staged/";
 /// whichever one nobody is cutting a release from that week.
 const PACKAGING_SITES: [&str; 3] = [
     ".github/workflows/dev.yml",
-    ".github/workflows/_build-release.yml",
+    ".github/workflows/release.yml",
     "scripts/dev-push.sh",
 ];
 

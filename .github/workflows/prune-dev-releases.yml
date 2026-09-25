@@ -11,7 +11,7 @@
 #
 # What this cannot break: the release stream. Dev versions are semver prereleases and
 # `latest` resolves to the highest *stable* version, so a customer robot could never have
-# been on one of these — and `allow_dev_keys = false` is a second, independent barrier.
+# been on one of these; the stable updater never resolves this tag namespace.
 name: prune-dev-releases
 
 on:

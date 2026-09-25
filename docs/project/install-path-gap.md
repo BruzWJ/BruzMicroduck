@@ -284,7 +284,7 @@ is why they were the first thing to do.
 ### 2. The artifact install — done, and what it left
 
 **This is no longer open, and the title of this document is no longer true.** `scripts/board-test.sh`
-packages a real release from the `--include` list in `_build-release.yml`, unpacks it, and runs
+packages a real release from the `--include` list in `release.yml`, unpacks it, and runs
 `scripts/install.sh` *and* `hooks/postinstall` against it inside the container with a stubbed
 `systemctl` (PR #47, 2026-08-07). Eleven assertions: units installed byte-identical at mode 644,
 sysusers drop-ins, the `robotctl` symlink resolving through `current`, the journald drop-in,
@@ -336,7 +336,7 @@ treats it.
 ### 4. Real systemd — done, as `scripts/systemd-test.sh`
 
 **Done, and it paid for itself before asserting anything.** `scripts/systemd-test.sh` boots systemd as
-pid 1, mints three signed releases carrying real units and a real `updaterd`, installs one, applies
+pid 1, mints three release fixtures carrying real units and a real `updaterd`, installs one, applies
 the next through the running daemon, and then applies one that ships a unit which cannot start.
 
 Four things it observes that nothing else in the tree can, because everything else has a stub

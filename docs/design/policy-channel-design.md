@@ -15,7 +15,7 @@ moving branch records the commit it came from, but nothing yet compares that aga
 say it has moved. Everything else in this page is built.
 
 Companion to [`updater-design.md`](updater-design.md), which owns the update engine —
-components, sources, signing, the health gate, rollback — and to
+components, sources, integrity checks, the health gate, rollback — and to
 [`robotd-design.md`](robotd-design.md) §2.3, which owns how a policy is validated and run.
 This page owns the **channel**: which file fills a slot, who published it, and the commands
 that change that. Where a mechanism belongs to one of those pages, this one says a sentence
@@ -46,7 +46,7 @@ already cover.
 A slot — `walk`, `stand`, `sitstand`, `ground_pick`, `kick_left`, `kick_right`, `roulade` — is
 filled from exactly one of three origins:
 
-| | comes from | provenance | signed | auto-updates | reset target |
+| | comes from | provenance | per-file hash | auto-updates | reset target |
 |---|---|---|---|---|---|
 | **official** | the `policies` component | manifest, semver | yes | yes, per `auto_apply` | **yes** |
 | **community** | any other HF repo | repo + revision + commit sha | no | no — reported only | no |
@@ -64,13 +64,13 @@ Origin drives behaviour and not only a label:
   origin everywhere they are displayed — `policy list`, `policy check`, and the policy name
   `robotctl monitor` prints, which today says `walk` for gaits that share nothing but a slot.
 
-**Signature verification is deliberately not required for community policies.** Every other
-artifact the engine installs is verified against a trusted key, and this is the first exception.
-The argument for it is that a policy is not a binary: `robotd` holds the only write handle to
+**A declared per-file hash is deliberately not required for community policies.** The daemon
+release path checks its artifact against the SHA-256 in the release manifest; policy repositories
+do not carry that release contract. The argument is that a policy is not a binary: `robotd` holds the only write handle to
 the bus behind joint clamps, a fall→limp reflex and an intent deadman
 ([`robotd-design.md`](robotd-design.md) §2.4), and the `obs[1,61] → actions[1,14]` gate refuses
 a wrong-shaped graph while the robot is standing still. That sandbox is the boundary, not the
-signature. A daemon binary has no such sandbox, which is why the component path's rule does not
+publisher. A daemon binary has no such sandbox, which is why the release path's rule does not
 move.
 
 ## 3. Slots are config, so `load` and `reset` are config edits
@@ -302,9 +302,9 @@ arrived. And it does not replace a working set with an older one when a fetch fa
 half-published revision leaves the board on the gait it had, and the pin is retried at the next
 update.
 
-Nothing is signed, and that follows §2 rather than contradicting it: this is the same download a
-person could make, into a directory `robotd` shape-checks everything out of. The shape gate is
-also what catches a truncated file, which is why no hashes are pinned here to go stale on every
+No per-file digest is declared, and that follows §2 rather than contradicting it: this is the same
+download a person could make, into a directory `robotd` shape-checks everything out of. The shape
+gate also catches a truncated file, which is why no hashes are pinned here to go stale on every
 retrain.
 
 One rule makes that a bootstrap rather than a second home: **a set that is already installed is
@@ -348,7 +348,7 @@ error path exits zero and says so on stderr.
 would give most naturally. Against that: the nine files are produced as a *family* by one
 training run, the slot→file mapping is mode-dependent (`walk` is `alpha_walking.onnx` on legs
 and `roller.onnx` on wheels, which postdates that section), and nine components means nine
-repos, nine signatures, nine config blocks, nine round trips per check, and a nine-dimensional
+repos, nine manifests, nine config blocks, nine round trips per check, and a nine-dimensional
 skew matrix in which nothing records that a given walk and stand were ever trained together. One
 component means a mode switch downloads nothing and the set is versioned the way it is built.
 
@@ -712,7 +712,7 @@ its meaning for the things that genuinely are models and not control policies, s
 | …except on a slot carrying an error | A fallen-back slot looks untouched, and clearing it is what reset is for (§4) |
 | A failed community override is degraded, not unhealthy | Otherwise a stale config gates every daemon update (§5) |
 | `pollen-robotics/*` is official, hardcoded | A configurable trust org makes the badge meaningless (§2) |
-| Community policies are not signature-verified | The safety layer and the shape gate are the boundary, not the key (§2) |
+| Community policies carry no declared per-file hash | The safety layer and the shape gate are the boundary (§2) |
 | One `policies` component, not one per slot | The set is trained as a family; per-slot overrides already cover the rest (§9) |
 | The fetch lives in `updaterd` | `robotctl` must not link an HTTP stack (§8) |
 | Policies live outside the release, seeded by it | One runtime source, and no precedence rule to get wrong (§9) |
@@ -754,7 +754,8 @@ its meaning for the things that genuinely are models and not control policies, s
   another is a combination nobody trained.
 - **A `microduck` tag on the Hub.** Searching for the word is enough until there is something to
   tag.
-- **Signing community policies**, and any curated-org scheme that would require it.
+- **Publisher authentication for community policies**, and any curated-org scheme that would
+  require it.
 
 ## 15. Open
 
@@ -768,10 +769,9 @@ its meaning for the things that genuinely are models and not control policies, s
   §9 fetches the pinned set from the Hub directly, the way the board's other prerequisites
   arrive. So this is a question about what a component would *add* — rollback, pin, golden,
   known-bad history and the periodic check — against a cost that is not about policies at all.
-  Every artifact the component path installs is signature-verified, unconditionally, by the same
-  code that installs daemon binaries. An official set delivered that way must therefore be
-  signed, not because a policy needs a signature but because that path has never had an unsigned
-  mode and giving it one would widen the hole well past policies. Worth revisiting if per-set
+  Every artifact the component path installs is SHA-256-verified, unconditionally, by the same
+  code that installs daemon binaries. An official set delivered that way would therefore need a
+  release manifest carrying its size and hash. Worth revisiting if per-set
   rollback turns out to be something anyone reaches for; nothing needs it today.
 - Whether the app surfaces any of this, and how much of §7 it needs. Everything here is
   reachable over the same socket `btd` already relays, so the answer is a UI question rather

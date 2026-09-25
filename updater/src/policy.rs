@@ -1,7 +1,7 @@
 //! The official policy set: what is installed, what the Hub offers, and moving between them.
 //!
 //! **Why this is in `updaterd` at all.** It is not an update in the component sense — there is no
-//! manifest, no signature, no health gate and no rollback, because a policy is not a binary
+//! component manifest, health gate or rollback, because a policy is not a system binary
 //! (`docs/design/policy-channel-design.md` §2). What it needs is a network stack and root, and
 //! this is the daemon that has both: `robotd` has neither by design, and `robotctl` must not link
 //! an HTTP client because it is the tool that has to work when everything else is broken.
@@ -1061,10 +1061,9 @@ mod tests {
 // deliberately so: a set is nine files that version together and fill every slot, and this is one
 // file somebody wants to try in one of them.
 //
-// Nothing here is signed, per `docs/design/policy-channel-design.md` §2. A policy is not a
-// binary: `robotd` holds the only write handle to the bus behind joint clamps, a fall reflex and
-// an intent deadman, and refuses any graph that is not obs[1,61] -> actions[1,14] while the robot
-// is standing still. That sandbox is the boundary, not a signature.
+// A community policy is sandboxed rather than installed as executable system code: `robotd`
+// holds the only write handle to the bus behind joint clamps, a fall reflex and an intent deadman,
+// and refuses any graph that is not obs[1,61] -> actions[1,14] while the robot is standing still.
 
 /// Where fetched policies live. Outside every release directory, per `updater-design.md` §5.7 —
 /// a policy somebody chose must survive an update and a rollback.

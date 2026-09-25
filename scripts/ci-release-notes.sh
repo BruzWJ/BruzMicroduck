@@ -1,7 +1,7 @@
 #!/bin/sh
 # Compose release notes: why this release exists, then what changed in it.
 #
-# Called by `_build-release.yml` after the artifact has passed verification.
+# Called by `release.yml` after the artifact has passed verification.
 #
 # The changelog comes from GitHub's own generator rather than from a file in the repo. That is
 # deliberate: a hand-maintained CHANGELOG.md is a second place to forget, and the generator already
@@ -29,7 +29,7 @@ case "$previous" in
 esac
 
 # Not fatal if it is missing or fails. Notes without a changelog are worse than notes with one and
-# better than a failed release: this runs after the artifact is signed and verified.
+# better than a failed release: this runs after the artifact and its digest are verified.
 changelog=""
 if [ -n "$previous" ] && [ "$previous" != "$TAG" ]; then
     changelog="$(gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \

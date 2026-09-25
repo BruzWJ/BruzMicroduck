@@ -155,7 +155,6 @@ fn event_line(record: &RunRecord, previous: Option<i64>) -> Option<String> {
             sha256,
             bytes,
             url,
-            signed_by,
             source_revision,
         } => {
             let mut parts = vec![version.to_string()];
@@ -163,9 +162,6 @@ fn event_line(record: &RunRecord, previous: Option<i64>) -> Option<String> {
                 parts.push(bytes_human(*bytes));
             }
             parts.push(format!("sha256 {}", short(sha256, 8)));
-            if let Some(key) = signed_by {
-                parts.push(format!("signed by {key}"));
-            }
             if let Some(rev) = source_revision {
                 parts.push(format!("rev {}", short(rev, 7)));
             }
@@ -661,13 +657,12 @@ mod tests {
                     sha256: "3f9a1c2be4d7f08a91cc5517b2ad3e6690f1c0b4".into(),
                     bytes: Some(184_200_000),
                     url: Some("https://github.com/pollen-robotics/microduck/releases/download/daemon-v0.1.4/daemon-0.1.4.tar.zst".into()),
-                    signed_by: Some("release.pub".into()),
                     source_revision: Some("88efc0341ab".into()),
                 }),
                 at(t0 + 1, RunEvent::Phase { phase: Phase::Downloading, detail: None }),
                 at(t0 + 78, RunEvent::Note { text: "downloaded 184.2 MB to /opt/robot/daemon/staging/0.1.4/dl/daemon-0.1.4.tar.zst".into() }),
                 at(t0 + 78, RunEvent::Phase { phase: Phase::Verifying, detail: None }),
-                at(t0 + 82, RunEvent::Note { text: "artifact hash matches the manifest, and its signature verifies against release.pub".into() }),
+                at(t0 + 82, RunEvent::Note { text: "artifact SHA-256 matches the manifest".into() }),
                 at(t0 + 82, RunEvent::Phase { phase: Phase::Extracting, detail: None }),
                 at(t0 + 100, RunEvent::Phase { phase: Phase::RunningPreHook, detail: None }),
                 at(t0 + 212, RunEvent::Hook {

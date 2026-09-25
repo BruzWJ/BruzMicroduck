@@ -21,7 +21,7 @@ Companion to [`architecture.md`](../design/architecture.md) (what we're building
 | `duckctl/` | the robot from a laptop. BLE today; named for the robot rather than the radio |
 | `mediad/` | camera, mic, encode and the WebRTC gateway, plus the console it serves. **Streaming to a browser on the LAN from a Radxa Zero 3W**, hardware H.264 through `mpph264enc`, `control` datachannel alongside |
 | `tof/` | `tofd`: the head's 8×8 ToF matrix on its own socket at 15 Hz. A board with no sensor fitted runs it anyway and says so |
-| `xtask/` | package · sign — release artifacts use the updater's own formats |
+| `xtask/` | package — release artifacts use the updater's own formats |
 | `.github/` | ci · release · dev — a manual release run builds, verifies, and publishes one stable release |
 | bootstrap | `updaterd install` + `scripts/install.sh` — a robot installs its first release through the **ordinary engine**, so there is no bootstrap-only code path to drift |
 | recovery | `robot-boot-check.timer` + `robot-rescue` + the `golden` symlink ship and are enabled. **Never exercised on a board** ([`boot-recovery-net.md`](../design/boot-recovery-net.md)) |
@@ -68,11 +68,11 @@ real socket and commits; `robotd --unhealthy` reverts the content behind `curren
 `scripts/dev-push.sh` installs a laptop build over ssh with no CI run at all. Two properties
 make that safe on every push, both enforced away from the workflow: a dev build **cannot become
 `latest`** (the version is a semver prerelease and `version_under` refuses to read a dev tag as
-a release version), and it **cannot install on a customer robot** (`allow_dev_keys` is false
-there, and a trusted key only counts as a dev key if its filename ends `.dev.pub`).
+a release version), and it can be selected only through an explicit `--ref` request from a locally
+authorized updater client. The stable scan never chooses it.
 
 **Done:** verified against the real repository — `dev.yml` published, `--ref main` installed
-over the network, and a customer-robot config refused the same build.
+over the network, and the stable resolver ignored the same build.
 
 **One thing it left open, now decided:** a private repo's release assets are reachable with a
 token and a customer robot has none, so while this repository is private robots in the field
@@ -252,14 +252,14 @@ someone can try one they did not train and get back.
 **Designed**, in [`policy-channel-design.md`](../design/policy-channel-design.md), which owns
 the decisions this section used to leave open. The short version: a slot is filled from one of
 three origins — official (`pollen-robotics/*`, the reset target), community (any other
-Hub repo, unsigned, reported but never auto-applied) or local (a path on the board); `policy
+Hub repo, reported but never auto-applied) or local (a path on the board); `policy
 load` writes the config key and `policy reset` removes it, so persistence and undo are the
 mechanism that already exists; and the official set ships as one `policies` component rather
 than one per slot.
 
 **Most of the engine is already built:** the `hf_hub` source resolves and verifies, a component
 brings its own version line, rollback, pin, boot trial and known-bad history, `on_apply =
-reload` exists, and `xtask sign` signs any directory of artifacts.
+reload` exists, and `xtask package` produces the manifest and hashed artifact.
 
 **Three slices, each useful alone:**
 
@@ -341,12 +341,10 @@ The numbers above are identifiers. This is the order.
 
 ## Decisions that shape work rather than follow it
 
-1. ~~**Signing key custody**~~ — **done** for the daemon. Three encrypted release keys plus an
-   unencrypted dev key in `~/.duck-keys`; only `release-1` goes into secrets. Releases are signed
-   in CI under `environment: release`, which scopes the secrets but **gates nothing** — no
-   required reviewers, no branch policy. Accepted deliberately while no robot is in the field,
-   and the declaration is the hook that turns a real gate on with one settings change. See
-   [`ci-setup.md`](ci-setup.md). **Reopens with M8**: publishing a policy is a third kind of key.
+1. ~~**Release authority**~~ — **done** for the daemon. The manual `release.yml` workflow is the
+   only stable publisher; GitHub repository write access is its authorization boundary. It uses
+   the job's `GITHUB_TOKEN`, has no release secrets, and verifies the exact draft assets and their
+   SHA-256 digests before publication. See [`ci-setup.md`](ci-setup.md).
 2. **Safety authority** (§6) — landed in M3.
 3. **Provisioning** — identity is done; calibration and the PIN are not, and the PIN is a factory
    process rather than code (M6).
