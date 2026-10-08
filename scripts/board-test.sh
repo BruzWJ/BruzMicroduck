@@ -118,10 +118,13 @@ done
 # an argument list without an array, and quoting each pair matters — a bare expansion splits
 # `docs/deploy.md=docs/deploy.md` on nothing and a path with a space on everything.
 set --
+# Match only the packager's standalone src=dest arguments: release.yml also uses
+# `gh api --include URL`, which is an unrelated GitHub CLI option and must not become an xtask
+# argument even if that URL later gains a query string.
 while IFS= read -r pair; do
     set -- "$@" --include "$pair"
 done <<INCLUDES
-$(grep -o -- '--include "[^"]*"' "$PACKAGING_WORKFLOW" | sed 's/--include //; s/"//g')
+$(sed -n 's/^[[:space:]]*--include "\([^"]*=[^"]*\)".*/\1/p' "$PACKAGING_WORKFLOW")
 INCLUDES
 
 if [ "$#" -eq 0 ]; then

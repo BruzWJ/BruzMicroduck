@@ -441,6 +441,20 @@ mod tests {
                 && !latest_release_check.contains("|| true"),
             "authentication, rate-limit, network, and server failures must stop publication"
         );
+        // `gh api --include` shares the packager flag's spelling. The board test must select only
+        // standalone src=dest arguments or it hands the API URL to `xtask package` after the ARM
+        // build has already consumed several minutes.
+        let board_test = std::fs::read_to_string(root.join("scripts/board-test.sh"))
+            .expect("scripts/board-test.sh must exist");
+        let include_scraper = board_test
+            .lines()
+            .find(|line| line.contains("$PACKAGING_WORKFLOW") && line.contains("--include"))
+            .expect("board-test.sh must scrape release package includes");
+        assert!(
+            include_scraper.contains("^[[:space:]]*--include")
+                && include_scraper.contains(r#"*=[^"]*"#),
+            "board-test.sh must not scrape the release workflow's `gh api --include` option"
+        );
         assert!(
             !entry
                 .lines()
