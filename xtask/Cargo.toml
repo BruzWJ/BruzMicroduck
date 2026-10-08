@@ -17,8 +17,7 @@ sha2 = "0.11"
 tar = "0.4"
 toml = "1"
 zstd = "0.13"
-# The boards a release supports, for its manifest's `min_hw_rev`: `board::min_hw_rev` reads
-# each board's last release from the source being packaged.
+# The supported hardware target's fixed revision, for the release manifest's `min_hw_rev`.
 robotd-params = { path = "../robotd-params" }
 
 # Only `tests/artifact.rs`, which packages into a scratch directory. `tar`, `zstd` and `toml`

@@ -631,7 +631,6 @@ pub fn head_expression(beats: f64, reach: f64) -> [f64; 4] {
 }
 
 #[cfg(test)]
-#[cfg(test)]
 mod tests {
     use super::*;
 

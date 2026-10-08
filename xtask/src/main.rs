@@ -250,14 +250,9 @@ fn package(args: PackageArgs) -> Result<(), Box<dyn std::error::Error>> {
         None => artifact_name.clone(),
     };
 
-    // Not a flag: the boards a release supports are `Board::last_release`, in the source being
-    // packaged, so retiring one is a commit and nobody has to remember an argument in CI.
-    let min_hw_rev = robotd_params::board::min_hw_rev(&args.version).ok_or_else(|| {
-        format!(
-            "{} is past every board's last release (robotd_params::board::Board::last_release)",
-            args.version
-        )
-    })?;
+    // Not a flag: hardware compatibility is part of the source being packaged rather than an
+    // argument somebody has to remember in CI.
+    let min_hw_rev = robotd_params::board::HW_REV;
 
     let mut manifest = serde_json::json!({
         "channel": args.channel,

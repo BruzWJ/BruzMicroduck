@@ -28,18 +28,6 @@ pub struct Config {
     #[serde(skip)]
     pub loaded_from: Option<PathBuf>,
 
-    /// The hardware revision a release's `min_hw_rev` is checked against, for a robot whose
-    /// `robotd.toml` declares no board.
-    ///
-    /// The board is the answer when there is one ([`Config::hw_rev`]). This is what every robot
-    /// installed before the board was a setting carries — `hw_rev = 1`, which is what its board
-    /// is — and what a board provisioned against a release that still shipped it carries too,
-    /// which is why it cannot win: a beta would be revision 1 for good, since the installer never
-    /// rewrites this file. One integer and not a capability matrix
-    /// (`docs/design/updater-design.md` §5.6).
-    #[serde(default)]
-    pub hw_rev: Option<u32>,
-
     /// Engine-owned state: lock file, update log, boot counter. Must NOT be
     /// inside any component's `install_dir` — it has to survive every swap and
     /// rollback (`docs/design/updater-design.md` §5.7).
@@ -356,24 +344,6 @@ impl Config {
         Ok(config)
     }
 
-    /// The hardware revision this robot is: the board `robotd.toml` declares, else this file's
-    /// `hw_rev`, else `zero3`'s.
-    ///
-    /// Read from the file every time rather than once at startup, so `robotctl configure`
-    /// applies without restarting `updaterd`.
-    pub fn hw_rev(&self) -> u32 {
-        self.hw_rev_given(robotd_params::board::Board::declared(std::path::Path::new(
-            robotd_params::DEFAULT_PATH,
-        )))
-    }
-
-    fn hw_rev_given(&self, declared: Option<robotd_params::board::Board>) -> u32 {
-        declared
-            .map(robotd_params::board::Board::hw_rev)
-            .or(self.hw_rev)
-            .unwrap_or_else(|| robotd_params::board::Board::default().hw_rev())
-    }
-
     /// Bounds applied when extracting an artifact.
     pub fn archive_limits(&self) -> crate::verify::ArchiveLimits {
         let defaults = crate::verify::ArchiveLimits::default();
@@ -522,7 +492,8 @@ mod tests {
             daemon.health
         );
 
-        // One component per model, each independently versioned (§5.5).
+        // The annotated reference keeps two hypothetical HF model components so both the source
+        // and reload shapes remain parse-tested. This robot's control policies use their own set.
         assert!(config.component("model-walk").is_ok());
         assert!(config.component("model-jump").is_ok());
     }
@@ -772,28 +743,6 @@ mod tests {
         assert!(AutoApply::All.permits(false));
     }
 
-    /// A declared board is the answer, whatever `hw_rev` says: a beta provisioned against a
-    /// release whose `updater.toml` still carried `hw_rev = 1` must not stay revision 1. Without
-    /// a board, `hw_rev` is the answer, and without either it is the zero3.
-    #[test]
-    fn the_declared_board_wins_over_hw_rev() {
-        use robotd_params::board::Board;
-        let base = r#"
-            state_dir = "/var/lib/robot/updater"
-            [component.daemon]
-            install_dir = "/opt/robot/daemon"
-            source = { type = "local_dir", path = "/var/tmp/rel" }
-            on_apply = { action = "none" }
-        "#;
-        let bare = Config::from_toml(base).unwrap();
-        assert_eq!(bare.hw_rev_given(None), Board::Zero3.hw_rev());
-        assert_eq!(bare.hw_rev_given(Some(Board::Beta)), Board::Beta.hw_rev());
-
-        let legacy = Config::from_toml(&format!("hw_rev = 1\n{base}")).unwrap();
-        assert_eq!(legacy.hw_rev_given(None), 1);
-        assert_eq!(legacy.hw_rev_given(Some(Board::Beta)), Board::Beta.hw_rev());
-    }
-
     /// A board's config says nothing about the policy library and must keep getting the board's
     /// path; a twin's says where it can actually write, and must be believed. Both halves matter:
     /// the default is what every release depends on, and the override is the whole reason this
@@ -802,7 +751,6 @@ mod tests {
     #[test]
     fn policy_library_defaults_to_the_board_and_can_be_moved() {
         let base = r#"
-            hw_rev = 1
             state_dir = "/var/lib/robot/updater"
             [component.daemon]
             install_dir = "/opt/robot/daemon"
@@ -834,7 +782,6 @@ mod tests {
     #[test]
     fn auto_apply_defaults_to_mandatory_and_parses_each_variant() {
         let base = r#"
-            hw_rev = 1
             state_dir = "/var/lib/robot/updater"
             [component.daemon]
             install_dir = "/opt/robot/daemon"
@@ -874,7 +821,6 @@ mod tests {
     fn health_timeout_accepts_humantime() {
         let config = Config::from_toml(
             r#"
-            hw_rev = 1
             state_dir = "/var/lib/robot/updater"
             [component.daemon]
             install_dir = "/opt/robot/daemon"
@@ -894,7 +840,6 @@ mod tests {
     fn config_with(extra_component: &str) -> Result<Config, crate::Error> {
         Config::from_toml(&format!(
             r#"
-            hw_rev = 1
             state_dir = "/var/lib/robot/updater"
             {extra_component}
             "#
@@ -905,7 +850,6 @@ mod tests {
     fn rejects_state_dir_inside_install_dir() {
         let err = Config::from_toml(
             r#"
-            hw_rev = 1
             state_dir = "/opt/robot/daemon/state"
             [component.daemon]
             install_dir = "/opt/robot/daemon"
@@ -995,7 +939,6 @@ mod tests {
     fn rejects_empty_components() {
         let err = Config::from_toml(
             r#"
-            hw_rev = 1
             state_dir = "/var/lib/robot/updater"
             "#,
         )

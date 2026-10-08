@@ -2725,20 +2725,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nfc"
-version = "0.17.2"
-dependencies = [
- "clap",
- "duck-ipc-proto",
- "libc",
- "robotd-params",
- "serde",
- "serde_json",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "nix"
 version = "0.26.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3370,7 +3356,7 @@ dependencies = [
 
 [[package]]
 name = "qwiic-imu"
-version = "0.16.1"
+version = "0.17.2"
 dependencies = [
  "anyhow",
  "embedded-hal",
@@ -3679,7 +3665,6 @@ version = "0.17.2"
 dependencies = [
  "duck-ipc-proto",
  "kinematics",
- "semver",
  "serde",
  "serde_json",
  "tempfile",

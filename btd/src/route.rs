@@ -284,8 +284,6 @@ fn permits(call: &proto::Call) -> bool {
         // mouth, because what it is is a sound: the mouth is following the note. Same
         // refusal either way, and the same reason to lift it — an app that can play the duck.
         RobotTheremin(_) | RobotChorale(_) => false,
-        // The flashlight waits for the same app: an LED is no more urgent from a phone than a quack.
-        RobotFlashlight(_) => false,
 
         // The chorale's own namespace is between `btd` and `robotd` — it is how this daemon is told
         // what to advertise and how it reports what it heard. Not a client surface at all, so a

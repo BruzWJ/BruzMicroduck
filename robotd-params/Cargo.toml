@@ -25,8 +25,5 @@ serde_json.workspace = true
 toml_edit = "0.23"
 thiserror.workspace = true
 tracing.workspace = true
-# A board's last release, compared against the release being packaged (`board::min_hw_rev`).
-semver.workspace = true
-
 [dev-dependencies]
 tempfile = "3.27.0"

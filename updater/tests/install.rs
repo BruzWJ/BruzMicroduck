@@ -64,7 +64,6 @@ impl FreshRobot {
             self.config_path(),
             format!(
                 r#"
-hw_rev = 1
 state_dir = "{state}"
 robot_socket = "{root}/run/robotd.sock"
 

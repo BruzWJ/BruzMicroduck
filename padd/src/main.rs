@@ -36,7 +36,6 @@
 //! D-pad right     head + move — left stick walks and turns, right stick looks around
 //! D-pad left      move — the sticks walk, strafe and turn
 //! D-pad down      body + head — left stick crouches and leans sideways, right stick looks around
-//! Home            flashlight on / off (a board with one)
 //! Start           first press stands up, then toggles the policy
 //! Start, 1.5 s    home pose, motors stiff, policy off — a seated robot stays seated
 //! Select, 2–4 s   let go: sit, rest pose, then torque off and every servo rebooted

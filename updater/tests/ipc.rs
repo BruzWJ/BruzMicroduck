@@ -116,7 +116,6 @@ impl Harness {
     fn engine_with(&self, healthy: bool, faults: Faults, extra: &str) -> Engine {
         let config = Config::from_toml(&format!(
             r#"
-hw_rev = 1
 state_dir = "{state}"
 
 {extra}

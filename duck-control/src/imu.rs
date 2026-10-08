@@ -55,10 +55,6 @@ impl SflpDecoder {
     /// +Z up. Sensor and trunk axes therefore coincide.
     pub const DEFAULT_MOUNT: [f64; 4] = [1.0, 0.0, 0.0, 0.0];
 
-    /// The beta power board's axes also align with the trunk. Keep the named mount for
-    /// board-specific callers, even though it currently matches the SparkFun Micro mount.
-    pub const BETA_MOUNT: [f64; 4] = [1.0, 0.0, 0.0, 0.0];
-
     pub fn new(mount: [f64; 4]) -> Self {
         Self {
             mount,

@@ -20,8 +20,8 @@ path = "src/main.rs"
 
 [dependencies]
 duck-ipc-proto = { path = "../duck-ipc-proto" }
-# The board `robotd.toml` declares is the robot's hardware revision (`Config::hw_rev`). Read
-# through the crate that owns that file, so the board's name and its revision are written once.
+# The supported target's fixed hardware revision is owned by `robotd-params`; updater checks every
+# release manifest against that revision.
 robotd-params = { path = "../robotd-params" }
 # The Hugging Face device-code login. Extracted from this crate, because a robot signing in to an
 # account has nothing to do with updating one and every other robot wants the same thing.

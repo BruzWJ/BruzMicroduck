@@ -34,15 +34,12 @@ Type=exec
 # no further, which is the correct two-tier split (§2.2) — but provisioning is exactly what
 # BLE exists for, so btd is named here explicitly.
 #
-# `nfcd` for the same reason one call over: a touched tag sends `pad.pair`, which is mutating, and
-# the tag is the whole point of that daemon.
-#
 # By name rather than by uid: systemd-sysusers allocates dynamically, and a number that is
 # right on one board is wrong on the next.
 #
 # Note what is NOT here: nothing grants the `robot` group as a whole. Being able to talk to
 # configd and being able to reconfigure the robot stay separate.
-ExecStart=/opt/robot/daemon/current/bin/configd --allow-user btd,nfcd
+ExecStart=/opt/robot/daemon/current/bin/configd --allow-user btd
 
 # Root, and this is the one thing here that deserves justification rather than assumption.
 #
@@ -96,13 +93,6 @@ LockPersonality=yes
 MemoryDenyWriteExecute=yes
 CapabilityBoundingSet=
 StateDirectory=robot/config
-
-# The face LEDs this daemon owns (`docs/design/architecture.md` §3.2). ProtectKernelTunables makes
-# /sys read-only, so their directory is handed back; `-` because a Zero 3W has none. The daemon
-# switches them off when it stops cleanly — ExecStopPost does it when it did not, so a crashed
-# configd cannot leave an LED claiming something it has stopped keeping true.
-ReadWritePaths=-/sys/devices/platform/face-leds
-ExecStopPost=-/bin/sh -c 'cd /sys/class/leds 2>/dev/null || exit 0; for l in face:gb:green face:gb:blue; do echo 0 > "$$l/brightness"; done 2>/dev/null; exit 0'
 
 # stderr → journal; level via RUST_LOG. The startup identity line is at `warn` so it survives
 # RUST_LOG=warn on a long-running board.
