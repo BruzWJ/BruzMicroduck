@@ -100,12 +100,28 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          previous_tag="$(
-            gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || true
-          )"
-          if [[ -z "$previous_tag" ]]; then
-            echo "No published release exists yet; this will be the first."
-            exit 0
+          latest_response="$RUNNER_TEMP/latest-release.response"
+          latest_error="$RUNNER_TEMP/latest-release.error"
+          if gh api --include "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name \
+            > "$latest_response" 2> "$latest_error"; then
+            previous_tag="$(tail -n 1 "$latest_response" | tr -d '\r')"
+            if [[ -z "$previous_tag" ]]; then
+              echo "::error::latest release response did not contain a tag"
+              exit 1
+            fi
+          else
+            latest_exit=$?
+            status_line="$(sed -n '1p' "$latest_response" | tr -d '\r')"
+            case "$status_line" in
+              HTTP/*" 404 "*)
+                echo "No published release exists yet; this will be the first."
+                exit 0
+                ;;
+              *)
+                cat "$latest_error" >&2
+                exit "$latest_exit"
+                ;;
+            esac
           fi
           case "$previous_tag" in
             daemon-v*) previous_version="${previous_tag#daemon-v}" ;;
@@ -292,7 +308,8 @@ jobs:
           DUCK_REVISION: ${{ steps.identity.outputs.source_sha }}
         run: |
           set -euo pipefail
-          export DUCK_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          DUCK_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          export DUCK_BUILD_TIME
           cargo board --bins
 
       - name: Package release assets
@@ -311,7 +328,6 @@ jobs:
           cp target/aarch64-unknown-linux-gnu/release/pet-detect staged/
           cp target/aarch64-unknown-linux-gnu/release/pet-features staged/
           cp target/aarch64-unknown-linux-gnu/release/tofd staged/
-          cp target/aarch64-unknown-linux-gnu/release/nfcd staged/
 
           cargo run -p xtask -- package \
             --version "$VERSION" \
@@ -324,7 +340,6 @@ jobs:
             --include "updater/systemd/sysusers.d/robot.conf=systemd/sysusers.d/robot.conf" \
             --include "robotd/systemd/robotd.service=systemd/robotd.service" \
             --include "hooks/postinstall=hooks/postinstall" \
-            --include "scripts/setup-openrb.sh=scripts/setup-openrb.sh" \
             --include "scripts/setup-gstreamer.sh=scripts/setup-gstreamer.sh" \
             --include "scripts/setup-npu.sh=scripts/setup-npu.sh" \
             --include "deploy/overlays/rk3568-npu-enable.dts=deploy/overlays/rk3568-npu-enable.dts" \
@@ -347,8 +362,6 @@ jobs:
             --include "mediad/systemd/sysusers.d/mediad.conf=systemd/sysusers.d/mediad.conf" \
             --include "tof/systemd/tofd.service=systemd/tofd.service" \
             --include "tof/systemd/sysusers.d/tofd.conf=systemd/sysusers.d/tofd.conf" \
-            --include "nfc/systemd/nfcd.service=systemd/nfcd.service" \
-            --include "nfc/systemd/sysusers.d/nfcd.conf=systemd/sysusers.d/nfcd.conf" \
             --include "deploy/journald.conf.d/10-robot.conf=deploy/journald.conf.d/10-robot.conf" \
             --include "docs/design/architecture.md=docs/architecture.md" \
             --include "docs/design/updater-design.md=docs/updater-design.md" \
@@ -446,7 +459,6 @@ jobs:
           # for a first install, because neither systemd units nor robotd exist before the archive
           # lands. Keeping the real values here prevents a CI-only inert config from hiding drift.
           cat > verify/updater.toml <<EOF
-          hw_rev = 1
           state_dir = "$PWD/verify/var"
 
           [component.daemon]
@@ -474,10 +486,8 @@ jobs:
             bin/updaterd \
             bin/robotd \
             bin/robotctl \
-            bin/nfcd \
             systemd/updaterd.service \
             systemd/robotd.service \
-            systemd/nfcd.service \
             systemd/sysusers.d/robot.conf \
             deploy/journald.conf.d/10-robot.conf \
             version.toml
@@ -677,6 +687,8 @@ jobs:
           qualified_tag="refs/tags/$TAG"
 
           query_tag() {
+            # GraphQL variables must reach GitHub literally; the -f fields supply their values.
+            # shellcheck disable=SC2016
             gh api graphql \
               -f owner="$repository_owner" \
               -f name="$repository_name" \

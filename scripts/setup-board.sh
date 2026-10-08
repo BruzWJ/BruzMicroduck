@@ -81,8 +81,8 @@ SELF=/usr/local/sbin/robot-setup-board
 # `install.sh`, so a fork or a pinned tag is one decision for the whole bring-up rather than
 # per script. The Qwiic/audio overlays are fetched during this run; `fetch_cmd` uses the same
 # source when it prints the next command.
-REPO="${DUCK_REPO:-pollen-robotics/microduck}"
-REF="${DUCK_REF:-main}"
+REPO="${DUCK_REPO:-BruzWJ/BruzMicroduck}"
+REF="${DUCK_REF:-replica}"
 RAW="https://raw.githubusercontent.com/${REPO}/${REF}/scripts"
 
 # For a private repository: a token with read access to contents. Used as an Authorization
@@ -107,9 +107,7 @@ NET_CHECK_UNIT=/etc/systemd/system/robot-net-check.service
 # Header pins 3/5 are I2C3-M0. This generic overlay is required by both IMUs and the ToF;
 # the optional audio HAT merely adds another device to the same controller.
 QWIIC_OVERLAY=i2c3-qwiic
-LEGACY_QWIIC_OVERLAY=i2c3-pihat
 QWIIC_RULE=/etc/udev/rules.d/99-robot-i2c-qwiic.rules
-LEGACY_QWIIC_RULE=/etc/udev/rules.d/99-robot-i2c-pihat.rules
 
 needs_reboot=0
 # Whether we managed to leave a persistent copy, which decides what the reboot advice says.
@@ -215,8 +213,7 @@ check_environment() {
 # Armbian ships `overlay_prefix=rk35xx`, but the RK3566 shares device-tree overlays with the
 # RK3568 and the Qwiic, camera and optional audio overlays are installed as `rk3568-*.dtbo`.
 # `armbian-config`'s overlay editor crashes on this board for the same reason, so patch the file
-# directly. Also retire the old motor UART word: motors now use the OpenRB USB bridge, while
-# preserving every unrelated overlay word on an upgraded board.
+# directly.
 configure_overlay_prefix() {
     if [ ! -f "$ENV_TXT" ]; then
         warn "no ${ENV_TXT}; not an Armbian image?
@@ -237,25 +234,6 @@ configure_overlay_prefix() {
         changed=1
     fi
 
-    if grep -Eq '^overlays=' "$ENV_TXT"; then
-        old_line=$(grep -E '^overlays=' "$ENV_TXT" | head -1)
-        words=${old_line#overlays=}
-        new_words=""
-        had_uart=0
-        for word in $words; do
-            if [ "$word" = uart2-m0 ]; then
-                had_uart=1
-                continue
-            fi
-            new_words="${new_words}${new_words:+ }${word}"
-        done
-        if [ "$had_uart" = 1 ]; then
-            say "removing the retired uart2-m0 motor overlay"
-            sed -i "s/^overlays=.*/overlays=${new_words}/" "$ENV_TXT"
-            changed=1
-        fi
-    fi
-
     if [ "$changed" = 1 ]; then
         needs_reboot=1
     else
@@ -263,7 +241,7 @@ configure_overlay_prefix() {
     fi
 }
 
-# Use the release-owned OpenRB setup rather than carrying a second copy of its udev rule here.
+# Use the repository-owned OpenRB setup rather than carrying a second copy of its udev rule here.
 # `setup-board.sh` is commonly piped on a fresh image, so fetch the helper from the same pinned
 # repository/ref as the overlays instead of assuming a sibling file exists locally.
 configure_openrb() {
@@ -483,51 +461,6 @@ ensure_overlay_word() {
     fi
 }
 
-# Put the generic I2C3 overlay in `overlays=` exactly once, replacing the old HAT-oriented
-# name in place. In-place replacement preserves the ordering of a following codec overlay.
-ensure_qwiic_overlay_word() {
-    if [ ! -f "$ENV_TXT" ]; then
-        warn "no ${ENV_TXT}; not an Armbian image?
-  Load the ${QWIIC_OVERLAY} overlay by whatever means this image provides, then re-run.
-  Everything else here will still be done."
-        return 0
-    fi
-
-    if ! grep -Eq '^overlays=' "$ENV_TXT"; then
-        echo "overlays=${QWIIC_OVERLAY}" >> "$ENV_TXT"
-        needs_reboot=1
-        return 0
-    fi
-
-    old_line=$(grep -E '^overlays=' "$ENV_TXT" | head -1)
-    words=${old_line#overlays=}
-    new_words=""
-    have_qwiic=0
-    for word in $words; do
-        if [ "$word" = "$LEGACY_QWIIC_OVERLAY" ]; then
-            word=$QWIIC_OVERLAY
-        fi
-        if [ "$word" = "$QWIIC_OVERLAY" ]; then
-            [ "$have_qwiic" = 1 ] && continue
-            have_qwiic=1
-        fi
-        if [ -n "$new_words" ]; then
-            new_words="${new_words} ${word}"
-        else
-            new_words=$word
-        fi
-    done
-    if [ "$have_qwiic" = 0 ]; then
-        new_words="${new_words}${new_words:+ }${QWIIC_OVERLAY}"
-    fi
-    new_line="overlays=${new_words}"
-
-    if [ "$old_line" != "$new_line" ]; then
-        sed -i "s/^overlays=.*/${new_line}/" "$ENV_TXT"
-        needs_reboot=1
-    fi
-}
-
 # Compile the Qwiic bus overlay into one kernel's overlay directory. Audio can install a new
 # vendor kernel after the first pass, so it calls this helper again for that kernel; the helper
 # is byte-comparing and therefore idempotent.
@@ -551,7 +484,7 @@ install_qwiic_overlay() {
             cp "$ov_tmp/out.dtbo" "$dtbo_dir/rk3568-${QWIIC_OVERLAY}.dtbo"
             needs_reboot=1
         fi
-        ensure_qwiic_overlay_word
+        ensure_overlay_word "$QWIIC_OVERLAY"
     else
         warn "could not fetch or compile ${QWIIC_OVERLAY}.dts; header pins 3/5 will not expose the sensor bus"
     fi
@@ -608,16 +541,6 @@ configure_qwiic() {
 
     content='SUBSYSTEM=="i2c-dev", KERNELS=="fe5c0000.i2c", GROUP="i2c", MODE="0660", SYMLINK+="i2c-qwiic"'
     rule_changed=0
-    if [ -f "$LEGACY_QWIIC_RULE" ]; then
-        say "Qwiic: removing stale ${LEGACY_QWIIC_RULE}"
-        rm -f "$LEGACY_QWIIC_RULE"
-        rule_changed=1
-    fi
-    # Never unlink a real device node under an old name; only retire the udev-created symlink.
-    if [ -L /dev/i2c-pihat ]; then
-        rm -f /dev/i2c-pihat
-        rule_changed=1
-    fi
     if [ ! -f "$QWIIC_RULE" ] || [ "$(cat "$QWIIC_RULE")" != "$content" ]; then
         say "Qwiic: installing the /dev/i2c-qwiic udev rule"
         mkdir -p "$(dirname "$QWIIC_RULE")"
@@ -970,7 +893,7 @@ report() {
         warn "${MOTOR_PORT} is missing. Connect the OpenRB-150 to this computer by USB-C and
   restore its factory usb_to_dynamixel firmware. Replug it after installing the udev rule,
   then check:  lsusb -d 2f5d:2202
-  robotd will start, fail to open the bus, and report unhealthy until it appears."
+  robotd will start, fail to open the bus, and report degraded until it appears."
     fi
 
     if [ -e /dev/i2c-qwiic ]; then
@@ -1135,18 +1058,17 @@ EOF
         echo "  sudo -E sh /tmp/install.sh"
         cat <<'EOF'
 
-  Both halves need the token while the repository is private: raw.githubusercontent.com 404s
-  without the header, and sudo does not pass the variable through unless asked. Once the
-  repository is public, omit the token export; keep the repo/ref exports for a fork or branch.
+  A supplied token is forwarded to both fetches; sudo does not preserve it unless asked. The
+  public default repository needs no token. Keep one only for a private DUCK_REPO override (or
+  an intentionally higher API rate limit), and keep the repo/ref exports for an override branch.
 EOF
     else
         echo "  sudo -E sh /tmp/install.sh"
         cat <<'EOF'
 
-  If that 404s rather than downloading, the repository is private and needs a token — a 404
-  is what GitHub returns for a private path, so it looks like a wrong URL. Export DUCK_TOKEN
-  and re-run this script: it reprints these two lines with the header and the sudo prefix.
-  install.sh needs the token for the release assets as well, not only for the fetch.
+  If that fails, first check the network and the repository/ref. The public default needs no
+  token. A private DUCK_REPO override does: GitHub reports missing private access as 404, so
+  export DUCK_TOKEN and re-run this script. install.sh then uses it for release assets too.
 EOF
     fi
 }

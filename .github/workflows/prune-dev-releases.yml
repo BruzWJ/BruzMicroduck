@@ -1,13 +1,13 @@
 # Delete the dev-channel prerelease belonging to a branch that no longer exists.
 #
 # `dev.yml` publishes every branch push to a moving tag `daemon-dev-<branch>`. Nothing ever
-# removed those, so each merged branch left a prerelease and ~11 MB of signed binaries
+# removed those, so each merged branch left a prerelease and ~11 MB of binaries
 # behind for good.
 #
 # Tidiness is the least of it. **A dead tag stays installable**: months later
 # `robotctl update apply daemon --ref some-old-branch` still resolves, verifies and
-# installs, because the artifact is genuinely signed with the team dev key. It looks like a
-# valid install and it is arbitrary stale code from a branch nobody remembers.
+# installs, because it remains a genuine release asset. It looks like a valid install and it is
+# arbitrary stale code from a branch nobody remembers.
 #
 # What this cannot break: the release stream. Dev versions are semver prereleases and
 # `latest` resolves to the highest *stable* version, so a customer robot could never have
@@ -50,7 +50,8 @@ jobs:
 
           branches="$(gh api --paginate repos/${{ github.repository }}/branches --jq '.[].name')"
           echo "live branches:"
-          echo "$branches" | sed 's/^/  /'
+          indented_branches="${branches//$'\n'/$'\n  '}"
+          printf '  %s\n' "$indented_branches"
           echo
 
           deleted=0

@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/pollen-robotics/microduck/actions/workflows/ci.yml"><img src="https://github.com/pollen-robotics/microduck/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/BruzWJ/BruzMicroduck/actions/workflows/ci.yml"><img src="https://github.com/BruzWJ/BruzMicroduck/actions/workflows/ci.yml/badge.svg?branch=replica" alt="CI"></a>
 </p>
 
 ---

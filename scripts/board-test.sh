@@ -559,66 +559,50 @@ cat > /etc/bluetooth/main.conf <<"BTCONF"
 Name = radxa
 BTCONF
 
-# The wrong overlay prefix, old UART motor overlay, old HAT-named sensor overlay, and the
-# historical console policy: the state of a board provisioned before both hardware cutovers.
+# A fresh Armbian boot configuration with an unrelated overlay already enabled.
 cat > /boot/armbianEnv.txt <<"ENV"
 overlay_prefix=rk35xx
-overlays=uart2-m0 i2c3-pihat
+overlays=spi-spidev
 console=both
 ENV
-cat > /etc/udev/rules.d/99-robot-i2c-pihat.rules <<"OLDRULE"
-SUBSYSTEM=="i2c-dev", KERNELS=="fe5c0000.i2c", SYMLINK+="i2c-pihat"
-OLDRULE
 
 ONNX_VERSION=9.9.9 PATH="/stub:$PATH" sh /bin/scripts/setup-board.sh >/tmp/board.log 2>&1
 
-# The RK3566 shares overlays with the RK3568. The USB OpenRB cutover no longer needs the old
-# motor UART, but Qwiic, camera and optional audio overlays still need the corrected prefix.
+# The RK3566 shares overlays with the RK3568, so Qwiic, camera and optional audio overlays need
+# the corrected prefix.
 grep -q "^overlay_prefix=rk3568$" /boot/armbianEnv.txt
-if grep -E "^overlays=" /boot/armbianEnv.txt | grep -qw uart2-m0; then
-    echo "    [FAIL] setup-board left the retired uart2-m0 motor overlay enabled"
-    exit 1
-fi
-echo "    [ok] setup-board fixes overlay_prefix and retires the motor UART overlay"
+echo "    [ok] setup-board fixes the RK3566 overlay prefix"
 
-# The setup-board entry point must install the one release-owned OpenRB rule, with no retired
-# UART permissions or duplicate ModemManager properties carried into the USB transport.
+# The setup-board entry point must install the OpenRB rule with the stable device name and
+# ModemManager exclusion needed by the USB transport.
 OPENRB_RULE=/etc/udev/rules.d/99-robot-openrb.rules
 OPENRB_RULE_CONTENT="SUBSYSTEM==\"tty\", ATTRS{idVendor}==\"2f5d\", ATTRS{idProduct}==\"2202\", SYMLINK+=\"openrb-dxl\", ENV{ID_MM_PORT_IGNORE}=\"1\""
 test "$(cat "$OPENRB_RULE")" = "$OPENRB_RULE_CONTENT"
 echo "    [ok] setup-board gives the OpenRB USB bridge a stable, ModemManager-free device path"
 
-# The Qwiic bus does not depend on the optional audio HAT. The old overlay word and udev rule
-# are migrated in place; the new rule also owns the group/mode needed by unprivileged tofd.
+# The Qwiic bus does not depend on optional audio. Its rule owns the group/mode needed by
+# unprivileged tofd, and adding it preserves unrelated overlay words.
 grep -E "^overlays=" /boot/armbianEnv.txt | grep -qw i2c3-qwiic
-if grep -E "^overlays=" /boot/armbianEnv.txt | grep -qw i2c3-pihat; then
-    echo "    [FAIL] setup-board left the old i2c3-pihat overlay enabled"
-    exit 1
-fi
+grep -E "^overlays=" /boot/armbianEnv.txt | grep -qw spi-spidev
 test -f "$QWIIC_DTBO_DIR/rk3568-i2c3-qwiic.dtbo"
-test ! -e /etc/udev/rules.d/99-robot-i2c-pihat.rules
 grep -Fq SYMLINK+=\"i2c-qwiic\" /etc/udev/rules.d/99-robot-i2c-qwiic.rules
 grep -Fq GROUP=\"i2c\" /etc/udev/rules.d/99-robot-i2c-qwiic.rules
 grep -Fq MODE=\"0660\" /etc/udev/rules.d/99-robot-i2c-qwiic.rules
-echo "    [ok] setup-board migrates the sensor bus to the generic Qwiic overlay and device name"
+echo "    [ok] setup-board installs the generic Qwiic overlay and stable device name"
 
-# USB motor control has no relationship to the SoC debug UART. Provisioning must not mask its
-# login unit or rewrite the operator-owned console policy as a side effect.
-if grep -q "serial-getty@ttyS2.service" /stub/systemctl.log; then
-    echo "    [FAIL] setup-board still changes the ttyS2 getty for USB motor control"
-    exit 1
-fi
+# Provisioning must preserve unrelated boot configuration.
 grep -q "^console=both$" /boot/armbianEnv.txt
-echo "    [ok] setup-board leaves the unrelated UART getty and console policy alone"
+echo "    [ok] setup-board preserves unrelated boot configuration"
 
 # Idempotent: it is re-run after the reboot it asks for, and must not undo its own work or
 # append a second copy of the overlay.
 ONNX_VERSION=9.9.9 PATH="/stub:$PATH" sh /bin/scripts/setup-board.sh >/tmp/board2.log 2>&1
 grep -q "^overlay_prefix=rk3568$" /boot/armbianEnv.txt
 grep -q "^console=both$" /boot/armbianEnv.txt
-test "$(grep -c uart2-m0 /boot/armbianEnv.txt || true)" = 0
+test "$(grep -c spi-spidev /boot/armbianEnv.txt)" = 1
 test "$(grep -c i2c3-qwiic /boot/armbianEnv.txt)" = 1
 test "$(grep -Fc SYMLINK+=\"i2c-qwiic\" /etc/udev/rules.d/99-robot-i2c-qwiic.rules)" = 1
+test "$(cat "$OPENRB_RULE")" = "$OPENRB_RULE_CONTENT"
 echo "    [ok] setup-board is idempotent on a second run"
 
 # The gamepad setting, which is the kind that fails silently — and whose polarity this script has
@@ -763,8 +747,8 @@ echo "    [ok] preinstall refuses an old runtime it cannot replace, naming the f
 mkdir -p /stub
 
 # install.sh reaches the network twice before it touches anything local — the releases API, for
-# the bootstrap binary and the tag whose config it should pair with, and raw.githubusercontent
-# for the trusted keys. Both are answered out of the checkout.
+# the bootstrap binary and the tag whose config it should pair with, plus repository-owned files.
+# Both are answered out of the checkout.
 cat > /stub/curl <<"STUB"
 #!/bin/sh
 # Enough of curl for the two callers in install.sh: -fsSL [-H hdr] -o <dest> <url>.
@@ -782,10 +766,8 @@ case "$url" in
     */releases/latest)
         cp /stub/releases-latest.json "$dest" ;;
     *raw.githubusercontent.com/*)
-        # Serve the repository copy of whatever was asked for. A path the checkout does not
-        # have must *fail* rather than produce an empty file: install.sh treats a missing spare
-        # key as a warning and a missing release-1 as fatal, and an empty file would look like
-        # a successful fetch of an unusable key.
+        # Serve the repository copy of whatever was asked for. A path the checkout does not have
+        # must fail rather than produce an empty file that looks like a successful fetch.
         path="${url#*raw.githubusercontent.com/}"
         path="${path#*/}"
         path="${path#*/}"
@@ -831,7 +813,7 @@ ln -sfn releases/under-test /opt/robot/daemon/current
 # board keep a stale on_apply list for months — so this takes the branch a re-install takes,
 # and substitutes the repository the way the fetch path would.
 mkdir -p /etc/robot
-sed "s|\"ORG/duck-daemon\"|\"pollen-robotics/microduck\"|" \
+sed "s|\"ORG/duck-daemon\"|\"BruzWJ/BruzMicroduck\"|" \
     /bin/deploy/updater.toml > /etc/robot/updater.toml
 cp /bin/deploy/robotd.toml /etc/robot/robotd.toml
 
@@ -848,15 +830,21 @@ CRON
 # ── install.sh, the provisioning path ──
 #
 # The bootstrap download self-skips because a release is already live, which is the branch a
-# re-install takes and the reason no signing or network is needed here.
+# re-install takes and the reason no release download is needed here.
+mkdir -p /etc/systemd/system/updaterd.service.d
+printf "%s\n" "[Service]" "Environment=GITHUB_TOKEN=stale-token" \
+    > /etc/systemd/system/updaterd.service.d/token.conf
 PATH="/stub:$PATH" sh /bin/scripts/install.sh > /tmp/install.log 2>&1 || {
     echo "    [FAIL] install.sh exited non-zero"
     cat /tmp/install.log
     exit 1
 }
 echo "    [ok] install.sh runs to completion on a board with a release already live"
+test ! -e /etc/systemd/system/updaterd.service.d/token.conf \
+    || { echo "    [FAIL] an empty DUCK_TOKEN left a stale updater token installed"; exit 1; }
+echo "    [ok] an empty DUCK_TOKEN removes a stale updater credential"
 grep -q "/dev/i2c-qwiic does not exist" /tmp/install.log \
-    || { echo "    [FAIL] install.sh did not flag the missing Qwiic hardware cutover"; exit 1; }
+    || { echo "    [FAIL] install.sh did not flag the missing required Qwiic hardware"; exit 1; }
 echo "    [ok] install.sh preflights the required Qwiic sensor bus"
 
 # Every unit the release ships, installed where systemd reads them. install.sh globs the
@@ -1110,12 +1098,6 @@ rm -f /etc/systemd/journald.conf.d/10-robot.conf /usr/local/bin/robotctl
 # leaving the ones install.sh wrote in place would make that assertion vacuous.
 rm -f /etc/profile.d/robot-name-prompt.sh /usr/share/bash-completion/completions/robotctl \
     /etc/update-motd.d/40-robot
-# Model a field board that only updates: it still has the exact old shipped port and never ran
-# setup-board.sh after the OpenRB cutover. The hook must install both host-side pieces before it
-# enables robotd below.
-OPENRB_RELEASE_RULE=/etc/udev/rules.d/99-robot-openrb.rules
-sed -i "s|^port = \"/dev/openrb-dxl\"$|port = \"/dev/ttyS2\"|" /etc/robot/robotd.toml
-rm -f "$OPENRB_RELEASE_RULE"
 # And the Armbian boot-time apt job put back, for the same reason: a board in the field has it, and
 # the hook is the only thing that reaches that board.
 cat > /etc/cron.d/armbian-updates <<"CRON"
@@ -1127,26 +1109,6 @@ CRON
     cat /tmp/hook.log
     exit 1
 }
-grep -Fxq "port = \"/dev/openrb-dxl\"" /etc/robot/robotd.toml \
-    || { echo "    [FAIL] postinstall did not migrate the shipped ttyS2 motor port"; exit 1; }
-test -f "$OPENRB_RELEASE_RULE" \
-    || { echo "    [FAIL] postinstall did not install the OpenRB udev rule"; exit 1; }
-grep -q "setup-openrb: installed the /dev/openrb-dxl rule" /tmp/hook.log \
-    || { echo "    [FAIL] postinstall did not run the packaged OpenRB helper"; exit 1; }
-echo "    [ok] postinstall delivers the OpenRB rule and ttyS2 migration to an existing board"
-
-# The helper may run twice on a bootstrap install and on every later update. A current rule must
-# stay byte-identical, and an operator-selected motor adapter must not be normalized back to the
-# release default.
-sed -i "s|^port = \"/dev/openrb-dxl\"$|port = \"/dev/custom-dxl\"|" /etc/robot/robotd.toml
-md5sum "$OPENRB_RELEASE_RULE" > /tmp/hook-openrb-rule
-md5sum /etc/robot/robotd.toml > /tmp/hook-openrb-config
-PATH="/stub:$PATH" sh "$REL/scripts/setup-openrb.sh" > /tmp/openrb2.log 2>&1
-md5sum -c /tmp/hook-openrb-rule >/dev/null \
-    || { echo "    [FAIL] setup-openrb rewrote an already-current rule"; exit 1; }
-md5sum -c /tmp/hook-openrb-config >/dev/null \
-    || { echo "    [FAIL] setup-openrb changed an operator-selected motor port"; exit 1; }
-echo "    [ok] the packaged OpenRB helper is idempotent and preserves custom motor paths"
 for src in "$REL"/systemd/*.service "$REL"/systemd/*.timer; do
     [ -f "$src" ] || continue
     name="$(basename "$src")"

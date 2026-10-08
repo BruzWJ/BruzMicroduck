@@ -1,9 +1,9 @@
 #!/bin/sh
 # Provision a freshly flashed board, end to end, in as few commands as a reboot allows.
 #
-#   export DUCK_TOKEN=...                      # only while the repository is private
-#   curl -fsSL -H "Authorization: Bearer $DUCK_TOKEN" .../provision.sh -o /tmp/provision.sh
-#   sudo DUCK_TOKEN="$DUCK_TOKEN" sh /tmp/provision.sh
+#   curl -fsSL https://raw.githubusercontent.com/BruzWJ/BruzMicroduck/replica/scripts/provision.sh \
+#     -o /tmp/provision.sh
+#   sudo sh /tmp/provision.sh
 #
 # It stages the board, reboots, and finishes on its own. `robotctl health` works when you log
 # back in. Everything the second half does goes to /var/lib/robot/provision.log, because there
@@ -66,12 +66,12 @@ ENV_REF="${DUCK_REF:-}"
 ENV_TOKEN="${DUCK_TOKEN:-}"
 ENV_FORCE="${DUCK_FORCE_REINSTALL:-}"
 ENV_WEIRD_BLE="${DUCK_WEIRD_BLE:-}"
-ENV_BOARD="${DUCK_BOARD:-}"
+ENV_PAUSE_BTD="${DUCK_PAUSE_BTD:-}"
 ENV_GSTREAMER="${DUCK_GSTREAMER:-}"
 ENV_RKAIQ="${DUCK_RKAIQ:-}"
 
-REPO="${ENV_REPO:-pollen-robotics/microduck}"
-REF="${ENV_REF:-main}"
+REPO="${ENV_REPO:-BruzWJ/BruzMicroduck}"
+REF="${ENV_REF:-replica}"
 RAW="https://raw.githubusercontent.com/${REPO}/${REF}/scripts"
 
 # For a private repository: a token with read access to contents. Carried across the reboot in
@@ -101,18 +101,14 @@ NAME=""
 # Passed straight through to install.sh.
 FORCE_REINSTALL="$ENV_FORCE"
 
-# Does this board need the Bluetooth workarounds? Passed to `setup-board.sh`, which is where the
-# one setting they need lives.
+# Does this board need either Bluetooth workaround? Passed to `setup-board.sh`, which owns the
+# marker and the optional Privacy setting.
 #
-# Off by default because most Radxa Zero 3W units do not need it and the workarounds have a cost:
-# `Privacy = device` stops a pad forming a new bond while `btd` advertises, which is why
-# `robotctl pad pair` has to pause `btd` on a board that has it. See `configure_bluetooth` in
-# `setup-board.sh` for the split this exists for.
+# Both are off by default. `--pause-btd-on-pair` records only that `robotctl pad pair` must pause
+# `btd`; `--weird-ble` additionally selects `Privacy = device` and implies the pause. See
+# `configure_bluetooth` in `setup-board.sh` for the measured split.
 WEIRD_BLE="$ENV_WEIRD_BLE"
-
-# Which electronic board this is. Passed to `install.sh`, which writes it to robotd.toml's
-# `[board] version`; empty leaves that to the file, which is a zero3.
-BOARD="$ENV_BOARD"
+PAUSE_BTD="$ENV_PAUSE_BTD"
 
 # Install the GStreamer stack for `mediad`? Passed to `setup-gstreamer.sh`.
 #
@@ -141,9 +137,9 @@ GSTREAMER="${ENV_GSTREAMER:-1}"
 RKAIQ="${ENV_RKAIQ:-1}"
 
 # The branch the operator asked for, or empty. Kept apart from `REF` because they answer different
-# questions: `REF` is always set — it defaults to `main` — and says where the *scripts* come from,
+# questions: `REF` is always set — it defaults to `replica` — and says where the *scripts* come from,
 # while this says whether a *branch build of the daemon* was asked for. Provisioning plainly with no
-# `--ref` must install the stable release, not `main`'s dev build.
+# `--ref` must install the stable release, not `replica`'s dev build.
 ASKED_REF="$ENV_REF"
 
 # ── paths ────────────────────────────────────────────────────────────────────
@@ -201,8 +197,24 @@ fetch() {
   has Contents:Read on ${REPO}, and that any SSO authorisation was granted."
     fi
     die "could not fetch $1 from ${REPO}@${REF}.
-  No DUCK_TOKEN was supplied. While the repository is private every fetch needs one, and
-  GitHub answers 404 rather than 401, so this looks like a wrong URL and is not."
+  No DUCK_TOKEN was supplied. The public default repository needs none, so check the network and
+  that the ref exists. If DUCK_REPO names a private repository, supply a token with Contents:Read;
+  GitHub answers 404 rather than 401 for missing private-repository access."
+}
+
+# Run the network migration with the same source selected for the rest of provisioning.
+#
+# The script persists itself before the reboot, but environment variables do not. Without this
+# wrapper, a private DUCK_REPO override completed phase two with migrate-network.sh's public
+# defaults, so any recovery command it printed silently switched repositories and lost the token.
+# Accept both its executable persisted copy and the non-executable /tmp download.
+run_migrate() {
+    _script=$1
+    if [ -x "$_script" ]; then
+        DUCK_REPO="$REPO" DUCK_REF="$REF" DUCK_TOKEN="$TOKEN" "$_script"
+    else
+        DUCK_REPO="$REPO" DUCK_REF="$REF" DUCK_TOKEN="$TOKEN" sh "$_script"
+    fi
 }
 
 # Leave a copy at $SELF, so the command this prints for after the reboot exists.
@@ -267,8 +279,9 @@ save_state() {
         kv DUCK_TOKEN "$TOKEN"
         kv DUCK_FORCE_REINSTALL "$FORCE_REINSTALL"
         kv DUCK_WEIRD_BLE "$WEIRD_BLE"
-        kv DUCK_BOARD "$BOARD"
+        kv DUCK_PAUSE_BTD "$PAUSE_BTD"
         kv DUCK_GSTREAMER "$GSTREAMER"
+        kv DUCK_RKAIQ "$RKAIQ"
         kv DUCK_ASKED_REF "$ASKED_REF"
         # `PROVISION_*` for the two that are not environment knobs, so sourcing this file cannot
         # set something an operator could also have exported.
@@ -291,8 +304,9 @@ load_state() {
     TOKEN="${ENV_TOKEN:-${DUCK_TOKEN:-}}"
     FORCE_REINSTALL="${ENV_FORCE:-${DUCK_FORCE_REINSTALL:-}}"
     WEIRD_BLE="${ENV_WEIRD_BLE:-${DUCK_WEIRD_BLE:-}}"
-    BOARD="${ENV_BOARD:-${DUCK_BOARD:-}}"
+    PAUSE_BTD="${ENV_PAUSE_BTD:-${DUCK_PAUSE_BTD:-}}"
     GSTREAMER="${ENV_GSTREAMER:-${DUCK_GSTREAMER:-1}}"
+    RKAIQ="${ENV_RKAIQ:-${DUCK_RKAIQ:-1}}"
     ASKED_REF="${ENV_REF:-${DUCK_ASKED_REF:-}}"
     # No `ENV_` mirror for the name, unlike its neighbours. Theirs exist because sourcing this file
     # sets the very `DUCK_*` variables the operator's environment did, so the typed value has to be
@@ -472,11 +486,11 @@ phase_one() {
     tmp=/tmp/setup-board.sh
     fetch setup-board.sh "$tmp"
     DUCK_REPO="$REPO" DUCK_REF="$REF" DUCK_TOKEN="$TOKEN" \
-        DUCK_WEIRD_BLE="$WEIRD_BLE" sh "$tmp"
+        DUCK_WEIRD_BLE="$WEIRD_BLE" DUCK_PAUSE_BTD="$PAUSE_BTD" sh "$tmp"
 
     tmp=/tmp/migrate-network.sh
     fetch migrate-network.sh "$tmp"
-    sh "$tmp"
+    run_migrate "$tmp"
 
     save_state
 
@@ -506,12 +520,12 @@ phase_two() {
     # Re-fetching would work and would also be a second chance for the network to fail.
     if [ -x "$SETUP_SELF" ]; then
         DUCK_REPO="$REPO" DUCK_REF="$REF" DUCK_TOKEN="$TOKEN" \
-            DUCK_WEIRD_BLE="$WEIRD_BLE" "$SETUP_SELF"
+            DUCK_WEIRD_BLE="$WEIRD_BLE" DUCK_PAUSE_BTD="$PAUSE_BTD" "$SETUP_SELF"
     else
         tmp=/tmp/setup-board.sh
         fetch setup-board.sh "$tmp"
         DUCK_REPO="$REPO" DUCK_REF="$REF" DUCK_TOKEN="$TOKEN" \
-            DUCK_WEIRD_BLE="$WEIRD_BLE" sh "$tmp"
+            DUCK_WEIRD_BLE="$WEIRD_BLE" DUCK_PAUSE_BTD="$PAUSE_BTD" sh "$tmp"
     fi
 
     # GStreamer, unless turned off — see `GSTREAMER` above.
@@ -555,11 +569,11 @@ phase_two() {
     # reachable. Reported instead, and wifi left alone.
     if nm_owns_wifi; then
         if [ -x "$MIGRATE_SELF" ]; then
-            "$MIGRATE_SELF"
+            run_migrate "$MIGRATE_SELF"
         else
             tmp=/tmp/migrate-network.sh
             fetch migrate-network.sh "$tmp"
-            sh "$tmp"
+            run_migrate "$tmp"
         fi
     elif [ "$RESUMED" = 1 ]; then
         warn "wifi is not NetworkManager's, so the cutover did not take — most likely the
@@ -570,11 +584,11 @@ phase_two() {
         # A human is here, so let the migration decide for itself — it is idempotent, and
         # retrying in front of someone is exactly the right time to retry.
         if [ -x "$MIGRATE_SELF" ]; then
-            "$MIGRATE_SELF"
+            run_migrate "$MIGRATE_SELF"
         else
             tmp=/tmp/migrate-network.sh
             fetch migrate-network.sh "$tmp"
-            sh "$tmp"
+            run_migrate "$tmp"
         fi
     fi
 
@@ -585,8 +599,7 @@ phase_two() {
     DUCK_REF="$REF"
     DUCK_TOKEN="$TOKEN"
     DUCK_FORCE_REINSTALL="$FORCE_REINSTALL"
-    DUCK_BOARD="$BOARD"
-    export DUCK_REPO DUCK_REF DUCK_TOKEN DUCK_FORCE_REINSTALL DUCK_BOARD
+    export DUCK_REPO DUCK_REF DUCK_TOKEN DUCK_FORCE_REINSTALL
     sh "$tmp"
 
     # Naming first: it needs nothing from the branch build, and a branch apply that fails is fatal
@@ -639,9 +652,9 @@ wait_for_updaterd() {
 # `install.sh` cannot do this itself: it resolves the release through GitHub`s `/releases/latest`,
 # which excludes pre-releases, and every branch build is one. So provisioning brings the board up on
 # the stable release and this puts the branch build on top — which is also the right arrangement
-# rather than a workaround. The first release installed becomes **golden**, the boot recovery net`s
-# fallback, and a branch build as golden would give a broken branch a broken fallback. This way
-# `golden` stays stable and `current` is the branch.
+# rather than a workaround. Stable stays installed as `previous`, the branch build becomes
+# `current`, and the health gate can roll straight back to stable. `golden` remains deliberately
+# unset until the configured 1.0.0 recovery baseline exists.
 #
 # **Fatal, not a warning.** A dev board asked to run a branch and quietly running the stable release
 # instead is the failure that is worst to debug: everything looks installed and the code under test
@@ -754,7 +767,12 @@ finish() {
   timer. Re-run install.sh with DUCK_TOKEN set, and check its output for that step."
         fi
     else
-        say "no token on this board; updaterd can only fetch from a public repository"
+        if [ -f "$_dropin" ]; then
+            warn "no token was supplied, but ${_dropin} still exists; remove it and restart
+  updaterd before relying on anonymous public-repository access"
+        else
+            say "no token on this board; updaterd uses anonymous public-repository access"
+        fi
     fi
 
     if [ "$RESUMED" = 1 ]; then
