@@ -353,7 +353,8 @@ jobs:
             --include "docs/design/architecture.md=docs/architecture.md" \
             --include "docs/design/updater-design.md=docs/updater-design.md" \
             --include "deploy/README.md=docs/deploy.md" \
-            --include "pet-detect/models/pet_detect.onnx=models/pet_detect.onnx"
+            --include "pet-detect/models/pet_detect.onnx=models/pet_detect.onnx" \
+            --include "duck-control/models/pickup_detector.onnx=models/pickup_detector.onnx"
 
           # A stock board downloads this bare binary to enter the update engine. It must be the
           # same bytes as bin/updaterd inside the packaged artifact.
