@@ -73,13 +73,14 @@ Four ducks in a chorale should not be four copies of one voice.
 
 ## 2. Where the seam is
 
-`duck_control::io::RobotIo` — six methods, and the only place a simulator is allowed to exist:
+`duck_control::io::RobotIo` — six required methods, and the only place a simulator is allowed to exist:
 
 ```rust
 fn read(&mut self) -> Result<Sensors>;          // complete joints + body IMU sample
 fn write(&mut self, targets: &JointTargets) -> Result<()>;
 fn set_gain(&mut self, kp: u16) -> Result<()>;
 fn set_torque(&mut self, on: bool) -> Result<()>;
+fn reboot(&mut self, id: u8) -> Result<()>;     // reset a latched servo fault
 fn slow_sensors(&mut self) -> Result<SlowSensors>;   // volts, per-joint temperature
 ```
 
@@ -94,9 +95,10 @@ hardware. `RemoteIo` is the third.
 
 **Where a sensor's daemon *is* its driver, replace neither.** `tofd --fake` already synthesises
 frames at the loop level, and `tof/src/sensor.rs` says in as many words that the off-board `Sensor`
-"is not a fake sensor and must never become one". Simulated depth and head orientation feed that
-existing loop. The same reasoning applies to anything else whose driver cannot be separated from
-its hardware.
+"is not a fake sensor and must never become one". Simulated depth feeds that existing loop; the
+head IMU stream is unavailable under `tofd --sim` and `--fake`. The simulated body IMU arrives
+through `RemoteIo`. The same reasoning applies to anything else whose driver cannot be separated
+from its hardware.
 
 ## 3. The body protocol
 
@@ -204,7 +206,7 @@ systemd-logind, systemd-tmpfiles, console-getty: the same
 
 qemu-user 8.2 does not translate the new mount API (`fsopen`, `move_mount`, `open_tree`) that
 systemd 257 uses for per-unit namespaces and credentials. Per-unit hardening is the entire reason to
-boot a container rather than run seven processes in a terminal, so losing it loses the point. Newer
+boot a container rather than run the daemons in a terminal, so losing it loses the point. Newer
 qemu may fix it; in Debian 13 and Ubuntu 25.04 the static packages are transitional and the real
 binaries are dynamically linked, so it is a build-from-source question rather than an apt line.
 
@@ -228,7 +230,7 @@ election and beat, the systemd units with their real `User=`, groups, `RuntimeDi
 hardening, and the updater.
 
 Modelled — the real code path, synthesised input: actuator response (BAM models fitted to the real
-XL330s), body and head IMU samples, ToF depth, RSSI, the camera image, and release provenance on an
+XL330s), body IMU samples, ToF depth, RSSI, the camera image, and release provenance on an
 x86 host.
 
 Absent — not exercised at all: the Dynamixel bus driver, Linux I2C/Qwiic and both LSM6DSV16X

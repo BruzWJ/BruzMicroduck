@@ -9,15 +9,13 @@ system in detail. This document covers the service split, how services talk to
 each other, where state lives, and how the robot is controlled — locally, from
 the app, and remotely.
 
-Scope note: this describes where we're going for the **first shipped version**,
-not the current prototype (`microduck_runtime`, which is exploratory and will be
-rewritten). v1 targets a **single, well-specified hardware configuration**.
+Scope note: this describes the daemon split implemented here. The Zero 3W and beta share one
+aarch64 release; [`robotd-design.md`](robotd-design.md) §1.1 owns their hardware wiring.
 
 ## The shape of it
 
-Seven daemons on one board, talking over unix sockets. One of them drives the robot; three
-of the others exist so that the first one can be broken without the board becoming unreachable,
-and the rest are transports and sensors that own nothing.
+Eight daemons on one board. One drives the robot; three others keep recovery available when it
+fails. The rest adapt transports or own sensors and peripherals.
 
 ```text
    gamepad          phone          you, on a laptop     a peer, anywhere    a GitHub release
@@ -30,7 +28,7 @@ and the rest are transports and sensors that own nothing.
       │  robot.*      │  robot.health · update.* · net.* · pad.* · system.*           │
       ▼               ▼                 ▼                     ▼                      │
   ┌──────────────────────────────────────────────────────────────────┐               │
-  │   one unix socket per service · JSON-RPC 2.0, one object a line  │               │
+  │    service sockets · JSON-RPC 2.0, one object per line            │               │
   └────┬──────────────────────┬─────────────────────────┬────────────┘               │
        ▼                      ▼                         ▼                            │
   ┌───────────┐        ┌─────────────┐           ┌─────────────┐                     │
@@ -49,6 +47,9 @@ and the rest are transports and sensors that own nothing.
   │  tofd — head 8×8 depth + zero3 head IMU, /run/tofd/tof.sock.      │
   │         mediad and robotd subscribe; it reads no service.         │
   └───────────────────────────────────────────────────────────────────┘
+
+  NFC reader ──► nfcd ──► configd (pad.pair)
+                      └──► robotd (sound)
 ```
 
 **`robotd` is the only thing that can actuate the robot.** Its 50 Hz loop owns two separate
@@ -59,7 +60,7 @@ Clients send *intents* — "go this fast", "look there", "stand up" — and the 
 `robotd` decides what is actually executable. Nothing else in the system can command a motor
 ([`robotd-design.md`](robotd-design.md)).
 
-**Three of them survive a dead `robotd`.** `configd`, `updaterd` and `btd` have no systemd
+**The recovery path survives a dead `robotd`.** `configd`, `updaterd` and `btd` have no systemd
 dependency on it, no ML runtime, and no media stack, because they are the recovery path: a
 robot whose control loop will not start is exactly the robot someone needs to reconfigure,
 update, or roll back. That is also why config lives in `configd` and not in `robotd` (§1.1).
@@ -70,9 +71,10 @@ is still a robot you can update.
 subset of the API from BLE to whichever socket answers it; `padd` reads a gamepad and sends the
 same intents an app would; `mediad` carries the same calls over a WebRTC data channel and owns only
 the pipeline. All three are replaceable without touching robot behaviour, and all three are
-exercised daily, so the API an app will use cannot quietly rot. `tofd` is the odd one out: it owns
-head depth and the zero3's head IMU, publishes their streams, and reads nothing from another
-service (§1). On beta, `robotd` publishes the face board's head IMU stream.
+exercised daily, so the API an app will use cannot quietly rot. `tofd` owns head depth and the
+zero3's head IMU, publishes their streams, and reads nothing from another service (§1). On beta,
+`robotd` publishes the face board's head IMU stream. `nfcd` owns the optional NFC reader and asks
+`configd` to pair the gamepad named by a tag; it asks `robotd` to sound the result.
 
 **Releases are swapped, not patched.** A build lands as a whole directory under
 `/opt/robot/daemon/releases/<version>/`; `updaterd` verifies its SHA-256, moves the
@@ -89,16 +91,17 @@ counter ([`updater-design.md`](updater-design.md)).
 | `padd` | nothing — gamepad transport; serves a raw input tap | `/run/padd/pad.sock` (`pad.input` only) | `/run/robotd.sock` |
 | `mediad` | the camera and audio pipeline; nothing of the robot — WebRTC transport and the remote front door (§5.2) | TCP: the console and PNG `GET /frame` on `:8080`, signalling on `:8443`; and one unix socket of its own, `/run/mediad/media.sock`, serving `media.frame` to a local recorder or perception process — and to `robotctl monitor`'s camera block, which asks for one twice a second while it is open and not at all while it is shut. A raw frame is ~1.8 MiB, so it is deliberately not carried on the WebRTC control channel | `robotd`, `configd`, `updaterd` |
 | `tofd` | the head's VL53L5CX depth matrix and, on zero3, LSM6DSV16X orientation stream | `/run/tofd/tof.sock` (`tof.stream`, zero3 `head_imu.stream`) | ToF `0x29` and zero3 head IMU `0x6a` on `/dev/i2c-qwiic` |
+| `nfcd` | optional NFC reader and tag-to-gamepad pairing request | — | NFC reader, `configd`, `robotd` |
 | `robotctl` | nothing — the CLI, and the tool that must work on a broken robot | — | every socket above |
 
 Where the state lives, and what survives an update:
 
 | | |
 |---|---|
-| `/etc/robot/robotd.toml`, `updater.toml` | per-board configuration; the installer writes it once and never overwrites it. `robotd.toml` is read by `robotd` and — for `[media]` alone, what the camera streams — by `mediad`, so a change there restarts `mediad` rather than `robotd` |
+| `/etc/robot/robotd.toml`, `updater.toml` | per-board configuration; the installer writes it once and never overwrites it. `robotd` reads its own settings, `mediad` reads `[media]`, and `tofd` reads `[head_imu]`; each reader restarts when its setting changes |
 | `/var/lib/robot/config/config.json` | robot name and pairing PIN — a file plus `flock`, owned by `configd` (§3.1) |
 | NetworkManager profiles | wifi credentials; we never store them (§3) |
-| `/opt/robot/daemon/releases/<ver>/` | binaries, policies and shipped defaults — replaced atomically |
+| `/opt/robot/daemon/releases/<ver>/` | binaries and shipped defaults — replaced atomically; control policies live separately ([`policy-channel-design.md`](policy-channel-design.md) §9) |
 | `/opt/robot/daemon/current` | the symlink that says which release is live |
 | `/run/<service>/identity.json` | what each daemon is actually running, published at startup |
 
@@ -134,7 +137,9 @@ safety authority sits (§6).
 | `mediad` | camera/mic, encode, perception, WebRTC + remote gateway | Heaviest service; also the remote API front door (§5.2) |
 | `btd` | BLE GATT server | **Transport adapter only** — owns no state (§4.1). See [`app-path-design.md`](app-path-design.md) |
 | `configd` | wifi, robot identity, power, gamepad pairing | Config must be reachable when `robotd` is dead (§3.1), and `btd` must own nothing (§4.1) — so it is neither's business but its own. Gamepad pairing is here rather than in `padd` because bonding a device needs root and BlueZ, and `padd` is deliberately an unprivileged client (§4.1) |
+| `padd` | gamepad input transport | Sends intents to `robotd` and serves a raw input tap; pairing belongs to `configd` (§4.1) |
 | `tofd` | head VL53L5CX depth and, on zero3, LSM6DSV16X orientation on the shared Qwiic bus | Perception, so split from `robotd` for the reason below. Publishes streams and reads nothing from another service. Missing hardware is reported rather than preventing the daemon from running. The beta head IMU remains `robotd`'s; see [`robotd-design.md`](robotd-design.md) §1.1 for sensor wiring |
+| `nfcd` | optional NFC reader | Asks `configd` to pair the gamepad named by a tag and `robotd` to sound the result; neither service depends on the reader |
 | `updaterd` | update engine | See `updater-design.md` |
 
 Splitting `mediad` from `robotd` is deliberate: a media/perception crash must not
@@ -311,7 +316,8 @@ implications.
 | Wifi credentials | **NetworkManager** | We never store them. `configd` drives NM over D-Bus; NM persists profiles root-only and reconnects on its own. |
 | Robot identity, user prefs, tunables | **config store** (§3.1) | File + `flock` + `rename(2)`, owned by `configd` |
 | Calibration, learned state, generated per-device assets | owning service | Outside release dirs; survives update *and* rollback |
-| Shipped defaults, binaries, policy bundles | update system | Under `releases/<ver>/`, swapped atomically |
+| Shipped defaults, binaries | update system | Under `releases/<ver>/`, swapped atomically |
+| Control policies | policy channel | Outside the daemon release; see [`policy-channel-design.md`](policy-channel-design.md) §9 |
 
 Letting NetworkManager own wifi credentials is less code, better security, and
 one less thing to migrate.
