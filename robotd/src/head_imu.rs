@@ -1,10 +1,9 @@
 //! The beta board's head IMU: an LSM6DSV16X on the face board's I²C bus, served as
 //! `head_imu.stream`.
 //!
-//! On `zero3` the head IMU is a BMI088 on the HAT, read by `tofd` because it shares the ToF's
-//! bus, and fused on the CPU (`tof/src/imu.rs`). None of that holds here: the ToF is on SPI,
-//! the IMU has a bus of its own, and this chip fuses orientation itself. So it is read by
-//! `robotd`, which already owns the kinematics that place it (`frames.head_imu`).
+//! On `zero3`, `tofd` reads a Qwiic LSM6DSV16X on the adapter shared with the ToF. The beta
+//! face-board sensor is read here by `robotd`, which already owns the kinematics that place it
+//! (`frames.head_imu`).
 //!
 //! **Why it is cheap enough to be on by default.** What the BMI088 cost (~4% of a core at
 //! 100 Hz, `docs/project/tof-on-demand.md`) was almost all I²C transactions — two per sample —
@@ -15,7 +14,7 @@
 //! board (2026-10-06): one read from `FIFO_DATA_OUT_TAG` returns consecutive 7-byte records,
 //! the address wrapping from `0x7E` back to `0x78`, with gyro, accel and SFLP tags interleaved.
 //!
-//! The bring-up is `imu_to_dxl`'s (the same chip on the body's power board): wait, software
+//! The bring-up follows the original `imu_to_dxl` firmware: wait, software
 //! reset, reboot the memory content to reload the factory trimming, configure, read back. A
 //! chip configured before its trimming has loaded reads half the true gyro rate while its
 //! quaternion is right — the "drunk robot" of `imu_to_dxl` fw 6.

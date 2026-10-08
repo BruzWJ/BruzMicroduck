@@ -459,9 +459,12 @@ differently:
 
 | Class | Examples | Lifecycle |
 |---|---|---|
-| **Shipped** (replaced) | binaries, policy bundles, default config, static systemd units | Under `releases/<ver>/`; swapped atomically |
+| **Shipped** (replaced) | binaries, default config, static systemd units | Under `releases/<ver>/`; swapped atomically |
 | **Robot-specific** (never touched) | calibration data, per-device generated assets, learned/persisted state (maps, personality, habits) | Outside release dirs; **preserved across update *and* rollback** |
 | **User preferences** (preserved, migrated) | robot name, wifi credentials, active model selection, app-set tunables | Own config file; migrated by hooks (§9) on `schema_version` bumps |
+
+Control policies live outside the daemon release; [`policy-channel-design.md`](policy-channel-design.md)
+§9 owns their storage and update path.
 
 Two rules:
 1. Release dirs are **disposable**. Anything that must survive lives in
@@ -1078,6 +1081,7 @@ parses it, so it cannot drift from the code. Abridged here:
 # /etc/robot/updater.toml
 # hw_rev       = 1                         # fallback only when no board is declared (§5.6)
 state_dir        = "/var/lib/robot/updater"    # must be outside every install_dir
+robot_socket     = "/run/robotd.sock"         # one robot-wide health socket
 
 [component.daemon]
 install_dir   = "/opt/robot/daemon"
@@ -1091,11 +1095,10 @@ tag_prefix = "daemon-v"
 
 [component.daemon.on_apply]
 action = "restart"
-units  = ["robotd", "mediad"]                  # never updaterd or btd — see §4
+units  = ["robotd", "configd"]                 # additive to shipped units; see restart-order.md
 
 [component.daemon.health]
 probe   = "socket"
-path    = "/run/robotd.sock"
 timeout = "30s"
 
 # One component per model — each versions independently (§5.5).
