@@ -3,6 +3,10 @@
 What `scripts/provision-board.sh` does, as separate commands. Use this when a step needs to be
 tested on its own; use `provision-board.sh` when you just want a working board.
 
+This path has the same first-release prerequisite as the normal installer; complete the one-time
+step in [`install-dev.md`](install-dev.md#install) when no published stable/Latest `daemon-v*`
+release exists (ignore `daemon-dev-*` prereleases).
+
 ## Copy the files up
 
 From a clone on your machine. Into `~`, **not** `/tmp` — there is a reboot in the middle and
@@ -29,20 +33,16 @@ sudo usermod -aG robot "$USER"
 ```
 
 `setup-board.sh` fetches the repository-owned Qwiic overlay and installs the stable
-`/dev/openrb-dxl` rule for the USB motor controller. Export the repository ref and, while the
-repository is private, a contents-read token before running it; `sudo -E` carries those values
-through:
-
-```bash
-export DUCK_TOKEN=github_pat_replace_with_your_token
-export DUCK_REF=main
-```
+`/dev/openrb-dxl` rule for the USB motor controller. It defaults to the public
+`BruzWJ/BruzMicroduck` repository at `replica`, so the ordinary path needs no token or exported
+variables. `DUCK_REPO`, `DUCK_REF`, and `DUCK_TOKEN` remain available together for a private or
+pinned override.
 
 Board bring-up — OpenRB USB rule, Qwiic device-tree overlay, Bluetooth compatibility setting,
 onnxruntime:
 
 ```bash
-sudo -E sh ~/setup-board.sh
+sudo sh ~/setup-board.sh
 ```
 
 Network — netplan to NetworkManager:
@@ -64,20 +64,17 @@ Both again. They are idempotent, and the second `migrate-network.sh` run is what
 backstop that would otherwise revert this board to netplan on any boot where wifi is slow:
 
 ```bash
-export DUCK_TOKEN=github_pat_replace_with_your_token
-export DUCK_REF=main
-sudo -E sh ~/setup-board.sh
+sudo sh ~/setup-board.sh
 ```
 
 ```bash
 sudo sh ~/migrate-network.sh
 ```
 
-The reboot starts a new shell, which is why the token and ref are exported again above. Then the
-daemon. `install.sh` reads the same settings from the environment, and `sudo -E` gets them through:
+Then install the daemon. `install.sh` uses the same public repository and branch defaults:
 
 ```bash
-sudo -E sh ~/install.sh
+sudo sh ~/install.sh
 ```
 
 For a live motor bus, connect the SBC to an OpenRB-150 running ROBOTIS's factory

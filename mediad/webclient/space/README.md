@@ -43,8 +43,8 @@ as no sign-in, so the console asks for a fresh one rather than reporting that yo
 there.
 
 **Do not edit this Space directly.** The page is
-[`mediad/webclient/index.html`](https://github.com/pollen-robotics/microduck/blob/main/mediad/webclient/index.html)
-in `pollen-robotics/microduck`, and `scripts/publish-console.sh` is what puts it here. It has to
+[`mediad/webclient/index.html`](https://github.com/BruzWJ/BruzMicroduck/blob/replica/mediad/webclient/index.html)
+in `BruzWJ/BruzMicroduck`, and `scripts/publish-console.sh` is what puts it here. It has to
 live there because it tracks two things that do: the signalling protocol and the robot's own method
 names. `remote-access-design.md` §5.
 

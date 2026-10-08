@@ -13,7 +13,7 @@ sudo robotctl update apply --ref <branch> daemon
 ```
 
 ```
-sudo robotctl update apply --ref main daemon
+sudo robotctl update apply --ref replica daemon
 ```
 
 `--version` pins an exact release instead. Give one of them unless you genuinely mean "go to
@@ -28,14 +28,14 @@ That is the gate working, but the command that caused it looked like the obvious
 
 The tag `daemon-dev-<branch>` moves with the branch, so there is no version number to copy. The
 version *inside* stays unique per build — `0.1.0-dev.42.c719ec8` — so two builds of the same branch
-are never confusable. `--ref main` is how a board goes back to mainline without leaving the dev
-channel; a plain `apply daemon` leaves it, since a prerelease sorts below its release and there is
-no separate opt-out step.
+are never confusable. `--ref replica` is how a board goes back to this fork's default branch
+without leaving the dev channel; a plain `apply daemon` leaves it, since a prerelease sorts below
+its release and there is no separate opt-out step.
 
-A merge does not publish instantly: CI has to build `main` before `--ref main` resolves to it.
+A merge does not publish instantly: CI has to build `replica` before `--ref replica` resolves to it.
 
 ```
-gh run list --branch main
+gh run list --repo BruzWJ/BruzMicroduck --workflow dev.yml --branch replica
 ```
 
 ## Before the stable release

@@ -414,9 +414,9 @@ unchanged: a stopped unit and a daemon that published nothing are still not stal
    alone. `tofd` and `netpadd` are named as known but get no `enable_unit` of their own: the hook enabled them a step
    earlier and nothing depends on them, so there is no ordering for this function to have an opinion
    about.
-4. `install_token_dropin`: write the `GITHUB_TOKEN` drop-in, `daemon-reload`, and
-   `systemctl try-restart updaterd` — `daemon-reload` alone would leave the *running* `updaterd`
-   without the token, which is every board.
+4. `install_token_dropin`: write the `GITHUB_TOKEN` drop-in when supplied, or remove an old one for
+   anonymous access; then `daemon-reload` and `systemctl try-restart updaterd`. `daemon-reload`
+   alone would leave the running process with its previous environment.
 
 `DUCK_FORCE_REINSTALL=1` adds `stop_for_reinstall` before step 2: `systemctl stop` on `padd`,
 `netpadd`, `tofd`, `btd`, `configd`, `robotd`, `updaterd`, in that order. Nothing is live while the swap happens, and there is

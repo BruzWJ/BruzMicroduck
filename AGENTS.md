@@ -36,6 +36,7 @@ never refused; only a genuinely missing route or an unknown parameter may refuse
 
 ## Releases are how a fix reaches a robot
 
-`main` being fixed is not a robot being fixed. Robots on the stable channel move when a release is
-cut, and a dev build from a branch is superseded by the next `daemon-dev-main` the board's
-six-hourly check finds. `docs/design/updater-design.md` owns the mechanism.
+`replica` being fixed is not a robot being fixed. Robots on the stable channel move when a release is
+cut. Branch builds never enter that six-hourly stable resolver; a board running one moves to a newer
+branch build only after another explicit `--ref replica` apply. `docs/design/updater-design.md` owns
+the mechanism.

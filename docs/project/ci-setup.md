@@ -35,6 +35,7 @@ personal access token and a locally created tag are not part of this procedure.
 
 ## Existing development boards
 
-The one-time cutover for a development board running the former updater is
-[`updater-design.md` §5.4](../design/updater-design.md#54-publication-authority-and-integrity):
-reprovision or force-bootstrap it before applying the first release in the current format.
+A development board running the former unpublished updater must start from a clean OS image before
+it is provisioned against the first release in the current format. The boundary and the reason a
+plain reprovision is not a migration are owned by
+[`updater-design.md` §5.4](../design/updater-design.md#54-publication-authority-and-integrity).

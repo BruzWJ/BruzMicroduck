@@ -21,11 +21,10 @@ This page owns the **channel**: which file fills a slot, who published it, and t
 that change that. Where a mechanism belongs to one of those pages, this one says a sentence
 and points.
 
-## 1. What is wrong today
+## 1. What this replaced
 
-All nine `.onnx` files ship inside the daemon artifact, and `robotd` loads them from
-`/opt/robot/daemon/current/policies/`. Three consequences, and `policies/README.md` has named
-them since the day it was written:
+All nine `.onnx` files used to ship inside the daemon artifact, and `robotd` loaded them from
+`/opt/robot/daemon/current/policies/`. That had three consequences:
 
 - a gait retrain needs a daemon release;
 - a daemon fix re-downloads 6 MB of unchanged weights;
@@ -37,9 +36,8 @@ Two asks follow from that, and they are **not the same feature**:
 1. our own policies version independently of the daemon;
 2. someone can try a policy they did not train, find out whether it is any good, and get back.
 
-The first is an ordinary component (§5.5 of the updater design) and needs no new concepts. The
-second is what this page is mostly about, because it is the one the component model does not
-already cover.
+The first is now one versioned Hub set with its own install path. The second is what this page is
+mostly about, because a single community policy is not a system-release component.
 
 ## 2. Three origins, one slot
 
@@ -48,7 +46,7 @@ filled from exactly one of three origins:
 
 | | comes from | provenance | per-file hash | auto-updates | reset target |
 |---|---|---|---|---|---|
-| **official** | the `policies` component | manifest, semver | yes | yes, per `auto_apply` | **yes** |
+| **official** | `pollen-robotics/microduck-policies` | repo + revision in `.source`, plus manifest | no | only the daemon release's minimum pin; otherwise explicit | **yes** |
 | **community** | any other HF repo | repo + revision + commit sha | no | no — reported only | no |
 | **local** | a path on the board | none | no | no — unknowable | no |
 
@@ -58,10 +56,10 @@ org to trust is a robot whose "official" badge means nothing.
 
 Origin drives behaviour and not only a label:
 
-- **official** is what `policy reset` returns to, and the only origin the periodic check may
-  ever apply on its own;
+- **official** is what `policy reset` returns to, and the only origin the release seeder may move
+  automatically — and only upward to its declared minimum pin;
 - **community and local** are never auto-applied and never a reset target, and carry their
-  origin everywhere they are displayed — `policy list`, `policy check`, and the policy name
+  origin everywhere they are displayed — `policy list`, search results, and the policy name
   `robotctl monitor` prints, which today says `walk` for gaits that share nothing but a slot.
 
 **A declared per-file hash is deliberately not required for community policies.** The daemon
@@ -170,12 +168,14 @@ The rule that fixes it:
 
 - a **community or local** override that fails to load falls back to that slot's **official**
   default and reports **degraded**, naming the file;
-- an **official** policy that fails to load stays **unhealthy**.
+- a present **official** set whose required policy fails to load stays **unhealthy**; no official
+  set installed yet is **degraded** (§9).
 
 This is the distinction `HealthResult::degraded` exists for. A missing override is a property of
 the board, not of the release being gated — reverting the daemon cannot fix it, and would only
-churn the boot counter. A broken official policy genuinely is a broken bundle, and rolling it
-back is the correct response.
+churn the boot counter. An installed official policy that the daemon cannot load may be a daemon
+compatibility regression, so it must still fail that daemon's health gate; repairing or selecting
+an older policy set is a separate `policy update` operation.
 
 Note this does **not** silently repair the config. The override stays written and
 `robotctl health` says which file could not be loaded, so the state is visible and `policy
@@ -195,29 +195,25 @@ uses semver:
 
 | origin | shown as |
 |---|---|
-| official | the manifest's semver — `1.2.0`, like any component |
+| official | the source revision tag — for example `v7` |
 | community, repo has `v*` tags | the tag |
 | community, tracking a branch | short sha + date |
 | local | `local`, and `check` reports unknown |
 
-**`policy check` is the one place to look.** It routes internally — official slots ask
-`updaterd` about the `policies` component, community slots ask the Hub — because "which command
-tells me whether my walk is out of date" having two answers is exactly the confusion worth
-spending a little routing to avoid.
-
-The periodic check (`check_interval`, 6h) covers community policies too, and **reports without
-applying**. That is already how `auto_apply` treats an ordinary release: availability is a fact
-to surface, installing is a decision. It is also what lets the app say "an update is available
-for your bouncy walk" later with no new plumbing.
+**`policy check` checks the installed official set** against the Hub repo recorded in its
+`.source`; `policy update` moves it explicitly. A fetched community policy records the exact
+revision it came from, but comparing a moving community branch with that record remains deferred.
 
 ## 7. The command surface
 
 ```text
 robotctl policy list                      slot · current · origin · version
-robotctl policy check [slot]              is anything newer at the source
+robotctl policy check                     is the official set newer at its source
 robotctl policy load <slot> <repo|name|path>
-robotctl policy update <slot>             fetch the newest and load it
+robotctl policy update [--version <tag>]  install an official set and reload it
 robotctl policy reset [slot]              back to official; no slot = all seven
+robotctl policy add <name> <repo|path>     add or replace a one-shot skill
+robotctl policy remove <name>              remove a configured skill override
 robotctl policy search <query>            Hub models matching a query
 ```
 
@@ -307,30 +303,13 @@ download a person could make, into a directory `robotd` shape-checks everything 
 gate also catches a truncated file, which is why no hashes are pinned here to go stale on every
 retrain.
 
-One rule makes that a bootstrap rather than a second home: **a set that is already installed is
-never replaced, whatever the pin says**. There are two states — something is installed, or
-nothing is — and only the second one fetches. Everything after the first install belongs to
-§9.1.
-
-That rule got stricter after a board proved the looser one wrong. It used to replace an older
-`seed-*` on the reasoning that a daemon update was still how a retrained gait reached a robot.
-`policy update` is now how, and the old rule became a trap: a board moved forward to `v2` by hand
-has `current -> releases/seed-v2`, which matches the pattern the seeder called its own, so the
-next unrelated daemon update would have put `v1` back — reverting the gait somebody chose, as a
-silent side effect of a binary update.
-
 **Policies no longer roll back with the daemon**, and that is worth stating plainly because it
 used to be free. While they lived inside the release, reverting the release reverted them; now
-`current` is repointed by the postinstall hook, and rollback does not run hooks
-(`post_swap` is on the apply path only). So a release rolled back *because a policy in it was
-bad* leaves that policy running. Two ways back, and the first is the ordinary one: a forward
-`robotctl update apply daemon --version <older>` runs the hook and reseeds. Failing that, the
-seed the release replaced is still on the board — the seeder keeps the previous one for exactly
-this — and `current` can be pointed at it by hand.
-
-This is the intended shape rather than a regression: two things with their own version lines do
-not revert together. It is only sharp while the release is still the only source of policies,
-which is another reason not to leave that state sitting for long.
+the set owns `/opt/robot/policies/current`, and daemon rollback does not move that symlink. If a
+daemon apply becomes unhealthy against the installed set, rolling the daemon back restores only
+the daemon. Moving the policies back is the separate `robotctl policy update --version
+<older-policy-tag>` operation; the policy installer also retains the predecessor for hand
+recovery. Two things with their own version lines deliberately do not revert together.
 
 **A board that cannot reach the Hub on a first install has no gait**, and that is the accepted
 shape rather than an oversight. `robotd` holds its pose and reports *degraded*, so the update gate
@@ -343,21 +322,21 @@ What the seeder must never do is *fail*: a non-zero exit from the post-install h
 update back, so a network problem would revert a release that had nothing to do with it. Every
 error path exits zero and says so on stderr.
 
-**One component for the whole set, not one per slot.** The updater design sketched
+**One versioned set, not one repo per slot.** The updater design sketched
 `model-walk`, `model-jump` and so on (§5.5), and per-slot components are what its own machinery
-would give most naturally. Against that: the nine files are produced as a *family* by one
+would give most naturally. Against that: the files are produced as a *family* by one
 training run, the slot→file mapping is mode-dependent (`walk` is `alpha_walking.onnx` on legs
-and `roller.onnx` on wheels, which postdates that section), and nine components means nine
-repos, nine manifests, nine config blocks, nine round trips per check, and a nine-dimensional
-skew matrix in which nothing records that a given walk and stand were ever trained together. One
-component means a mode switch downloads nothing and the set is versioned the way it is built.
+and `roller.onnx` on wheels, which postdates that section), and one component per policy would
+mean one repo, manifest, config block and round trip per file, plus a skew matrix in which nothing
+records that a given walk and stand were ever trained together. One
+set means a mode switch downloads nothing and the policies are versioned the way they are built.
 
-What one component gives up is rolling back a single slot, and that is exactly what the per-slot
+What one set gives up is rolling back a single slot, and that is exactly what the per-slot
 override in §3 already covers — from any origin, which a per-slot component would not have
 managed either.
 
-**A missing policy is degraded, not unhealthy**, by the same §5 rule: a freshly provisioned board
-that has not fetched the set yet has no gait, and that must not fail the health gate of every
+**A missing official set is degraded, not unhealthy**, by the same §5 rule: a freshly provisioned
+board that has not fetched the set yet has no gait, and that must not fail the health gate of every
 subsequent daemon update. Provisioning installs the bootstrap set, where `setup-board.sh`
 already installs the ONNX runtime and `setup-gstreamer.sh` the plugins — the network dependency
 lands where one exists, and at runtime there is exactly one source for a policy with no
@@ -377,10 +356,10 @@ record naming the repo and revision it came from, written by whatever installed 
 second place to configure the repo and nothing to drift; a set installed by some future tool
 answers the same question the same way.
 
-**Newest means the repo's own newest, not a semver sort.** A policy repo is not obliged to use
-semver, and ordering `bouncy-2` against `v10` would be a guess presented as a fact. The Hub lists
-refs oldest-first, so newest is that reversed, and `check` prints the whole list rather than only
-its own verdict — going *back* is as much the point as going forward.
+**Newest means the highest numeric version tag.** The Hub returns refs in no reliable order, so
+`v10` is parsed and sorted above `v9`; a non-version name such as `experimental` remains visible
+in `check` but is never selected implicitly. Naming any revision explicitly still works, which is
+also how going back is supported.
 
 **`robot.reloadPolicies` exists because the paths do not change.** Installing a set swaps
 `current` underneath every slot, so each one still resolves to the same string and
@@ -441,9 +420,11 @@ remedy.
 Three rules keep that from becoming a trap. The manifest is **untrusted** — a stranger's
 description of a stranger's file — so it is a reason to refuse and never a reason to trust; a
 manifest that lies is caught by the shape gate, which is where the real check has always been.
-**Absence is not evidence**: a repo with no manifest, or one omitting the fields we act on, is
-accepted, because most of the Hub follows no convention of ours and refusing on silence would
-reject the majority of it. And the numbers it is checked against are published in
+For a **single-policy community repo**, absence is not evidence: a repo with no manifest, or one
+omitting the fields we act on, is accepted, because most of the Hub follows no convention of
+ours and refusing on silence would reject the majority of it. (The official multi-file set is
+different: its manifest is the only authoritative file list.) And the numbers it is checked
+against are published in
 `duck_ipc_proto` rather than duplicated, with a compile-time assertion in `duck_control` that the
 two agree — a contract with whoever publishes a policy belongs where both sides can see it.
 
@@ -475,20 +456,21 @@ Two lists used to be hardcoded, and between them they meant a tenth policy in th
 daemon release rather than a tag:
 
 - `scripts/seed-policies.sh` knew which files to download. It now reads them from the manifest,
-  keeping the nine it knows as a fallback for a revision tagged before the manifest existed.
+  and leaves an official revision without a readable, non-empty manifest uninstalled.
 - `robotd-params` knew which policies were one-shot skills and how long each ran. It now takes
-  them from the manifest, falling back the same way.
+  them from the installed manifest; no manifest means no implicit set skills.
 
 **And `policy.install` installs the manifest with the set**, from the same two rules. It took its
 download list from what was already on the board at first, which made the tenth policy a tag the
 seeder honoured and `robotctl policy update` could not — installable only by a daemon release,
 which is what this whole channel exists to stop. It also left the new set without a
-`manifest.json`, so `robotd` fell back to the three skill names it was compiled with and every
-per-skill number the set declared was quietly lost by the command whose only job is moving
-between revisions. The revision's own manifest is the list now, and the file is written into the
-set beside the policies it describes; the board's own `.onnx` names remain the fallback for a
-revision that has no manifest. A `file` that is not a plain name is dropped rather than fetched,
-in the script and in the daemon both — it is somebody else's document, and it chooses a path.
+`manifest.json`, so `robotd` could not know which files were skills and every per-skill number the
+set declared was quietly lost by the command whose only job is moving between revisions. The
+revision's own manifest is the list now, and the file is written into the set beside the policies
+it describes. A missing, invalid or empty official-set manifest refuses that revision rather than
+guessing from files already on the board. A `file` that is not a plain name is dropped rather
+than fetched, in the script and in the daemon both — it is somebody else's document, and it
+chooses a path.
 
 **The field-by-field contract is [`../policy-manifest.md`](../policy-manifest.md)** — the two
 axes, every field, what each one changes on the robot. It is not repeated here, and this section
@@ -534,9 +516,11 @@ duration = 4.0
 ```
 
 `robotctl policy add polite-bow <repo>` writes that, taking the length from the repo's manifest.
-Absent means the built-in three, and an entry merges by name, so a board updates onto this with
-no config and no migration — and adding one cannot silently remove another by omission.
-`"none"` removes a built-in, the same word that switches off a policy slot.
+The official set's manifest supplies every skill it declares, and a config entry merges by name,
+so adding one cannot silently remove a set skill by omission. `"none"` removes a set skill,
+the same word that switches off a policy slot. An explicit
+`policy load kick_left|kick_right|roulade <file>` still supplies that standard command role's
+established duration and chaining semantics; it does not infer any file when the slot is unset.
 
 ### 10.1 Who supplies the ending
 
@@ -663,31 +647,13 @@ client cannot offer a bow without knowing the robot has one, and which skills ex
 — nothing to compile in. The names were already in `robot.subscribe`'s acknowledgement, but that
 is a 50 Hz stream answering a question asked once, and BLE deliberately does not route it.
 
-## 11. What the official set currently is
+## 11. Where the current official set is defined
 
-Recorded here because it lives nowhere else in this repository now that the files do not, and
-because the mapping is not recoverable from the names on the Hub. Copied from
-`apirrone/microduck_runtime` at `5f3b314` (`roulade.onnx` at `7e4ab6d`, where it first appeared),
-dereferencing the symlinks that repository uses to give stable names to particular training runs:
-
-| in the set | upstream | role |
-| --- | --- | --- |
-| `alpha_walking.onnx` | `BEST_alpha_walking_rough.onnx` | walking / velstand (default `walk` until set v5) |
-| `velstand.onnx` | `pollen-robotics/microduck_rl` `velstand_best.onnx` (2026-09-14) | walking + standing at zero command; default `walk` from set v5, `stand` unset |
-| `alpha_stand.onnx` | `BEST_alpha_stand_body_control.onnx` | standing + body-pose |
-| `alpha_sitstand.onnx` | `BEST_alpha_sitstand.onnx` | sit ↔ stand (posture flag) |
-| `alpha_ground_pick.onnx` | `alpha_ground_pick.onnx` | ground pick (phase command) |
-| `ball_kick_left.onnx` | `ball_kick_left.onnx` | left-leg kick |
-| `ball_kick_right.onnx` | `ball_kick_right.onnx` | right-leg kick |
-| `roller.onnx` | `BEST_roller.onnx` | roller-mode locomotion |
-| `roller_crouch.onnx` | `BEST_roller_crounch.onnx` | roller-mode crouch (ground-pick slot) |
-| `roulade.onnx` | `roulade.onnx` | forward roll (Mjlab-Roulade-MicroDuck) |
-
-(`roller_crouch` also fixes the upstream file name's typo.)
-
-**The names are roles, not training runs**, and that indirection is the reason a retrain is a pin
-bump rather than a config change on every robot: swapping which run is "the walking policy" must
-not mean editing `robotd.toml`.
+The Hub revision's `manifest.json` is the only authoritative membership and role list (§9.3), so
+this repository does not copy the current table. On a board, inspect
+`/opt/robot/policies/current/manifest.json`; for a candidate revision, inspect the same file in
+`pollen-robotics/microduck-policies` before tagging it. Stable file names are roles rather than
+training-run identities, so a retrain changes the set without rewriting every robot's config.
 
 **Only the 61-D family.** The prototype also ships a 51-D one — `3 gyro + 3 gravity + 42 joints +
 3 command`, the legacy `[vx, vy, vtheta]` — and `robotd` refuses it at load naming both widths.
@@ -696,8 +662,8 @@ nobody could explain, and it is now also what catches a truncated download (§9)
 
 ## 12. Naming
 
-The updater says `model`; `robotd` says `policy`. Standardising on **policy** — the component is
-`policies`, the namespace is `policy.*`, the commands are `robotctl policy …`. `models/` keeps
+The updater says `model`; `robotd` says `policy`. Standardising on **policy** — the set is
+`microduck-policies`, the namespace is `policy.*`, the commands are `robotctl policy …`. `models/` keeps
 its meaning for the things that genuinely are models and not control policies, such as
 `pet_detect.onnx` and the duck detector.
 
@@ -713,16 +679,16 @@ its meaning for the things that genuinely are models and not control policies, s
 | A failed community override is degraded, not unhealthy | Otherwise a stale config gates every daemon update (§5) |
 | `pollen-robotics/*` is official, hardcoded | A configurable trust org makes the badge meaningless (§2) |
 | Community policies carry no declared per-file hash | The safety layer and the shape gate are the boundary (§2) |
-| One `policies` component, not one per slot | The set is trained as a family; per-slot overrides already cover the rest (§9) |
+| One official set, not one repo per slot | The set is trained as a family; per-slot overrides already cover the rest (§9) |
 | The fetch lives in `updaterd` | `robotctl` must not link an HTTP stack (§8) |
-| Policies live outside the release, seeded by it | One runtime source, and no precedence rule to get wrong (§9) |
-| Seeding never overwrites a set it did not install | The handover needs no flag: the first real install ends it (§9) |
-| The set is downloaded, not shipped | Same as ONNX Runtime and the plugins; bumping the pin ships a gait (§9) |
+| Policies live outside the release; its hook seeds the declared minimum | One runtime source, independently downloaded, and no precedence rule to get wrong (§9) |
+| Seeding never overwrites a set it cannot prove official | The `.source` record, not a directory name, establishes ownership (§9) |
+| The set is downloaded, not shipped | Same as ONNX Runtime and the plugins; bumping the pin makes a daemon release require that minimum (§9) |
 | A failed fetch keeps the set already installed | A half-published revision must not downgrade a working gait (§9) |
 | The pin is a minimum; `policy update` moves past it | A default that names a newer set's file must not roll the daemon back on boards behind it; a gait still needs no daemon release (§9.1) |
 | A set records the repo it came from | One writer, one copy, nothing to configure twice or drift (§9.1) |
 | Reload is a third thing, not reset-all | They look identical from outside and conflating them discards every override (§9.1) |
-| One-shot skills are config, not code | Kicks and roulade were the same arm with different numbers; a community one is a fifth set (§10) |
+| One-shot skills are config, not code | Kicks and roulade were the same arm with different numbers; a community one is another entry (§10) |
 | `kind` says who ends a policy, not how long | An episodic one returns itself; a perpetual one needs the daemon to drive it back; a scripted one is episodic but interruptible (§9.3, §10.1) |
 | `command.encoding` says what the daemon feeds it | Constant → a skill; `phase` → the ground pick; `posture_flag` → the sit↔stand. Only the first is loadable as a one-shot (§9.3) |
 | The set carries its own timing | The pick's cycle and cutoff, the rise and the seat's settle are properties of the trained network, not literals in a build; `[policy]` keys still win (§9.3) |
@@ -736,12 +702,12 @@ its meaning for the things that genuinely are models and not control policies, s
 | A set's manifest is installed with it | Otherwise `policy update` drops every skill the set declares and the list can never grow (§9.3) |
 | The library keeps two revisions per repo | Nothing else tidied it, and fetching is served over both radio transports (§8) |
 | …but never one the robot is using, and nothing at all if it did not answer | Silence is a `robotd` that is down, not one using none of them (§8) |
-| The seeder never replaces an installed set | Otherwise a daemon update silently reverts a gait chosen with `policy update` (§9) |
+| The seeder only raises a proven official set to its minimum | Unknown/newer sets are choices a daemon update must not overwrite (§9) |
 | Origin is the org in the path | Honest without a lookup, and a label rather than a boundary (§9.2) |
 | The manifest can refuse but never bless | It is a stranger's claim; the shape gate is the check (§9.2) |
 | A repo with two policies is a refusal | Guessing means running the wrong network on a real robot (§9.2) |
-| Seeds are pruned to the current and previous | Unbounded 7 MB-per-release growth; the previous one is the hand-recovery after a rollback (§9) |
-| One `policy check`, routing internally | Two commands for one question is the confusion worth avoiding (§6) |
+| Policy installs keep the current and previous official sets | Unbounded per-update growth; the previous one is hand recovery (§9) |
+| `policy check` names official-set availability | Community branch comparison remains explicitly deferred (§6) |
 
 ## 14. Deferred, deliberately
 
@@ -749,7 +715,7 @@ its meaning for the things that genuinely are models and not control policies, s
   but only the config says which is live. A real `(name, version)` store key is priced in
   [`updater-design.md`](updater-design.md) §17 at ~14 files and an `API_VERSION` bump, and the
   A/B case is served by loading each in turn.
-- **Loading a whole set at once.** Per-slot only for now. A set matters if swapping between
+- **Loading a whole community set at once.** Community imports are per-slot. A set matters if swapping between
   training-run families becomes routine, where mixing a walk from one run with a stand from
   another is a combination nobody trained.
 - **A `microduck` tag on the Hub.** Searching for the word is enough until there is something to

@@ -115,7 +115,10 @@ with a path in it has that entry skipped, by the seeder and by `robotctl policy 
 The manifest is installed **into the set**, so `/opt/robot/policies/current/manifest.json` is
 what `robotd` reads for the skills. It is also the download list: adding a policy is an entry
 here and a tag, and both the first seed of a board and every `policy update` after it take the
-list from the revision they are installing.
+list from the revision they are installing. It is therefore required for every official-set
+revision; a missing, invalid or empty one is not reconstructed from whatever `.onnx` files happen
+to be installed already. This requirement does not apply to a community repository containing a
+single policy: that path can still rely on the graph shape check when no manifest is present.
 
 ## The preview clip, which is not a field
 
@@ -154,5 +157,6 @@ Schema 1 was the official set's first shape: `kind` with the values `perpetual`,
 `scripted`, where `scripted` meant "the daemon generates the command" and was applied to the
 ground pick. Schema 2 moves that meaning to `command.encoding`, makes `scripted` mean
 interruptible-episodic (the sit↔stand), and adds `chain`, `ramp_s`, `mode`, `entry_pose`,
-`training`, `eval`, and the `command.*` timing fields. A daemon reading a schema-1 file gets the
-prototype's timing for everything and the same three skills; nothing is refused on the version.
+`training`, `eval`, and the `command.*` timing fields. A daemon reading a schema-1 file uses the
+prototype's timing where those newer fields are absent and takes skills from the entries the
+manifest declares; nothing is refused on the version.

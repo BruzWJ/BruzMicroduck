@@ -185,13 +185,3 @@ answer to a poll, and after the measurement there is no poll worth answering.
 - SoC temperature at idle over ten minutes, before and after. ~4% of a core will not be visible in
   it, and that is the honest expectation to write down rather than discover: this was about not
   reading a sensor for nobody, not about heat.
-
-## The beta board (2026-10-06)
-
-Everything above is the `zero3`'s BMI088. The beta board's head IMU is an LSM6DSV16X on the face
-board's own I²C bus, and the two things this document found expensive are both gone there: the
-chip fuses the orientation itself (SFLP), and it batches gyro, accelerometer and quaternion into
-its FIFO, so one burst read carries ~4 samples (one read from `FIFO_DATA_OUT_TAG` returns
-consecutive records, measured on the board). It is read by `robotd` (`robotd/src/head_imu.rs`),
-because the reason it lived in `tofd` — sharing the HAT's bus with the ToF — does not exist on that
-board, and it is **on by default** there. The `zero3` is unchanged: `tofd`, BMI088, off.

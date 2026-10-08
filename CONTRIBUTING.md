@@ -32,7 +32,7 @@ sudo apt-get install -y libudev-dev libgstreamer1.0-dev
 sudo apt-get install -y libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev
 ```
 
-**On macOS** the command above is the whole of it — **942 tests passing**, nothing excluded. Two
+**On macOS** the command above is the whole setup; no system packages are needed. Two
 of the ToF driver's own tests do not run there, because there is no driver to run them against:
 `vendor/platform.c` reaches the bus through `linux/i2c.h`, so `build.rs` compiles it on Linux
 targets only and `sensor.rs` offers a `Sensor` that cannot be opened. `tofd` still builds and
@@ -83,7 +83,6 @@ the daemons — one crate each, one unit each, all in the same release artifact
   padd/           gamepad → intents — an ordinary socket client, no privileged access
   mediad/         camera, mic, WebRTC, the remote gateway, and the console it serves
   tof/            tofd: the head's 8×8 depth sensor and optional head IMU streams
-  nfc/            nfcd: the NFC reader. A touched tag names a gamepad, and configd pairs it
 
 the libraries they drive — no sockets, no systemd, nothing starts them
   duck-ipc-proto/ the wire contract

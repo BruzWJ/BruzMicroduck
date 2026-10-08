@@ -31,18 +31,20 @@ ssh-copy-id microduck@192.168.1.42
   advertising yet.
 - **ssh key access**, from the step above. Provisioning reboots the board and reconnects by
   itself, and a password prompt cannot survive that.
-- A **GitHub token**, while this repository is private: its release assets are unreachable
-  without one. Once it is public the token is optional and buys only a higher API rate limit
-  (`docs/design/updater-design.md` §6.1).
+- A **GitHub token only for a private override repository**. `BruzWJ/BruzMicroduck` and its
+  release assets are public, so the normal installation needs no token. A token is otherwise
+  only useful for a higher API rate limit ([`updater-design.md`](../design/updater-design.md) §6.1).
 - A **clone of this repo**, which supplies the provisioning command and development tools.
 
 ## Install
 
-From a clone on your own machine, two commands:
+The repository must have one stable daemon release before its first board can be provisioned.
+If GitHub has no published stable/Latest `daemon-v*` release (ignore `daemon-dev-*` prereleases), follow
+[`CONTRIBUTING.md` → Releasing](../../CONTRIBUTING.md#releasing): bump the workspace version, push
+`replica`, then run **Actions → release → Run workflow**. The workflow creates the tag and release;
+do not create either by hand. This is a one-time prerequisite—later boards use that stable release.
 
-```bash
-export DUCK_TOKEN=github_pat_replace_with_your_token
-```
+From a clone on your own machine:
 
 ```bash
 ./scripts/provision-board.sh --pause-btd-on-pair --name <MY_COOL_ROBOT_NAME> microduck@192.168.1.42
@@ -111,9 +113,9 @@ ssh -t microduck@192.168.1.42 'sudo tail -f /var/lib/robot/provision.log'
 ```
 
 `--ref BRANCH` provisions from a branch: its scripts run the bring-up, and its build of the daemon
-is installed on top. `golden` stays the stable release — it is the boot recovery net's fallback, and
-a branch build as golden would give a broken branch a broken fallback — while `current` is the
-branch.
+is installed on top. Stable stays installed as `previous`, the health gate's immediate rollback
+target, while `current` is the branch. `golden` remains unset until the configured 1.0.0 recovery
+baseline exists.
 
 Provisioning **fails** if that build cannot be installed, or if it is installed and then rolled back
 by the health gate. A dev board quietly running the stable release when a branch was asked for is the
@@ -142,7 +144,7 @@ readlink -f /dev/openrb-dxl
 Then the real test — put a branch on it explicitly:
 
 ```bash
-sudo robotctl update apply --ref main daemon
+sudo robotctl update apply --ref replica daemon
 ```
 
 ## When ssh refuses to connect after a reflash
@@ -182,8 +184,8 @@ Three things stop it working, and it says which:
 ## The token, by hand
 
 `scripts/install.sh` writes this for you when given `DUCK_TOKEN`. These steps are for a board
-provisioned some other way — and they are only needed while this repository is private, or on a
-board that fetches often enough to want the higher rate limit a token buys.
+using a private override repository, or one that fetches often enough to need the higher rate
+limit a token buys. The normal public `BruzWJ/BruzMicroduck` path does not need them.
 
 `updaterd` reads `GITHUB_TOKEN` from its own environment, so exporting it in your shell does not
 reach the daemon — it needs a systemd drop-in.
@@ -218,7 +220,8 @@ sudo systemctl restart updaterd
 A token on a *developer's* board is fine. A token on a customer robot is not — a fleet-wide
 credential in an image cannot be rotated without reflashing — which is why the answer is a
 public repository rather than a shipped token (`docs/design/updater-design.md` §6.1). A board
-with no token can still install from a local directory or a dev push.
+with no token can still install from a local directory or a dev push. Re-running `install.sh`
+without `DUCK_TOKEN` removes an existing token drop-in and restarts `updaterd` anonymously.
 
 ## Installing without a network
 
