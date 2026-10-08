@@ -237,17 +237,23 @@ configure_overlay_prefix() {
         changed=1
     fi
 
-    if grep -E '^overlays=' "$ENV_TXT" | grep -qw uart2-m0; then
+    if grep -Eq '^overlays=' "$ENV_TXT"; then
         old_line=$(grep -E '^overlays=' "$ENV_TXT" | head -1)
         words=${old_line#overlays=}
         new_words=""
+        had_uart=0
         for word in $words; do
-            [ "$word" = uart2-m0 ] && continue
+            if [ "$word" = uart2-m0 ]; then
+                had_uart=1
+                continue
+            fi
             new_words="${new_words}${new_words:+ }${word}"
         done
-        say "removing the retired uart2-m0 motor overlay"
-        sed -i "s/^overlays=.*/overlays=${new_words}/" "$ENV_TXT"
-        changed=1
+        if [ "$had_uart" = 1 ]; then
+            say "removing the retired uart2-m0 motor overlay"
+            sed -i "s/^overlays=.*/overlays=${new_words}/" "$ENV_TXT"
+            changed=1
+        fi
     fi
 
     if [ "$changed" = 1 ]; then
