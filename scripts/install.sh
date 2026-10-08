@@ -2,7 +2,7 @@
 #
 # Install the robot daemon on a fresh board, from nothing.
 #
-#   curl -fsSL https://raw.githubusercontent.com/pollen-robotics/microduck/main/scripts/install.sh | sudo sh
+#   curl -fsSL https://raw.githubusercontent.com/BruzWJ/BruzMicroduck/replica/scripts/install.sh | sudo sh
 #
 # Target: 64-bit Debian userland on aarch64 — Armbian 26.2.x on the Radxa Zero 3, and
 # whatever else Debian 12/13 arm64 you point it at. Needs `curl` and coreutils and
@@ -44,12 +44,12 @@ set -eu
 
 # ── knobs ────────────────────────────────────────────────────────────────────
 
-# The repository releases are published from. Override for a fork or a test repo.
-REPO="${DUCK_REPO:-pollen-robotics/microduck}"
+# The repository releases are published from. Override for another fork or a test repo.
+REPO="${DUCK_REPO:-BruzWJ/BruzMicroduck}"
 
 # Branch the provisioning scripts are read from. Pin to a tag for a reproducible run.
 ENV_REF="${DUCK_REF:-}"
-REF="${ENV_REF:-main}"
+REF="${ENV_REF:-replica}"
 
 # Where `updater.toml` and `robotd.toml` come from. Defaults to the tag of the release being
 # installed, and `DUCK_REF` deliberately does *not* change it.
@@ -91,9 +91,6 @@ TOKEN="${DUCK_TOKEN:-}"
 # `robotctl rollback` for that reason. Ordinary updates keep the gate.
 FORCE_REINSTALL="${DUCK_FORCE_REINSTALL:-}"
 
-# Which electronic board this is, written to robotd.toml's `[board] version`. Empty leaves the
-# file alone, which is a zero3 unless it already says otherwise. `provision-board.sh --board`.
-BOARD="${DUCK_BOARD:-}"
 # Install everything and start nothing.
 #
 #   sudo DUCK_NO_START=1 DUCK_TOKEN=... sh install.sh
@@ -247,18 +244,6 @@ install_config() {
         chmod 644 "${CONFIG_DIR}/updater.toml"
     fi
 
-    # API v38 removed the Minisign keyring. These two old top-level fields are rejected by
-    # `deny_unknown_fields`, so a preserved pre-v38 config must be migrated before the new
-    # bootstrap updater reads it. Delete only the exact retired assignments; every operator
-    # choice in the file remains untouched.
-    if grep -Eq '^(trusted_keys_dir|allow_dev_keys)[[:space:]]*=' "${CONFIG_DIR}/updater.toml"; then
-        sed -i \
-            -e '/^trusted_keys_dir[[:space:]]*=/d' \
-            -e '/^allow_dev_keys[[:space:]]*=/d' \
-            "${CONFIG_DIR}/updater.toml"
-        say "removed retired Minisign settings from ${CONFIG_DIR}/updater.toml"
-    fi
-
     if grep -q '"ORG/' "${CONFIG_DIR}/updater.toml"; then
         die "${CONFIG_DIR}/updater.toml still names a placeholder repository"
     fi
@@ -272,7 +257,6 @@ install_config() {
         fetch "${config_raw}/deploy/robotd.toml" "${CONFIG_DIR}/robotd.toml"
         chmod 644 "${CONFIG_DIR}/robotd.toml"
     fi
-    declare_board
 }
 
 # Land the first release through the real engine. `--config` is the config installed
@@ -351,7 +335,7 @@ stop_for_reinstall() {
     # Absent units are not a problem to report: a board running an older release simply has no
     # configd or btd, and warning about them on every forced re-install trains people to ignore
     # the warnings that matter.
-    for unit in padd.service tofd.service nfcd.service btd.service configd.service robotd.service updaterd.service; do
+    for unit in padd.service tofd.service btd.service configd.service robotd.service updaterd.service; do
         [ -f "${UNIT_DIR}/${unit}" ] || continue
         systemctl stop "$unit" 2>/dev/null || warn "could not stop ${unit}"
     done
@@ -573,7 +557,7 @@ stop_instead() {
 quiet_the_release_units() {
     [ -n "$NO_START" ] || return 0
     say "DUCK_NO_START: undoing the enables hooks/postinstall just did"
-    for unit in padd.service tofd.service nfcd.service btd.service configd.service robotd.service updaterd.service; do
+    for unit in padd.service tofd.service btd.service configd.service robotd.service updaterd.service; do
         [ -f "${UNIT_DIR}/${unit}" ] || continue
         stop_instead "$unit"
     done
@@ -771,8 +755,6 @@ install_units() {
             # carries on. Naming it here is what stops that being reported as a daemon this
             # script forgot, which is how it read on every fresh install.
             tofd.service) ;;
-            # Likewise: enabled by postinstall, and nothing waits on it — no reader is a log line.
-            nfcd.service) ;;
             robot-boot-check.timer) ;;
             # Started by its timer, never enabled. See above.
             robot-boot-check.service) ;;
@@ -824,7 +806,7 @@ verify_install() {
     # And ask whether it is actually *working*, which `is-active` cannot tell you.
     #
     # robotd stays active with no motor bus: it logs the failure, keeps serving its socket,
-    # and reports unhealthy. Before this, a board with no servos wired produced a completely
+    # and reports degraded. Before this, a board with no servos wired produced a completely
     # green install of a daemon that could not see a robot.
     #
     # Non-fatal on purpose. A bench board with no motors attached is a legitimate state — it
@@ -904,27 +886,33 @@ QWIIC_BUS="${QWIIC_BUS:-/dev/i2c-qwiic}"
 check_board() {
     if [ ! -e "$QWIIC_BUS" ]; then
         warn "${QWIIC_BUS} does not exist, so robotd cannot read the required body IMU and
-  tofd cannot read the head IMU or ToF. Fit the Qwiic chain, run scripts/setup-board.sh,
-  and reboot before installing this hardware-cutover release. Installing anyway so bench
+  tofd cannot read the head IMU or ToF. Fit the Qwiic chain, then run:
+    sudo /usr/local/sbin/robot-setup-board
+  Reboot before installing the runtime. Installing anyway so bench
   and recovery installs remain possible; missing sensors are reported explicitly."
     fi
 }
 
 # Let `updaterd` fetch updates on a *developer's* board.
 #
-# Only when a token was supplied, and never on a customer robot: those install from a public
-# artifact repository and pass no token, so they never reach this path. A fleet-wide
-# credential baked into an image is one that leaks and cannot be rotated without reflashing.
-#
-# Without this, `updaterd` is installed, running, and unable to fetch a single update — which
-# is most of what it is for.
+# A supplied token is persisted for a private repository or a higher API rate limit. Empty selects
+# anonymous public access and removes a stale drop-in, so rerunning provisioning cannot keep a
+# credential by accident. Never bake a fleet-wide token into a customer image: it will leak and
+# cannot be rotated without touching every robot.
 install_token_dropin() {
+    dir=/etc/systemd/system/updaterd.service.d
     if [ -z "$TOKEN" ]; then
-        say "no token supplied; public GitHub releases remain available"
+        if [ -f "${dir}/token.conf" ]; then
+            rm -f "${dir}/token.conf"
+            systemctl daemon-reload
+            systemctl try-restart updaterd.service || warn "could not restart updaterd"
+            say "removed ${dir}/token.conf; updaterd now uses anonymous GitHub access"
+        else
+            say "no token supplied; public GitHub releases remain available"
+        fi
         return 0
     fi
 
-    dir=/etc/systemd/system/updaterd.service.d
     mkdir -p "$dir"
     # Restrictive umask before the write, not chmod after: a drop-in is world-readable by
     # default, and this one holds a credential from the moment it exists.
@@ -946,37 +934,7 @@ install_token_dropin() {
   robot you ship. It is why artifact hosting is still open — docs/design/updater-design.md §6.1."
 }
 
-# Refuse a board name robotd would refuse, before anything is downloaded: an unknown value in
-# `[board] version` is a type error, and a robotd that will not parse its file does not start.
-# The names are `robotd_params::board::BOARD_LABELS`.
-check_board_name() {
-    case "$BOARD" in
-        ""|zero3|beta) ;;
-        *) die "DUCK_BOARD=${BOARD} is not a board: zero3 or beta" ;;
-    esac
-}
-
-# Write the board into robotd.toml, whatever state the file is in: just fetched from a release
-# whose template has a commented `[board]`, fetched from one that predates the section, or kept
-# from an earlier install. `version` is the only key of that name in the file, so it is matched
-# on its own, commented or not.
-declare_board() {
-    [ -n "$BOARD" ] || return 0
-    file="${CONFIG_DIR}/robotd.toml"
-    if grep -Eq '^#? *version = "' "$file"; then
-        sed -i -E "s|^#? *version = \".*\"|version = \"${BOARD}\"|" "$file"
-    elif grep -q '^\[board\]' "$file"; then
-        awk -v board="$BOARD" '{ print } /^\[board\]$/ { print "version = \"" board "\"" }' \
-            "$file" > "${file}.new"
-        mv "${file}.new" "$file"
-    else
-        printf '\n[board]\nversion = "%s"\n' "$BOARD" >> "$file"
-    fi
-    say "declared this board a ${BOARD} in ${file}"
-}
-
 main() {
-    check_board_name
     check_environment
     check_board
     wait_for_clock

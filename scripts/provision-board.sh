@@ -1,13 +1,12 @@
 #!/bin/sh
 # Provision a board from your own machine, in one command.
 #
-#   export DUCK_TOKEN=...              # only while the repository is private
 #   ./scripts/provision-board.sh microduck@192.168.1.42
 #
 # This clone provisions from BruzWJ/BruzMicroduck. `DUCK_REPO=org/name` is the deliberate
-# escape hatch for a fork: it changes both the first script fetched here and every fetch the
-# board performs after its reboot, so a run can never start from one repository and finish from
-# another.
+# escape hatch for another repository: it changes both the first script fetched here and every
+# fetch the board performs after its reboot, so a run can never start from one repository and
+# finish from another.
 #
 # The target is `[user@]host`, and the host can be a name or an address. An address is the
 # normal case on this hardware: mDNS on the Radxa image is unreliable, so `radxa-zero3.local`
@@ -27,10 +26,6 @@
 #                     if that build cannot be installed or is rolled back — a dev board quietly
 #                     running stable when a branch was asked for is worse than a clear stop.
 #                     Needs the branch build to exist, so give CI its minute or two first.
-#   --board BOARD     which electronic board this is: `zero3` (the default, the Radxa Zero 3W)
-#                     or `beta` (the custom board). Written to robotd.toml's `[board] version`,
-#                     which decides the releases the robot can install. The bring-up itself
-#                     (setup-board.sh) is still the Zero 3W's on either.
 #   --name NAME       name the robot, at the end of provisioning: `--name Ducky`. Optional —
 #                     without it the board names itself `duck-<four hex>` from its SoC serial,
 #                     which is already unique per board. Changeable later at any time with
@@ -60,12 +55,10 @@
 #   --weird-ble       for a Radxa Zero 3W whose Bluetooth cannot bond a gamepad at all, even with
 #                     `btd` paused. Implies `--pause-btd-on-pair`, and additionally sets
 #                     `Privacy = device`.
-#                     **The default in docs/robot/install-dev.md**, because about half these
-#                     boards need it and nothing measurable says which — and a board that needed
-#                     it and did not get it presents as a pad that will not pair, for no visible
-#                     reason. Drop it on a board proven to bond a pad without it; see that page
-#                     for how to check, and `configure_bluetooth` in scripts/setup-board.sh for
-#                     the measurement behind it.
+#                     This is not the default: start with `--pause-btd-on-pair` and add this only
+#                     when the pad still cannot bond. See docs/robot/install-dev.md for the two
+#                     failure signatures and `configure_bluetooth` in scripts/setup-board.sh for
+#                     the mechanism behind them.
 #
 # Needs `ssh` and `scp`, an account on the board that can `sudo`, and nothing else. It expects
 # to be able to prompt for the sudo password, so it allocates a terminal for that one command.
@@ -108,6 +101,7 @@ set -eu
 # reboot and passes it to setup-board.sh and install.sh; forwarding it below is therefore as
 # important as using it for the initial provision.sh URL.
 REPO="${DUCK_REPO:-BruzWJ/BruzMicroduck}"
+DEFAULT_REF=replica
 
 HOST=""
 # The host without any `user@`, which is what known_hosts is keyed on.
@@ -117,7 +111,6 @@ REF=""
 USE_LOCAL=""
 NO_BLE=""
 WEIRD_BLE=""
-BOARD=""
 NO_GSTREAMER=""
 NO_RKAIQ=""
 PAUSE_BTD=""
@@ -190,7 +183,6 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --ref)        REF="${2:?--ref needs a branch}"; shift 2 ;;
         --name)       ROBOT_NAME="${2:?--name needs a name}"; shift 2 ;;
-        --board)      BOARD="${2:?--board needs a board}"; shift 2 ;;
         --forget-host-key) FORGET_KEY=1; shift ;;
         --no-ble)     NO_BLE=1; shift ;;
         --no-gstreamer) NO_GSTREAMER=1; shift ;;
@@ -206,12 +198,11 @@ done
 
 [ -n "$HOST" ] || usage 2
 
-# The names are `robotd_params::board::BOARD_LABELS`; install.sh checks again on the board.
-case "$BOARD" in
-    ""|zero3) ;;
-    beta) warn "--board beta declares the board; setup-board.sh still brings up a Zero 3W" ;;
-    *) die "--board ${BOARD}: zero3 or beta" ;;
-esac
+# The source branch and the requested development build are deliberately different values.
+# With no --ref, fetch this fork's provisioning scripts from its default branch but install the
+# stable release. With an explicit --ref replica, use those same scripts and then install the
+# moving daemon-dev-replica build.
+SOURCE_REF="${REF:-$DEFAULT_REF}"
 
 command -v ssh >/dev/null 2>&1 || die "ssh is required"
 command -v scp >/dev/null 2>&1 || die "scp is required"
@@ -683,19 +674,19 @@ fi
 if [ -n "$USE_LOCAL" ]; then
     _local="$(dirname "$0")/provision.sh"
     [ -f "$_local" ] || die "--local needs ${_local}, and it is not there.
-  Run this from a clone, or drop --local and let the board fetch it from ${REF:-main}."
+  Run this from a clone, or drop --local and let the board fetch it from ${SOURCE_REF}."
     say "sending this clone's provision.sh"
     scp -q "$_local" "$(scp_target /tmp/provision.sh)" || die "could not copy provision.sh"
 else
-    _raw="https://raw.githubusercontent.com/${REPO}/${REF:-main}/scripts/provision.sh"
-    say "having the board fetch provision.sh from ${REPO}@${REF:-main}"
+    _raw="https://raw.githubusercontent.com/${REPO}/${SOURCE_REF}/scripts/provision.sh"
+    say "having the board fetch provision.sh from ${REPO}@${SOURCE_REF}"
     # Fetched by the board rather than by this machine and copied over: the board is the one
     # that has to be able to reach GitHub with that token, and finding out here would prove
     # the wrong thing.
     rsh "curl -fsSL ${DUCK_TOKEN:+-H \"Authorization: Bearer ${DUCK_TOKEN}\"} '${_raw}' -o /tmp/provision.sh" \
-        || die "the board could not fetch provision.sh from ${REPO}@${REF:-main}.
-  A private repository answers 404 rather than 401, so this is either a missing DUCK_TOKEN, a
-  token without Contents:Read on the repository, or a branch name that does not exist."
+        || die "the board could not fetch provision.sh from ${REPO}@${SOURCE_REF}.
+  Check the board's network and that the branch exists. For a private override repository, also
+  check DUCK_TOKEN has Contents:Read; GitHub reports missing private access as 404, not 401."
 fi
 
 # ── phase 1, which ends in a reboot that takes the connection with it ────────
@@ -706,7 +697,6 @@ echo
 _env="DUCK_REPO='${REPO}' DUCK_TOKEN='${DUCK_TOKEN:-}'"
 [ -z "$REF" ]     || _env="${_env} DUCK_REF='${REF}'"
 [ -z "$WEIRD_BLE" ] || _env="${_env} DUCK_WEIRD_BLE=1"
-[ -z "$BOARD" ]     || _env="${_env} DUCK_BOARD=${BOARD}"
 [ -z "$PAUSE_BTD" ]  || _env="${_env} DUCK_PAUSE_BTD=1"
 [ -z "$NO_GSTREAMER" ] || _env="${_env} DUCK_GSTREAMER=0"
 [ -z "$NO_RKAIQ" ]     || _env="${_env} DUCK_RKAIQ=0"
@@ -900,7 +890,7 @@ echo
 say "provisioning finished"
 
 # The health report is the point of all of it, and it is also the thing most likely to have
-# something to say — a bench board with no servos powered reports unhealthy, correctly.
+# something to say — a bench board with no servos powered reports degraded, correctly.
 rsh "robotctl health" || warn "robotctl health did not report cleanly. On a board with no
   servos powered that is the honest answer, not a failed install. The full log is at:
     ssh -t ${HOST} 'sudo cat ${LOG}'"

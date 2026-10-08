@@ -345,7 +345,6 @@ TOML
         # unescaped pair anyway. A prose warning cannot fail a build; SC2006 can, which is why
         # this script is in the shellcheck list now.
         cat > "$STATE/updater-$name.toml" <<TOML
-hw_rev = 1
 state_dir = "$STATE/$name/updater"
 robot_socket = "$STATE/$name.sock"
 
@@ -364,7 +363,7 @@ keep_previous = 1
 
 [component.daemon.source]
 type = "github_releases"
-repo = "pollen-robotics/microduck"
+repo = "BruzWJ/BruzMicroduck"
 tag_prefix = "daemon-v"
 manifest_asset = "manifest.json"
 
@@ -850,8 +849,9 @@ rootfs() {
     say "rootfs ready ($(sudo du -sh "$ROOTFS" | cut -f1))"
 }
 
-# Everything a release puts on a board, put here by hand — this is not `robotctl update apply`, it
-# is what a board looks like *after* one, so that the units and the daemons are the real thing.
+# Put the locally built release on the board by hand, plus the independently seeded policy set —
+# this is not `robotctl update apply`, but it leaves the same filesystem boundaries so the units
+# and daemons exercise the real thing.
 stage() {
     ORT="$(find "$RL"/.venv/lib/python*/site-packages/onnxruntime/capi -name 'libonnxruntime.so*' -type f 2>/dev/null | head -1)"
     [ -n "$ORT" ] || die "no onnxruntime in $RL/.venv"
@@ -872,11 +872,13 @@ stage() {
     # a variable for the container PID 1, and systemd does not pass its own environment to the
     # services it starts.
     sudo sh -eu -c '
-        ROOTFS="$1"; REPO="$2"; ORT="$3"; PORT="$4"
+        ROOTFS="$1"; REPO="$2"; ORT="$3"; PORT="$4"; POLICIES="$5"
         REL="$ROOTFS/opt/robot/daemon/releases/sim"
-        mkdir -p "$REL/bin" "$REL/policies" "$ROOTFS/etc/systemd/system/robotd.service.d"
+        SET="$ROOTFS/opt/robot/policies/sets/sim"
+        mkdir -p "$REL/bin" "$SET" "$ROOTFS/etc/systemd/system/robotd.service.d"
         install -m755 "$REPO/target/debug/robotd" "$REPO/target/debug/robotctl" "$REL/bin/"
-        cp "$REPO"/policies/*.onnx "$REL/policies/"
+        cp -a "$POLICIES"/. "$SET/"
+        ln -sfn /opt/robot/policies/sets/sim "$ROOTFS/opt/robot/policies/current"
         ln -sfn /opt/robot/daemon/releases/sim "$ROOTFS/opt/robot/daemon/current"
         # On PATH, because the first thing anybody types after logging into a duck is `robotctl`
         # and `command not found` is a poor greeting. A symlink rather than a profile.d line: it
@@ -918,7 +920,7 @@ stage() {
         printf "root:x:0:\n" >/dev/null
         chroot "$ROOTFS" /usr/bin/passwd -d root >/dev/null 2>&1 || true
         chroot "$ROOTFS" /usr/bin/systemctl enable robotd.service tofd.service >/dev/null 2>&1 || true
-    ' _ "$ROOTFS" "$REPO" "$ORT" "$PORT"
+    ' _ "$ROOTFS" "$REPO" "$ORT" "$PORT" "$POLICIES"
 }
 
 # `boot`, `shell` and `rootfs` are systemd, and a machine without it cannot run any of them. Said
@@ -936,6 +938,7 @@ boot() {
     # changed package list from ever being noticed. It returns in a moment when nothing has changed.
     rootfs
     build_daemons
+    policies
     stage
     start_body
 

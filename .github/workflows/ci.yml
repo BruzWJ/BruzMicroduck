@@ -10,7 +10,7 @@ name: ci
 # aarch64 under QEMU *and* build the workspace under instrumentation — minutes of waiting for a
 # change that cannot affect a single one of those results.
 #
-# Safe here specifically because `main` has no required status checks. A skipped job reports no
+# Safe here specifically because `replica` has no required status checks. A skipped job reports no
 # status at all, so filtering one that *was* required leaves every docs pull request permanently
 # pending, which is worse than the wait it removes. Re-check this before turning protection on.
 #
@@ -22,7 +22,7 @@ name: ci
 # is not available here however much this asks for it. Keep the two copies identical.
 on:
   push:
-    branches: [main]
+    branches: [replica]
     paths-ignore:
       - 'docs/**'
       - '**/*.md'

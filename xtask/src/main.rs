@@ -423,6 +423,31 @@ mod tests {
         assert!(entry.contains("\"make_latest\": \"true\""));
         assert!(!entry.contains("secrets."));
         assert!(!entry.contains("cargo run -p xtask -- sign"));
+        let latest_release_check = entry
+            .split("- name: Compare selected source with the latest release")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("- name: Create or resume the draft release")
+                    .next()
+            })
+            .expect("release workflow must compare against the latest published release");
+        assert!(
+            latest_release_check.contains("gh api --include")
+                && latest_release_check.contains(r#"HTTP/*" 404 "*"#),
+            "only GitHub's no-published-release 404 may take the first-release path"
+        );
+        assert!(
+            latest_release_check.contains(r#"exit "$latest_exit""#)
+                && !latest_release_check.contains("|| true"),
+            "authentication, rate-limit, network, and server failures must stop publication"
+        );
+        assert!(
+            !entry
+                .lines()
+                .any(|line| line.trim_start().starts_with("hw_rev =")),
+            "release verification must use the build's fixed hardware revision, not restore the \
+             removed updater.toml compatibility override"
+        );
         assert!(!root.join(".github/workflows/_build-release.yml").exists());
     }
 
@@ -1906,20 +1931,182 @@ mod tests {
     fn provision_wrapper_uses_and_forwards_its_repository() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         let script = std::fs::read_to_string(root.join("scripts/provision-board.sh")).unwrap();
+        let board_script = std::fs::read_to_string(root.join("scripts/provision.sh")).unwrap();
 
         assert!(
             script.contains(r#"REPO="${DUCK_REPO:-BruzWJ/BruzMicroduck}""#),
             "provision-board.sh must default to this repository while allowing an explicit fork"
         );
         assert!(
-            script.contains(
-                r#"_raw="https://raw.githubusercontent.com/${REPO}/${REF:-main}/scripts/provision.sh""#
-            ),
-            "the first board-side script must come from the selected repository"
+            script.contains("DEFAULT_REF=replica")
+                && script.contains(r#"SOURCE_REF="${REF:-$DEFAULT_REF}""#)
+                && script.contains(
+                    r#"_raw="https://raw.githubusercontent.com/${REPO}/${SOURCE_REF}/scripts/provision.sh""#
+                ),
+            "an implicit install must fetch scripts from this fork's replica branch"
         );
         assert!(
             script.contains(r#"_env="DUCK_REPO='${REPO}' DUCK_TOKEN='${DUCK_TOKEN:-}'""#),
             "the selected repository must reach provision.sh and survive its reboot"
+        );
+        assert!(
+            script.contains(r#"[ -z "$REF" ]     || _env="${_env} DUCK_REF='${REF}'""#),
+            "only an explicit --ref may be forwarded as a development-build request"
+        );
+        assert!(
+            board_script.contains(r#"REPO="${ENV_REPO:-BruzWJ/BruzMicroduck}""#)
+                && board_script.contains(r#"REF="${ENV_REF:-replica}""#)
+                && board_script.contains(r#"ASKED_REF="$ENV_REF""#),
+            "provision.sh must default its script source without treating that default as an \
+             explicitly requested dev build"
+        );
+
+        let migrate_runner = board_script
+            .split("run_migrate() {")
+            .nth(1)
+            .and_then(|tail| tail.split("\n}").next())
+            .expect("provision.sh must have one source-preserving network migration runner");
+        assert!(
+            migrate_runner.contains(r#"DUCK_REPO="$REPO" DUCK_REF="$REF" DUCK_TOKEN="$TOKEN""#),
+            "migrate-network.sh must keep the selected source and private-repository credential \
+             when phase two resumes after the reboot"
+        );
+
+        for (name, repo_default, ref_default) in [
+            (
+                "install.sh",
+                r#"REPO="${DUCK_REPO:-BruzWJ/BruzMicroduck}""#,
+                r#"REF="${ENV_REF:-replica}""#,
+            ),
+            (
+                "setup-board.sh",
+                r#"REPO="${DUCK_REPO:-BruzWJ/BruzMicroduck}""#,
+                r#"REF="${DUCK_REF:-replica}""#,
+            ),
+            (
+                "migrate-network.sh",
+                r#"REPO="${DUCK_REPO:-BruzWJ/BruzMicroduck}""#,
+                r#"REF="${DUCK_REF:-replica}""#,
+            ),
+        ] {
+            let sibling = std::fs::read_to_string(root.join("scripts").join(name)).unwrap();
+            assert!(
+                sibling.contains(repo_default) && sibling.contains(ref_default),
+                "{name} must use the same public fork and source branch by default"
+            );
+        }
+
+        let simulator = std::fs::read_to_string(root.join("scripts/duck-sim")).unwrap();
+        assert!(
+            simulator.contains(r#"repo = "BruzWJ/BruzMicroduck""#),
+            "simulated robots must resolve releases from the same repository as physical robots"
+        );
+        assert!(
+            simulator.contains(r#"SET="$ROOTFS/opt/robot/policies/sets/sim""#)
+                && simulator.contains(
+                    r#"ln -sfn /opt/robot/policies/sets/sim "$ROOTFS/opt/robot/policies/current""#,
+                )
+                && !simulator.contains(r#"$REL/policies"#)
+                && !simulator.contains(r#"$REPO"/policies/*.onnx"#),
+            "duck-sim must stage policy artifacts as an independent policy set, not hide them in \
+             the daemon release"
+        );
+    }
+
+    /// This repository is an owned fork whose default branch is `replica`. A generic fork guard
+    /// silently skipped every dev publisher run here, while CI listened to a nonexistent `main`.
+    /// Keep the Dependabot exclusion: those pushes are dependency maintenance, not builds an
+    /// operator should install on a robot.
+    #[test]
+    fn fork_workflows_build_replica() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let ci = std::fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
+        let dev = std::fs::read_to_string(root.join(".github/workflows/dev.yml")).unwrap();
+
+        assert!(
+            ci.contains("branches: [replica]"),
+            "push CI must follow this repository's default branch"
+        );
+        assert!(
+            !dev.contains("!github.event.repository.fork")
+                && dev.contains("github.actor != 'dependabot[bot]'"),
+            "this maintained fork must publish dev builds while Dependabot remains excluded"
+        );
+    }
+
+    /// Options selected before the mandatory reboot must still govern phase two. `--no-rkaiq`
+    /// once vanished at that seam while the adjacent GStreamer option survived, so the resumed
+    /// service installed camera tuning the operator had explicitly disabled.
+    #[test]
+    fn provisioning_persists_optional_camera_setup_across_reboot() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let script = std::fs::read_to_string(root.join("scripts/provision.sh")).unwrap();
+
+        for (knob, value, load) in [
+            (
+                "DUCK_GSTREAMER",
+                "GSTREAMER",
+                r#"GSTREAMER="${ENV_GSTREAMER:-${DUCK_GSTREAMER:-1}}""#,
+            ),
+            (
+                "DUCK_RKAIQ",
+                "RKAIQ",
+                r#"RKAIQ="${ENV_RKAIQ:-${DUCK_RKAIQ:-1}}""#,
+            ),
+        ] {
+            assert!(
+                script.contains(&format!("kv {knob} \"${value}\"")),
+                "save_state must persist {knob} before reboot"
+            );
+            assert!(
+                script.contains(load),
+                "load_state must restore {knob} when phase two resumes"
+            );
+        }
+    }
+
+    /// The narrow Bluetooth workaround is deliberately independent from `--weird-ble`.
+    /// The laptop wrapper already forwarded it, but provision.sh once dropped it before the
+    /// first setup-board run and never saved it for the run after reboot. The command appeared to
+    /// succeed while `robotctl pad pair` had no marker telling it to pause btd.
+    #[test]
+    fn provisioning_carries_the_btd_pause_decision_across_reboot() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let script = std::fs::read_to_string(root.join("scripts/provision.sh")).unwrap();
+
+        for required in [
+            r#"ENV_PAUSE_BTD="${DUCK_PAUSE_BTD:-}""#,
+            r#"kv DUCK_PAUSE_BTD "$PAUSE_BTD""#,
+            r#"PAUSE_BTD="${ENV_PAUSE_BTD:-${DUCK_PAUSE_BTD:-}}""#,
+        ] {
+            assert!(
+                script.contains(required),
+                "provision.sh must preserve {required:?}"
+            );
+        }
+        assert_eq!(
+            script.matches(r#"DUCK_PAUSE_BTD="$PAUSE_BTD""#).count(),
+            3,
+            "both setup-board phases, including phase two's fetch fallback, need the decision"
+        );
+    }
+
+    /// Missing hardware is a board condition, not evidence that the daemon release is broken.
+    /// `robotd` deliberately reports it as degraded so a bench board can still take the release;
+    /// the setup script is the first diagnosis a blank-board operator sees and must use the same
+    /// verdict rather than tell them the update gate will roll it back.
+    #[test]
+    fn setup_board_calls_missing_openrb_degraded() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let script = std::fs::read_to_string(root.join("scripts/setup-board.sh")).unwrap();
+
+        assert!(
+            script.contains("fail to open the bus, and report degraded until it appears"),
+            "setup-board.sh must agree with robotd's missing-hardware health verdict"
+        );
+        assert!(
+            !script.contains("fail to open the bus, and report unhealthy until it appears"),
+            "missing hardware must not be described as a release-gating failure"
         );
     }
 }
