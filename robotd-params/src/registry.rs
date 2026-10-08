@@ -100,12 +100,6 @@ const fn feature(key: &'static str, kind: Kind, doc: &'static str) -> Entry {
 
 /// Every key, grouped by section, sections in the shipped file's order.
 pub const REGISTRY: &[Entry] = &[
-    // ── [board] ──────────────────────────────────────────────────────────────
-    entry(
-        "board.version",
-        Kind::Choice(crate::board::BOARD_LABELS),
-        "Which electronic board this robot is built on — set when it is provisioned",
-    ),
     // ── [bus] ────────────────────────────────────────────────────────────────
     entry(
         "bus.port",
@@ -419,7 +413,7 @@ pub const REGISTRY: &[Entry] = &[
     feature(
         "head_imu.enabled",
         Kind::Bool,
-        "Read the head IMU — default off on zero3's shared Qwiic bus, on on beta's face board",
+        "Read the Qwiic head IMU — off by default",
     ),
     // ── [audio] ──────────────────────────────────────────────────────────────
     feature(
@@ -482,11 +476,6 @@ pub const REGISTRY: &[Entry] = &[
         Kind::Choice(crate::CONGESTION_LABELS),
         "Adapt the send rate to the link — disabled costs adaptivity and saves a core's worth",
     ),
-    entry(
-        "media.sensor",
-        Kind::Choice(crate::MEDIA_SENSOR_LABELS),
-        "Head camera sensor — board follows the declared board; naming one forces it",
-    ),
     // ── [pad] ────────────────────────────────────────────────────────────────
     //
     // Which button runs which skill. Read by `padd`, not by `robotd` — but it lives in the same
@@ -546,21 +535,6 @@ pub const REGISTRY: &[Entry] = &[
         Kind::Float,
         "Full turn right, rad/s — negative",
     ),
-];
-
-/// Sections that changed name: `(old, new)`.
-///
-/// The loader takes the old name through a `#[serde(alias)]` on the field, so a file written
-/// before the rename keeps loading; the editor (`edit.rs`) carries the section to its new name so
-/// its next save cannot leave both in one file, which the loader refuses as a duplicate. Listed
-/// here, beside the registry, because the coverage test below has to know an alias is not a
-/// section of its own — serde names aliases in its "unknown field" message like any other field.
-pub const RENAMED_SECTIONS: &[(&str, &str)] = &[
-    // The pad's IMU steering the head, a letter-swap away from `head_imu` — the IMU *in* the
-    // head. Renamed 2026-09 for that reason alone.
-    ("imu_head", "pad_imu_head_control"),
-    // "detect" read as "detect what?" in the editor. Renamed 2026-09 for the thing it detects.
-    ("detect", "duck_detector"),
 ];
 
 /// The registry entry for a key, if it is one.
@@ -625,8 +599,6 @@ mod tests {
             .skip(1)
             .step_by(2)
             .filter(|name| *name != "__no_such_section__")
-            // An old name is an alias for a section already in this list, not a section.
-            .filter(|name| !RENAMED_SECTIONS.iter().any(|(old, _)| old == name))
             .map(str::to_owned)
             .collect();
         // A sanity anchor so a serde message change cannot pass vacuously: the sections this

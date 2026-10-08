@@ -2704,20 +2704,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27b02d87554356db9e9a873add8782d4ea6e3e58ea071a9adb9a2e8ddb884a8b"
 
 [[package]]
-name = "nfc"
-version = "0.16.1"
-dependencies = [
- "clap",
- "duck-ipc-proto",
- "libc",
- "robotd-params",
- "serde",
- "serde_json",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "nix"
 version = "0.26.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3637,7 +3623,6 @@ version = "0.16.1"
 dependencies = [
  "duck-ipc-proto",
  "kinematics",
- "semver",
  "serde",
  "serde_json",
  "tempfile",

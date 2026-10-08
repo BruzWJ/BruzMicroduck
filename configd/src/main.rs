@@ -250,8 +250,6 @@ async fn main() -> ExitCode {
     };
     tracing::info!(serial = ?serial, %default_name, simulated, "identity");
 
-    tokio::spawn(configd::indicator::run(Arc::clone(&net)));
-
     let service = Arc::new(Service {
         net,
         pads,

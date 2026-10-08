@@ -438,11 +438,10 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// reboot instead of a power-off. The pad's held Select, released before the power-off threshold.
 /// A new route: a `robotd` predating it answers METHOD_NOT_FOUND, by name.
 ///
-/// # v40 — `robot.flashlight`
+/// # v40 — `robot.flashlight` (retired in v43)
 ///
-/// [`method::ROBOT_FLASHLIGHT`]: the beta board's RGB LED as a flashlight, on, off or toggled, in
-/// one of the seven colours three on/off channels make. The pad's Home button toggles it. A new
-/// route: a `robotd` predating it answers METHOD_NOT_FOUND, by name.
+/// The custom face-board light route was introduced here. v43 removes that hardware and the
+/// route with it; this entry remains so the version history records what a v40–v42 peer may send.
 ///
 /// # v41 — an IMU board that does not answer, while the bus is coming up
 ///
@@ -461,7 +460,13 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// remain available through [`Target::Exact`] and [`Target::Ref`].
 /// Install this as a full daemon release: the resident `updaterd` is restarted after its apply
 /// reply, and an older client or daemon logs a version skew while serving supported routes.
-pub const API_VERSION: u32 = 42;
+///
+/// # v43 — off-the-shelf replica hardware only
+///
+/// The custom beta-board routes were removed. `robot.flashlight` no longer exists; the Qwiic head
+/// IMU has one owner (`tofd`) and one endpoint. Install this as a full daemon release so clients,
+/// transports and daemons agree on the removed route.
+pub const API_VERSION: u32 = 43;
 
 /// The observation width every policy this robot family runs is built against.
 ///
@@ -495,8 +500,6 @@ pub const ROBOT_MODEL: &str = "microduck";
 pub const UPDATE_MAX_SILENCE_SECONDS: u64 = 600;
 
 pub const DEFAULT_SOCKET: &str = "/run/updaterd.sock";
-
-pub mod led;
 
 /// Where each service listens by default.
 ///
@@ -730,9 +733,6 @@ pub mod method {
     /// is diagnostics, not danger), but "accepted" from a robot that cannot make a sound
     /// would make `robotctl quack` lie about which duck answered.
     pub const ROBOT_SOUND: &str = "robot.sound";
-    /// Switch the flashlight — the face's RGB LED — on, off, or over, in a colour. Discrete; send
-    /// as a request. Refused, with a reason, by a board without one (the Zero 3W, the simulator).
-    pub const ROBOT_FLASHLIGHT: &str = "robot.flashlight";
     /// Pick the ToF theremin up, or put it down: the head's depth sensor becomes an
     /// instrument, and the distance of a hand in front of the beak is the pitch — and the
     /// mouth opening, which rises with it, so the note is visible as well as audible.
@@ -962,9 +962,8 @@ pub mod method {
     /// One 8×8 depth frame, pushed after [`TOF_STREAM`].
     pub const TOF_FRAME: &str = "tof.frame";
 
-    /// Subscribe to the head IMU. `tofd` serves the Qwiic LSM6DSV16X, while `robotd` serves
-    /// the beta face-board IMU. The answer describes the sensor, then [`HEAD_IMU_FRAME`]
-    /// notifications arrive until the connection closes.
+    /// Subscribe to the Qwiic head LSM6DSV16X served by `tofd`. The answer describes the sensor,
+    /// then [`HEAD_IMU_FRAME`] notifications arrive until the connection closes.
     pub const HEAD_IMU_STREAM: &str = "head_imu.stream";
 
     /// One head-IMU sample, pushed after [`HEAD_IMU_STREAM`].
@@ -1080,8 +1079,6 @@ pub enum Call {
     RobotMouth(MouthParams),
     /// Play a voice-bank sound.
     RobotSound(SoundParams),
-    /// Switch the flashlight. See [`method::ROBOT_FLASHLIGHT`].
-    RobotFlashlight(FlashlightParams),
     /// Pick the ToF theremin up or put it down. Discrete; the answer is [`ThereminResult`].
     RobotTheremin(ThereminParams),
     /// Start or stop looking for other ducks to sing with. Discrete; the answer is
@@ -1261,7 +1258,6 @@ impl Call {
             Call::RobotPose(_) => method::ROBOT_POSE,
             Call::RobotMouth(_) => method::ROBOT_MOUTH,
             Call::RobotSound(_) => method::ROBOT_SOUND,
-            Call::RobotFlashlight(_) => method::ROBOT_FLASHLIGHT,
             Call::RobotTheremin(_) => method::ROBOT_THEREMIN,
             Call::RobotChorale(_) => method::ROBOT_CHORALE,
             Call::ChoraleSubscribe => method::CHORALE_SUBSCRIBE,
@@ -1446,7 +1442,6 @@ impl Call {
             | Call::RobotPose(_)
             | Call::RobotMouth(_)
             | Call::RobotSound(_)
-            | Call::RobotFlashlight(_)
             | Call::RobotTheremin(_)
             | Call::RobotChorale(_)
             | Call::RobotSetMode(_)
@@ -1563,7 +1558,6 @@ impl Call {
             Call::PolicySearch(p) => encode(p),
             Call::AccountLogin(p) => encode(p),
             Call::RobotSound(p) => encode(p),
-            Call::RobotFlashlight(p) => encode(p),
             Call::RobotTheremin(p) => encode(p),
             Call::RobotChorale(p) => encode(p),
             Call::ChoraleBeaconSet(p) => encode(p),
@@ -1656,7 +1650,6 @@ impl Call {
             method::ROBOT_POSE => Call::RobotPose(decode(params)?),
             method::ROBOT_MOUTH => Call::RobotMouth(decode(params)?),
             method::ROBOT_SOUND => Call::RobotSound(decode(params)?),
-            method::ROBOT_FLASHLIGHT => Call::RobotFlashlight(decode(params)?),
             method::ROBOT_THEREMIN => Call::RobotTheremin(decode(params)?),
             method::ROBOT_CHORALE => Call::RobotChorale(decode(params)?),
             method::CHORALE_SUBSCRIBE => Call::ChoraleSubscribe,
@@ -1820,11 +1813,6 @@ pub mod test_support {
             Call::RobotSound(SoundParams {
                 tag: SoundTag::Chirp,
                 hold: None,
-            }),
-            Call::RobotFlashlight(FlashlightParams {
-                on: true,
-                toggle: false,
-                color: FlashlightColor::Cyan,
             }),
             Call::RobotShutdown,
             Call::RobotMode,
@@ -2291,46 +2279,6 @@ pub struct SoundParams {
     /// so a client that dies mid-ride does not leave the robot going "wheee" forever.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hold: Option<bool>,
-}
-
-/// What the flashlight shows: the seven colours its three on/off channels make.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FlashlightColor {
-    #[default]
-    White,
-    Red,
-    Green,
-    Blue,
-    Yellow,
-    Cyan,
-    Magenta,
-}
-
-impl FlashlightColor {
-    /// Which of the red, green and blue channels are lit.
-    pub fn channels(self) -> [bool; 3] {
-        match self {
-            FlashlightColor::White => [true, true, true],
-            FlashlightColor::Red => [true, false, false],
-            FlashlightColor::Green => [false, true, false],
-            FlashlightColor::Blue => [false, false, true],
-            FlashlightColor::Yellow => [true, true, false],
-            FlashlightColor::Cyan => [false, true, true],
-            FlashlightColor::Magenta => [true, false, true],
-        }
-    }
-}
-
-/// See [`method::ROBOT_FLASHLIGHT`]. Shaped like [`EnableParams`]: `toggle` wins over `on`, so a
-/// button that does not know the light's state can still flip it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct FlashlightParams {
-    pub on: bool,
-    pub toggle: bool,
-    /// The colour it lights in. Ignored when the call switches it off.
-    pub color: FlashlightColor,
 }
 
 /// See [`method::ROBOT_THEREMIN`].
@@ -2886,9 +2834,9 @@ pub struct SubscribeParams {
 #[serde(default)]
 pub struct SubscribeResult {
     pub accepted: bool,
-    /// Walking policy, as a file name rather than a path: the directory is the release
-    /// directory, which `robotctl version` already reports, and the file name is the part
-    /// that differs between two builds someone is comparing.
+    /// Walking policy, as a file name rather than a host path. Official defaults, community
+    /// downloads and local overrides can live in different directories; the file name is the
+    /// useful part when comparing two controllers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub walk: Option<String>,
     /// Standing policy, when one is configured. Without it the walking policy runs at every
@@ -2897,8 +2845,9 @@ pub struct SubscribeResult {
     pub stand: Option<String>,
     /// Why nothing is driving, when nothing is: the policy is disabled in params, or it was
     /// wanted and could not be loaded. Those are different situations — the first is a
-    /// legitimate bench configuration, the second is a robot that should be rolled back —
-    /// and both are invisible in a stream whose `policy` field just says `held`.
+    /// legitimate bench configuration, while health distinguishes an absent official set from a
+    /// broken installed one — and both are invisible in a stream whose `policy` field just says
+    /// `held`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unavailable: Option<String>,
     /// The skill networks this process loaded, as file names, same reasoning as `walk`.
@@ -3972,8 +3921,6 @@ pub struct FramesState {
     /// +Z-up axes; this pose (sensor→trunk, from the same head FK) follows the articulated head
     /// and rotates them into the trunk/camera frame. Absent from a daemon predating it. (v24)
     ///
-    /// The pose describes the Qwiic head mount. A beta face board needs its own mount in the
-    /// kinematic model before this pose describes its IMU.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_imu: Option<PoseState>,
 }
@@ -4511,7 +4458,8 @@ pub struct SkillParams {
     /// Servo gain relative to the gait's, when this skill wants its own.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gain_ratio: Option<f64>,
-    /// Read-only: whether config has an opinion about this skill, or it is one the release ships.
+    /// Read-only: whether config has an opinion about this skill, or the installed official set
+    /// declares it.
     /// Ignored on the way in — a client cannot make a built-in an override by saying so.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub overridden: bool,
@@ -4953,8 +4901,7 @@ pub struct HeadImuStreamResult {
 
 /// One head-IMU sample — a [`method::HEAD_IMU_FRAME`] notification.
 ///
-/// The Qwiic LSM6DSV16X is read by `tofd`; a beta face-board IMU may be read by `robotd`.
-/// Samples use each chip's sensor axes. On the Qwiic board these are +X forward, +Y left, +Z up
+/// The Qwiic LSM6DSV16X is read by `tofd`. Samples use its +X-forward, +Y-left, +Z-up axes,
 /// and coincide with the neutral head/trunk convention. The head articulates; use
 /// [`FramesState::head_imu`] to place a sample in the trunk/camera frame when its mount matches
 /// the board. This is distinct from the body IMU at address `0x6b` on the Qwiic adapter.
@@ -5712,7 +5659,7 @@ mod tests {
     fn every_call_covers_every_variant() {
         assert_eq!(
             every_call().len(),
-            69,
+            68,
             "a Call variant was added or removed — update every_call() and this count"
         );
     }

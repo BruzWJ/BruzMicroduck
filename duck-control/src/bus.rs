@@ -276,13 +276,6 @@ impl DynamixelIo {
         })
     }
 
-    /// The body IMU's sensor→trunk mount, which is the robot's ([`SflpDecoder::DEFAULT_MOUNT`]
-    /// for a `zero3`, [`SflpDecoder::BETA_MOUNT`] for a `beta`). Starts the decoder afresh, so
-    /// call it right after [`Self::open`], before the first read.
-    pub fn set_imu_mount(&mut self, mount: [f64; 4]) {
-        self.imu = SflpDecoder::new(mount);
-    }
-
     /// Effective SFLP rate after rounding the control rate to a supported sensor rung.
     pub fn body_imu_rate_hz(&self) -> u16 {
         self.body_imu.rate_hz()

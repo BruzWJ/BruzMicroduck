@@ -34,7 +34,6 @@
 //! D-pad right     head + move — left stick walks and turns, right stick looks around
 //! D-pad left      move — the sticks walk, strafe and turn
 //! D-pad down      body + head — left stick crouches and leans sideways, right stick looks around
-//! Home            flashlight on / off (a board with one)
 //! Start           first press stands up, then toggles the policy
 //! Start, 1.5 s    home pose, motors stiff, policy off — a seated robot stays seated
 //! Select, 2–4 s   let go: sit, rest pose, then torque off and every servo rebooted
@@ -632,7 +631,6 @@ fn main() -> std::process::ExitCode {
         let mut pressed: Vec<&'static str> = Vec::new();
         let mut start_released = false;
         let mut select_released = false;
-        let mut flashlight = false;
         while let Some(event) = gilrs.next_event() {
             if Some(event.id) != pad_id {
                 continue;
@@ -660,8 +658,6 @@ fn main() -> std::process::ExitCode {
                     Button::DPadRight => wanted_mode = Some(Mode::HeadDrive),
                     Button::DPadLeft => wanted_mode = Some(Mode::Drive),
                     Button::DPadDown => wanted_mode = Some(Mode::BodyPose),
-                    // Home. Not bindable: it is not a skill, and the robot owns the toggle.
-                    Button::Mode => flashlight = true,
                     _ => {}
                 },
                 _ => {}
@@ -885,21 +881,6 @@ fn main() -> std::process::ExitCode {
                 tracing::error!(error = %e, "skill request failed");
                 return std::process::ExitCode::FAILURE;
             }
-        }
-
-        // A request, so a board without a flashlight says so in the journal rather than not at all.
-        if flashlight
-            && let Err(e) = request(
-                &mut stream,
-                &mut next_id,
-                &proto::Call::RobotFlashlight(proto::FlashlightParams {
-                    toggle: true,
-                    ..Default::default()
-                }),
-            )
-        {
-            tracing::error!(error = %e, "flashlight request failed");
-            return std::process::ExitCode::FAILURE;
         }
 
         // X held: keep a chaining skill going. The robot starts another when a request lands

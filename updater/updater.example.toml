@@ -8,12 +8,6 @@
 # robot; this one documents every option, including several deliberately absent there.
 # Where the two differ, the difference is the point — read the comments in both.
 
-# The hardware revision a release's `min_hw_rev` is checked against. Unset, it is
-# the board `/etc/robot/robotd.toml` declares (`[board] version`: zero3 is 1, beta
-# is 2), which is how a shipped robot should have it. One integer and not a
-# capability matrix (§5.6).
-# hw_rev = 1
-
 # Engine-owned state: lock, update log, boot counter.
 # MUST NOT live inside any component's install_dir — a swap or rollback would
 # otherwise destroy the record of what happened (§5.7).
@@ -140,11 +134,11 @@ probe   = "socket"
 timeout = "30s"
 
 
-# ── models ────────────────────────────────────────────────────────────────────
-# One component per model, because each is versioned independently and all of them
-# are loaded at once (walk, jump, stand, …). A component is exactly "a thing with its
-# own version line", so no special layout is needed — each gets its own rollback,
-# golden, pin, boot trial and known-bad history for free.
+# ── hypothetical model components ─────────────────────────────────────────────
+# These entries demonstrate the generic HF source and reload action; they are not this robot's
+# control policies. Those version together as one set and use the policy channel instead. A future
+# independently versioned model can be an updater component and gets its own rollback, golden,
+# pin, boot trial and known-bad history.
 #
 # `reload` rather than `restart` so swapping weights does not interrupt motor
 # control (§5.5).

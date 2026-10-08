@@ -20,12 +20,8 @@ typedef struct
 {
     /* 8-bit I2C address (7-bit << 1), the format the ULD expects. */
     uint16_t address;
-    /* Open file descriptor on /dev/i2c-N, or on /dev/spidevB.C when `spi` is set. */
+    /* Open file descriptor on /dev/i2c-N. */
     int fd;
-    /* 1: the descriptor is a spidev and `address` is unused. Only the VL53L8CX has
-     * an SPI interface; the field is in both structs because ../platform.c is one
-     * implementation compiled against either. */
-    uint8_t spi;
 } VL53L5CX_Platform;
 
 #define VL53L5CX_NB_TARGET_PER_ZONE 1U

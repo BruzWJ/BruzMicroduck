@@ -43,8 +43,7 @@
 //! # Every number above is the IMX219's
 //!
 //! The field of view and the family solve belong to a sensor behind a lens, so they live on its
-//! [`Sensor`] entry rather than here. A sensor with neither — the beta board's GC2093, until someone
-//! calibrates it — publishes no geometry unless the robot carries its own `[media.intrinsics]`.
+//! [`Sensor`] entry rather than here.
 
 use crate::sensor::Sensor;
 
@@ -274,7 +273,7 @@ impl Intrinsics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sensor::{GC2093, IMX219};
+    use crate::sensor::IMX219;
 
     fn measured(width: u32, height: u32) -> robotd_params::CameraIntrinsics {
         robotd_params::CameraIntrinsics {
@@ -361,26 +360,6 @@ mod tests {
     fn an_unknown_sensor_mode_yields_no_intrinsics() {
         assert!(Intrinsics::nominal(None, 1280, 720).is_none());
         assert!(Intrinsics::published(None, None, 1280, 720).is_none());
-    }
-
-    /// **A sensor nobody has measured publishes nothing either**, even in its pinned mode: the
-    /// IMX219's 62° and its family solve describe another lens, and borrowing them would be a
-    /// plausible geometry that is wrong.
-    #[test]
-    fn an_uncalibrated_sensor_borrows_no_other_lens() {
-        assert!(Intrinsics::nominal(Some(&GC2093), 1280, 720).is_none());
-        assert!(Intrinsics::family(Some(&GC2093), 1280, 720).is_none());
-        assert!(Intrinsics::published(None, Some(&GC2093), 1280, 720).is_none());
-    }
-
-    /// And a robot that has calibrated its own GC2093 publishes that, which is how a beta board
-    /// gets geometry before there is a family solve.
-    #[test]
-    fn a_robot_calibration_serves_a_sensor_with_no_family() {
-        let published = Intrinsics::published(Some(&measured(1280, 720)), Some(&GC2093), 1280, 720)
-            .expect("the robot's own solve");
-        assert_eq!(published.source, Source::Robot);
-        assert_eq!(published.fx, 1800.0);
     }
 
     /// A frame whose aspect ratio is not the mode's has been cropped or squashed on the way out,

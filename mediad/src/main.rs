@@ -94,14 +94,12 @@ struct Args {
     #[arg(long, default_value = "/dev/video0")]
     camera_device: String,
 
-    /// Sensor exposure in lines and analogue gain, in the sensor's own units — 256 is 1x on the
-    /// IMX219, 64 on the GC2093.
+    /// Sensor exposure in lines and analogue gain, in IMX219 units — 256 is 1x.
     ///
     /// The starting values only: with the driver's boot values the picture is black rather than
     /// merely dark, so something must write the sensor before the first frame. On a board where
     /// `scripts/setup-rkaiq.sh` installed the 3A engine, it converges exposure from here; on one
-    /// where it did not, these are what the camera keeps. Unset is the sensor's own starting point
-    /// (`mediad::sensor`): the same picture on every sensor, which one number in one unit is not.
+    /// where it did not, these are what the camera keeps. Unset uses the IMX219 starting point.
     #[arg(long)]
     exposure: Option<u32>,
 
@@ -110,8 +108,8 @@ struct Args {
 
     /// How far the camera is mounted from upright, clockwise: 0, 90, 180 or 270.
     ///
-    /// **The board's mount by default** (`Board::camera_mount_degrees`): 90 on the Zero 3W, whose
-    /// head camera is mounted a quarter turn off, and 0 on the beta, whose camera is upright. It no longer means "rotate the pixels": it is told to
+    /// **90° by default** on the Zero 3W, whose head camera is mounted a quarter turn off. It does
+    /// not mean "rotate the pixels": it is told to
     /// whoever displays the video, and they rotate for free — the console with a CSS transform on
     /// the GPU. Rotating here cost 145% of a core and 22 fps; `pipeline::Rotation` has the numbers.
     ///
@@ -230,25 +228,14 @@ fn main() -> ExitCode {
         .clone()
         .unwrap_or_else(mediad::config::default_path);
     let params = mediad::config::load(&config, explicit);
-    // Which sensor the head camera must be: the board's, unless `[media] sensor` forces one.
-    // Whether the board was *declared* is read on its own, because an unset key parses as zero3
-    // and the refusal on a beta that never declared itself should say that, not "wrong camera".
-    let expected = mediad::sensor::Expected::new(
-        params.media.sensor,
-        params.board.version,
-        robotd_params::board::Board::declared(&config).is_some(),
-    );
     // Refused before anything starts: a bad angle is a typo on a command line, and the daemon
     // should say so rather than opening a camera first.
     // Validated even when the pipeline will not use it, because it is still what every consumer is
     // told about the mount — a typo should not reach the console as a rotation nobody can apply.
-    // The board's mount whatever the source: a quarter turn on the Zero 3W, upright on the beta
-    // (`Board::camera_mount_degrees`). The *simulated* camera is rolled like the Zero 3W's on
-    // purpose, and a twin declares no board, so a frame from a duck in MuJoCo needs the same turn
-    // as a frame from a duck on the desk. Overridable, because a scene could mount it differently.
-    let rotate = args
-        .rotate
-        .unwrap_or_else(|| params.board.version.camera_mount_degrees());
+    // The IMX219 mount is a quarter turn on the Zero 3W. The simulated camera is rolled the same
+    // way on purpose, so a frame from a duck in MuJoCo needs the same turn as one on the desk.
+    // Overridable because a scene could mount it differently.
+    let rotate = args.rotate.unwrap_or(90);
     let mount = match mediad::pipeline::Rotation::from_degrees(rotate) {
         Ok(rotation) => rotation,
         Err(e) => {
@@ -415,7 +402,6 @@ fn main() -> ExitCode {
                         device: args.camera_device.clone(),
                         exposure: args.exposure,
                         analogue_gain: args.analogue_gain,
-                        expected,
                     })
                 }
                 robotd_params::MediaSource::Test => mediad::pipeline::Source::Test,
@@ -442,7 +428,7 @@ fn main() -> ExitCode {
         // `get_frame` surface in `architecture.md` §5.3 is what the rest of it is for. The branch
         // runs from the start rather than being added later, because a tee inserted into a live
         // pipeline is a different and much harder problem than a tee that was always there.
-        let (_pipeline, mut channels, frames, stream_branch, peers) = match mediad::pipeline::start(
+        let (_pipeline, mut channels, frames, stream_branch) = match mediad::pipeline::start(
             source.clone(),
             &producer,
             &settings,
@@ -630,13 +616,6 @@ fn main() -> ExitCode {
             rotate,
             &args.token,
         ));
-
-        // The camera LED, for as long as the pipeline lives. A crashed mediad leaves it as it was;
-        // `ExecStopPost` in the unit switches it off.
-        {
-            let streamer = std::sync::Arc::clone(&streamer);
-            tokio::spawn(mediad::indicator::run(peers, move || streamer.is_streaming()));
-        }
 
         let media = mediad::session::Media {
             video: video.clone(),

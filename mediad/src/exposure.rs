@@ -505,7 +505,7 @@ fn read_exposure(device: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sensor::{GC2093, IMX219};
+    use crate::sensor::IMX219;
 
     fn frame(luma: u8) -> Frame {
         // UYVY, so half the bytes are chroma; they are set to something that would be a *different*
@@ -754,29 +754,5 @@ mod tests {
             "settled at {settled:.0} after {steps} steps"
         );
         assert!(steps < 30, "took {steps} steps to settle");
-    }
-
-    /// The GC2093 writes gain in 64ths. The loop has to speak that: 4x is 256 there, and an IMX219
-    /// number written to it would be 16x — a picture blown out before the first frame is metered.
-    #[test]
-    fn the_gc2093_is_steered_in_its_own_units() {
-        let limits = GC2093.exposure;
-        let mut ae = Ae::starting_at(limits, limits.start_lines, limits.start_gain());
-        assert_eq!(ae.controls().analogue_gain, 256, "4x, in 64ths");
-
-        for _ in 0..200 {
-            ae.step(1.0);
-        }
-        let pinned = ae.controls();
-        assert_eq!(pinned.exposure as f64, limits.hard_lines, "{pinned:?}");
-        assert!(pinned.exposure < 1121, "inside the frame the driver offers");
-        assert_eq!(pinned.analogue_gain, 11 * 64, "11x, in 64ths");
-        assert!(ae.at_ceiling(pinned));
-
-        // And from the dimmest state, the shutter is spent first and the gain stays at 1x.
-        let mut ae = Ae::starting_at(limits, 4, limits.unity_gain);
-        let step = ae.step(2.0).expect("a step");
-        assert!(step.exposure as f64 <= limits.soft_lines);
-        assert_eq!(step.analogue_gain, 64);
     }
 }

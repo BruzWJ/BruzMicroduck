@@ -203,7 +203,6 @@ impl Fixture {
     fn engine(&self) -> Engine {
         let config = Config::from_toml(&format!(
             r#"
-hw_rev = 1
 state_dir = "{state}"
 robot_socket = "{socket}"
 

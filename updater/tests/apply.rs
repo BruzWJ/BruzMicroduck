@@ -268,7 +268,6 @@ impl Fixture {
     fn config(&self, extra: &str) -> Config {
         Config::from_toml(&format!(
             r#"
-hw_rev = 1
 state_dir = "{state}"
 
 [component.daemon]
@@ -541,8 +540,8 @@ async fn component_guard_apply_accepts_installed_over_budget_release() {
     assert_eq!(fx.staging_leftovers(), 0);
 }
 
-/// A signed release can still be unsuitable for a particular component. Checking and applying
-/// independently must both refuse it, before trying to fetch the artifact.
+/// A hash-verified release can still be unsuitable for a particular component. Checking and
+/// applying independently must both refuse it, before trying to fetch the artifact.
 #[tokio::test]
 async fn component_guard_refuses_over_budget_manifest_in_check_and_apply() {
     let fx = Fixture::new();

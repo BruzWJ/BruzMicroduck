@@ -1992,7 +1992,7 @@ impl Engine {
     /// [`crate::manifest::Compatibility`].
     async fn capabilities(&self) -> Capabilities {
         Capabilities {
-            hw_rev: self.config.hw_rev(),
+            hw_rev: robotd_params::board::HW_REV,
             model_api: self.robot.model_api(ROBOT_QUERY_TIMEOUT).await,
             schema_version: SUPPORTED_SCHEMA_VERSION,
         }

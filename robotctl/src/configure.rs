@@ -98,9 +98,6 @@ fn apply_for(key: &str) -> Option<Apply> {
     let (section, name) = key.split_once('.')?;
     Some(match section {
         "media" | "duck_detector" => Apply::Restart("mediad"),
-        // `updaterd` reads the board before every check, for the hardware revision a release is
-        // checked against (`robotd_params::board::Board::declared`). Nothing else reads it yet.
-        "board" => Apply::Live("updaterd"),
         // `padd` stats the file once a second and re-reads both of its sections when the mtime
         // moves — `padd/src/main.rs`, where the reload is a line above `tap.imu_control()` and
         // says why it is on every tick. So there is nothing to offer, and offering a restart
@@ -110,13 +107,8 @@ fn apply_for(key: &str) -> Option<Apply> {
         //
         // `pad_imu_head_control` is the *controller's* IMU steering the head. Not `head_imu` below.
         "pad" | "pad_imu_head_control" | "pad_drive" => Apply::Live("padd"),
-        // Whichever daemon reads this board's head IMU, once, at startup: `tofd` for the
-        // `zero3`'s BMI088 (it shares the HAT's bus with the ToF; `tof/src/config.rs` says why
-        // it reads robotd's file), `robotd` for the `beta`'s LSM6DSV16X. The board is the
-        // hardware this editor is running on, which is the one whose daemon has to restart.
-        "head_imu" => Apply::Restart(robotd_params::HeadImuParams::reader(
-            robotd_params::board::Board::detected().unwrap_or_default(),
-        )),
+        // `tofd` owns the shared Qwiic head sensors and reads this section at startup.
+        "head_imu" => Apply::Restart("tofd"),
         // `[policy]` is the one section a running daemon takes back: `PolicyChange::Reload`
         // re-reads it whole and rebuilds the controller from it, which is how `robotctl policy
         // add` lands a skill without a restart. Two keys are not in that promise:

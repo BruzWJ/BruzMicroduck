@@ -791,7 +791,6 @@ impl Server {
             | Call::RobotRest
             | Call::RobotDo(_)
             | Call::RobotSound(_)
-            | Call::RobotFlashlight(_)
             | Call::RobotPose(_)
             | Call::RobotMouth(_)
             | Call::RobotTheremin(_)
@@ -866,7 +865,7 @@ impl Server {
                 Some(id),
                 proto::Error::new(
                     proto::code::METHOD_NOT_FOUND,
-                    "tof.stream is served by tofd, on /run/tofd/tof.sock; head_imu.stream by tofd on a zero3 and by robotd (/run/robotd.sock) on a beta",
+                    "tof.stream and head_imu.stream are served by tofd, on /run/tofd/tof.sock",
                 ),
             ),
 
