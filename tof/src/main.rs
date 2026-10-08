@@ -272,9 +272,9 @@ async fn main() -> std::process::ExitCode {
     let imu_status = Arc::new(ImuStatus::new(args.imu_hz));
     let (imu_frames, _) = tokio::sync::broadcast::channel(imu::FRAME_BUFFER);
     let config_path = args.config.clone().unwrap_or_else(config::default_path);
-    let configured = config::load(&config_path, args.config.is_some())
-        .head_imu
-        .enabled;
+    let params = config::load(&config_path, args.config.is_some());
+    let configured = matches!(params.board.version, robotd_params::board::Board::Zero3)
+        && params.head_imu.enabled_on(params.board.version);
     let wanted = args.imu || (configured && !args.no_imu);
     let imu_thread = if !wanted || args.fake || args.sim.is_some() {
         // Said out loud, and said by the stream too: a subscriber gets this sentence instead of
