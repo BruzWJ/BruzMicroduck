@@ -9,9 +9,7 @@
 # fact, and where the two files disagree the example's comments explain the option while
 # this file's comment explains the choice.
 
-# No `hw_rev`: the robot's hardware revision is the board /etc/robot/robotd.toml declares
-# (`[board] version`), so a board is declared in one place. Robots installed before that
-# carry `hw_rev = 1` here, which is the same answer for the board they are.
+# Release compatibility is fixed by this build to the supported Zero 3W hardware revision (1).
 
 # Outside every `install_dir`, so the record of what happened survives the swap or
 # rollback it is recording (§5.7).
@@ -82,7 +80,7 @@ keep_previous = 1
 required_files = [
     "bin/updaterd", "bin/robotctl", "bin/robotd", "bin/configd", "bin/btd",
     "bin/padd", "bin/mediad", "bin/sounds", "bin/pet-detect", "bin/pet-features",
-    "bin/tofd", "bin/nfcd",
+    "bin/tofd",
 ]
 
 # `golden` is deliberately unset until 1.0.0 exists.
@@ -112,8 +110,8 @@ manifest_asset = "manifest.json"
 
 # `updaterd` restarts neither itself nor `btd`, both of which ship in this same artifact:
 # restarting itself would kill the executor mid-update, and restarting `btd` would drop
-# the connection reporting progress to the app. Both pick up the new binary at the next
-# boot. `mediad` needs no entry: the restart set is derived from the units the release ships,
+# the connection reporting progress to the app. Both restart five seconds after the result is
+# delivered. `mediad` needs no entry: the restart set is derived from the units the release ships,
 # and `mediad.service` has an `[Install]` section, so an apply restarts it like the rest.
 [component.daemon.on_apply]
 action = "restart"
@@ -161,11 +159,9 @@ probe   = "socket"
 timeout = "30s"
 
 
-# ── models ────────────────────────────────────────────────────────────────────
-# Absent on purpose, and this is not an oversight to be fixed by copying the example.
-#
-# `updater.example.toml` configures `model-walk` and `model-jump` against HF repos that
-# do not exist yet. A component whose source 404s makes every `check` — including the
-# periodic one above — report a failure for a component nobody has shipped, which trains
-# whoever reads robot status to ignore failures. Each model component lands in the change
-# that first publishes its bundle.
+# ── model components ──────────────────────────────────────────────────────────
+# Absent on purpose. The official control policies are one independently installed Hub set,
+# managed by `robotctl policy` rather than updater components (policy-channel-design.md §9).
+# `updater.example.toml` uses hypothetical model components only to document the generic HF/reload
+# options. Adding either fake repo here would make every periodic check report a failure for a
+# component this robot does not use.

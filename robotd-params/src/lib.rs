@@ -1,10 +1,10 @@
 //! `robotd`'s startup parameters: the schema, the defaults, and the validation.
 //!
 //! A file rather than a wall of CLI flags — the prototype grew 142 of them and most were
-//! variants, dead skills and dead sensors, all of which are gone. **Read once at startup,
-//! not watched**; live reload is deferred (`docs/design/robotd-design.md` §4.2). That fact
-//! is load-bearing for tooling: *any* change to the file requires a `robotd` restart, so an
-//! editor never has to ask which keys are live.
+//! variants, dead skills and dead sensors, all of which are gone. Most sections are read at
+//! startup; `robotd` reloads `[policy]` on request and `padd` polls its pad sections. The editor
+//! uses the registry to tell each caller whether a change is live or needs a service restart
+//! (`docs/design/robotd-design.md` §4.2).
 //!
 //! It lives outside `releases/<ver>/` so it survives an update *and* a rollback: this is
 //! per-robot configuration, not shipped defaults (`architecture.md` §3).
@@ -33,11 +33,10 @@ pub const RELEASE_DIR: &str = "/opt/robot/daemon/current";
 /// megabytes of unchanged weights. So the two version independently, and the daemon reads its
 /// policies from one place regardless of what put them there.
 ///
-/// Today what puts them there is the daemon's own postinstall hook, which seeds this directory
-/// from the copies the release still carries. That is a bootstrap, not the destination: it stops
-/// the moment anything installs a real set here and repoints `current`, and `current` being a
-/// symlink beside a `releases/` directory is exactly the shape the updater already swaps
-/// atomically. See `docs/design/policy-channel-design.md` §9.
+/// The daemon's postinstall hook bootstraps this directory by downloading the pinned revision's
+/// manifest and files from the Hub. It leaves a newer official set or anything without matching
+/// provenance alone; `robotctl policy update` moves the same `current` symlink between revisions
+/// independently of daemon releases. See `docs/design/policy-channel-design.md` §9.
 pub const POLICY_DIR: &str = "/opt/robot/policies/current";
 
 /// Where the duck detector lives — outside the release, the way [`POLICY_DIR`] is, and for the
@@ -64,8 +63,6 @@ pub const DEFAULT_PATH: &str = "/etc/robot/robotd.toml";
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Params {
-    /// Which electronic board this robot is built on. [`board`] says who reads it.
-    pub board: board::BoardParams,
     pub bus: Bus,
     pub body_imu: BodyImuParams,
     pub control: Control,
@@ -78,21 +75,12 @@ pub struct Params {
     pub head_imu: HeadImuParams,
     pub chorale: ChoraleParams,
     pub media: MediaParams,
-    ///
-    /// `[detect]` until 2026-09: in `robotctl configure` that read as "detect what?", one line
-    /// from `chorale.accept`. Named for what it detects. The alias keeps a file written under the
-    /// old name loading; the editor renames the section the next time it saves that file.
-    #[serde(alias = "detect")]
+    /// Duck-detector model and frame-selection settings. Read by `mediad`, not `robotd`.
     pub duck_detector: DuckDetectorParams,
     /// Which pad button runs which skill. `padd` reads this, not `robotd`.
     pub pad: PadParams,
-    /// Posing the head from the pad's own IMU. `padd` reads this too.
-    ///
-    /// Named for what it is, in full, because `[head_imu]` is two sections up and is the IMU *in*
-    /// the robot's head: the two were `imu_head` and `head_imu` for a while, and that is a name
-    /// apart, not a difference. The alias keeps a file written under the old name loading; the
-    /// editor renames the section the next time it saves that file.
-    #[serde(alias = "imu_head")]
+    /// Posing the head from the pad's own IMU. `padd` reads this too; `[head_imu]` configures the
+    /// physical sensor in the robot's head.
     pub pad_imu_head_control: PadImuHeadControlParams,
     /// How fast full stick deflection drives the robot. `padd` reads this as well.
     pub pad_drive: PadDriveParams,
@@ -469,79 +457,6 @@ impl MediaSource {
     }
 }
 
-/// A head camera sensor this project builds robots with — the substring its driver puts in the
-/// media graph's entity name (`m00_b_gc2093 2-0037`).
-///
-/// Which one a robot has is its board's ([`board::Board::camera_sensor`]), unless `[media] sensor`
-/// forces another. `mediad` keeps one profile per variant, matched exhaustively, so a sensor added
-/// here does not build until it has one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum CameraSensor {
-    /// Sony's, on the Zero 3W robots.
-    Imx219,
-    /// GalaxyCore's, on the beta board.
-    Gc2093,
-}
-
-impl CameraSensor {
-    /// The name this sensor has in the file and in the media graph.
-    pub fn label(self) -> &'static str {
-        match self {
-            CameraSensor::Imx219 => "imx219",
-            CameraSensor::Gc2093 => "gc2093",
-        }
-    }
-}
-
-/// Which sensor the head camera must be: the board's, or one forced by name.
-///
-/// **`board` is the default and the normal case.** A camera and its board go together, so a
-/// robot whose media graph holds another sensor is refused — that is a robot assembled with the
-/// wrong module, or one declaring the wrong board. Naming a sensor here is for the exception: a
-/// board fitted with another camera on purpose, on a bench.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum MediaSensor {
-    #[default]
-    Board,
-    Imx219,
-    Gc2093,
-}
-
-/// Every choice, in the order an editor cycles them — and the strings the file uses.
-/// [`tests::every_media_sensor_label_round_trips`] pins it to the enum in both directions.
-pub const MEDIA_SENSOR_LABELS: &[&str] = &["board", "imx219", "gc2093"];
-
-impl MediaSensor {
-    /// The choices, in [`MEDIA_SENSOR_LABELS`] order.
-    pub const ALL: [MediaSensor; 3] =
-        [MediaSensor::Board, MediaSensor::Imx219, MediaSensor::Gc2093];
-
-    /// The name this choice has in the file.
-    pub fn label(self) -> &'static str {
-        match self {
-            MediaSensor::Board => "board",
-            MediaSensor::Imx219 => "imx219",
-            MediaSensor::Gc2093 => "gc2093",
-        }
-    }
-
-    /// The sensor a forced choice names, or `None` for `board`.
-    pub fn forced(self) -> Option<CameraSensor> {
-        match self {
-            MediaSensor::Board => None,
-            MediaSensor::Imx219 => Some(CameraSensor::Imx219),
-            MediaSensor::Gc2093 => Some(CameraSensor::Gc2093),
-        }
-    }
-
-    /// The sensor the head camera must be on `board`.
-    pub fn resolve(self, board: board::Board) -> CameraSensor {
-        self.forced().unwrap_or_else(|| board.camera_sensor())
-    }
-}
-
 /// What a test pattern runs at, whatever `[media] quality` says — width, height, frames a second.
 ///
 /// **A test pattern is not video anybody watches.** It exists so a board with no camera still has
@@ -601,9 +516,6 @@ pub struct MediaParams {
     /// [`CameraIntrinsics`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intrinsics: Option<CameraIntrinsics>,
-    /// Which sensor the head camera must be. `board`, the default, is the declared board's — see
-    /// [`MediaSensor`] for why anything else is the exception.
-    pub sensor: MediaSensor,
 }
 
 /// A camera calibration, as OpenCV's `calibrateCamera` produces one.
@@ -680,8 +592,6 @@ impl Default for MediaParams {
             // to is a fact about a plugin we ship from a pinned release, and the day it changes
             // should not be the day every robot's send rate changes with it.
             congestion_control: CongestionControl::default(),
-            // The board's camera: a sensor named here is a deliberate exception.
-            sensor: MediaSensor::Board,
         }
     }
 }
@@ -907,71 +817,39 @@ impl ThereminParams {
     }
 }
 
-/// `[head_imu]` — the IMU in the robot's head, served as `head_imu.stream`. Which chip, and
-/// which daemon reads it, is the board's:
-///
-/// - **`zero3`**: the Qwiic LSM6DSV16X at `0x6a`, read by `tofd` on the adapter shared with
-///   the ToF and body IMU. It is **off** until a consumer needs the stream, saving I²C bandwidth
-///   and wakeups. `tofd --imu-hz` controls the rate when enabled.
-/// - **`beta`**: an LSM6DSV16X on the face board's own bus, read by `robotd`. The chip fuses
-///   orientation itself (SFLP) and batches gyro, accelerometer and quaternion into its FIFO,
-///   so a burst of several samples is one transaction and there is no fusion on the CPU. It
-///   remains **on** unless switched off.
+/// `[head_imu]` — the Qwiic LSM6DSV16X at `0x6a`, served by `tofd` as `head_imu.stream`.
+/// It is off until explicitly enabled, saving I²C bandwidth and wakeups when nothing consumes it.
+/// `tofd --imu-hz` controls the rate when enabled.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct HeadImuParams {
-    /// Read the head IMU at all. Absent means the board's default ([`Self::enabled_on`]):
-    /// off on `zero3`, on on `beta`. `tofd --imu` overrides it for a session on `zero3`.
+    /// Read the head IMU at all. Absent means off. `tofd --imu` overrides it for one session.
     pub enabled: Option<bool>,
 }
 
 impl HeadImuParams {
-    /// Whether the head IMU is read on `board`: the file's word if it has one, otherwise the
-    /// board's default — off for `zero3`'s shared-Qwiic head sensor, on for `beta`'s
-    /// face-board sensor.
-    pub fn enabled_on(&self, board: board::Board) -> bool {
-        self.enabled.unwrap_or(match board {
-            board::Board::Zero3 => false,
-            board::Board::Beta => true,
-        })
-    }
-
-    /// The daemon that reads the head IMU on `board`, and so the one to restart when this
-    /// section changes.
-    pub fn reader(board: board::Board) -> &'static str {
-        match board {
-            board::Board::Zero3 => "tofd",
-            board::Board::Beta => "robotd",
-        }
+    /// Whether `tofd` reads the head IMU.
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(false)
     }
 }
 
 #[cfg(test)]
 mod head_imu_tests {
     use super::*;
-    use board::Board;
-
-    /// Off on `zero3`, where no current consumer needs to wake the shared Qwiic sensor; on
-    /// on `beta`, whose face board fuses and batches itself. An explicit file value wins.
+    /// Off by default; an explicit file value wins.
     #[test]
-    fn the_default_is_the_boards_and_the_file_wins() {
+    fn the_default_is_off_and_the_file_wins() {
         let unset = HeadImuParams::default();
-        assert!(!unset.enabled_on(Board::Zero3));
-        assert!(unset.enabled_on(Board::Beta));
+        assert!(!unset.enabled());
         let off = HeadImuParams {
             enabled: Some(false),
         };
-        assert!(!off.enabled_on(Board::Beta));
+        assert!(!off.enabled());
         let on = HeadImuParams {
             enabled: Some(true),
         };
-        assert!(on.enabled_on(Board::Zero3));
-    }
-
-    #[test]
-    fn each_board_names_the_daemon_that_reads_it() {
-        assert_eq!(HeadImuParams::reader(Board::Zero3), "tofd");
-        assert_eq!(HeadImuParams::reader(Board::Beta), "robotd");
+        assert!(on.enabled());
     }
 }
 
@@ -983,8 +861,7 @@ mod head_imu_tests {
 pub struct AudioParams {
     /// Master switch: no sounds, no mic worker.
     pub enabled: bool,
-    /// ALSA playback device — the TLV320AIC3104 codec. When it names a card this board does
-    /// not have, [`AudioParams::resolve_devices`] falls back to ALSA's `default`.
+    /// ALSA playback device — the TLV320AIC3104 codec.
     pub device: String,
     /// Where the per-robot voice bank lives. The release's postinstall renders it there
     /// (`sounds ensure-bank`), seeded from the SoC serial.
@@ -1043,34 +920,6 @@ impl AudioParams {
         }
     }
 
-    /// The playback and capture devices to use on a board whose ALSA cards are `cards` (the
-    /// ids in `/proc/asound/cards`, see [`alsa_card_ids`]).
-    ///
-    /// The configured device, unless it names a card that is not there — then ALSA's
-    /// `default` for both. The default device names the Zero 3W's HAT codec (`aic3104`), and a
-    /// board without it used to be silent and deaf with nothing in the journal above debug,
-    /// even when it has a perfectly good codec of its own. With the fallback, a board routes
-    /// `default` through its own ALSA configuration — the beta board's image points it at its
-    /// RK809 for playback and its face-board microphone for capture, two different cards,
-    /// which is why capture falls back to `default` too rather than to `default,0`.
-    ///
-    /// A device that names no card (`default`, a PCM from an asound.conf, a numeric card) is
-    /// used as written: there is nothing to check it against.
-    pub fn resolve_devices(&self, cards: &[String]) -> ResolvedAudio {
-        match named_card(&self.device) {
-            Some(card) if !cards.iter().any(|c| c == card) => ResolvedAudio {
-                playback: "default".to_owned(),
-                capture: "default".to_owned(),
-                missing_card: Some(card.to_owned()),
-            },
-            _ => ResolvedAudio {
-                playback: self.device.clone(),
-                capture: self.capture_device(),
-                missing_card: None,
-            },
-        }
-    }
-
     /// The classifier path, or `None` when disabled with the `"none"` sentinel.
     pub fn pet_model_resolved(&self) -> Option<PathBuf> {
         match &self.pet_model {
@@ -1110,14 +959,15 @@ pub struct PolicyParams {
     /// False means slice 1's behaviour: run the loop, hold the pose, stay healthy. That is a
     /// legitimate configuration — it is the safest thing to be doing while hammering
     /// install/rollback cycles at a bench — and it is distinct from a policy that was wanted
-    /// and could not be loaded, which is unhealthy.
+    /// and could not be loaded. An absent official set is degraded; a present official set whose
+    /// policy is broken is unhealthy.
     pub enabled: bool,
     /// `walk` (default) or `roller`. Changes which policies load *and* the tuning defaults
     /// below — every unset field resolves per mode, so a roller robot needs one line.
     pub mode: Mode,
-    /// Policy paths. Absent means the mode's default inside the release directory, so a
-    /// normal update ships them; point one elsewhere to try a build without cutting a
-    /// release. The literal `"none"` disables a slot outright — the prototype's convention.
+    /// Policy paths. Absent means the mode's default in the independently installed official
+    /// set; point one elsewhere to try a local or community policy. The literal `"none"`
+    /// disables a slot outright — the prototype's convention.
     pub walk: Option<PathBuf>,
     /// Standing policy. Without one the walking policy runs at every velocity.
     pub stand: Option<PathBuf>,
@@ -1128,7 +978,7 @@ pub struct PolicyParams {
     pub ground_pick: Option<PathBuf>,
     pub kick_left: Option<PathBuf>,
     pub kick_right: Option<PathBuf>,
-    /// Episodic forward roll. Ships by default in both modes, as the prototype now does.
+    /// Episodic forward roll. The installed official manifest supplies it in both modes.
     pub roulade: Option<PathBuf>,
     /// Scales raw policy output into a joint offset. Absent resolves per mode: 0.9 walking
     /// (the prototype's alpha default), 0.8 roller.
@@ -1156,10 +1006,9 @@ pub struct PolicyParams {
     pub ground_pick_gain_ratio: f64,
     /// The one-shot skills this robot has, in priority order.
     ///
-    /// Empty means the built-in three — kicks and roulade, with the numbers they have always
-    /// had — so a board that updates onto this keeps working with nothing written. An entry
-    /// merges by name: naming `roulade` changes that one, naming anything else adds a skill.
-    /// The file stays a list of decisions rather than a copy of the defaults, which is what
+    /// The installed set contributes the entries in its manifest. A config entry merges by name:
+    /// naming `roulade` changes the set's entry, naming anything else adds a local/community
+    /// skill. The file stays a list of decisions rather than a copy of the set, which is what
     /// `robotctl configure` promises about every other key here.
     #[serde(default, rename = "skill", skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<SkillDef>,
@@ -1198,7 +1047,7 @@ pub struct SkillDef {
     pub name: String,
 
     /// The `.onnx`. Absent means this robot's own copy, by convention `<name>.onnx` in the
-    /// policy directory, so a built-in needs no path and a fetched one carries the path
+    /// policy directory, so a configured local skill may use its name and a fetched one carries the path
     /// `robotctl policy load` wrote.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
@@ -1296,12 +1145,13 @@ impl SkillDef {
 ///
 /// The set is fetched from the Hub and versioned there, so what it contains — and how long each
 /// one-shot runs — is a property of the set rather than of this build. Without this, adding a
-/// tenth policy to the set meant a daemon release: one edit to the seeder's download list so it
+/// additional policy to the set meant a daemon release: one edit to the seeder's download list so it
 /// arrives, and another here so it is a skill. That is the same coupling this whole exercise
 /// removed for a stranger's policy, still in place for our own.
 ///
-/// Absent is normal and not an error: a board seeded before the set carried one, or one where
-/// the fetch has not happened yet. The three built-ins below are the fallback.
+/// Absence means there is no installed set metadata. It is normal for an unprovisioned board and
+/// does not invent skills: official sets always install this file, while a local/community skill
+/// can still be declared explicitly in config.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(default)]
 pub struct SetManifest {
@@ -1312,7 +1162,7 @@ pub struct SetManifest {
 ///
 /// **The same field names a single-policy repo uses**, plus `file` to say which `.onnx` it
 /// describes. That is deliberate: the community convention is one repo per policy with a flat
-/// manifest, and the official set is nine policies in one repo. Sharing the vocabulary means
+/// manifest, and the official set is several policies in one repo. Sharing the vocabulary means
 /// asking a publisher to *add fields*, not to adopt a second format, and it means one reader
 /// understands both.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -1542,82 +1392,53 @@ pub fn set_manifest() -> Option<SetManifest> {
     serde_json::from_str(&text).ok()
 }
 
-/// The skills a robot has when its config says nothing.
-///
-/// From the installed set where it says, and from the three below where it does not.
-///
-/// A board whose set predates the manifest keeps its kicks and its roulade with no config
-/// written and no migration run, which is the whole reason absence resolves to something rather
-/// than nothing. This goes when every tagged set carries one.
-fn builtin_skills(manifest: Option<&SetManifest>) -> Vec<SkillDef> {
+/// The skills the installed set declares when config says nothing.
+fn set_skills(manifest: Option<&SetManifest>) -> Vec<SkillDef> {
     // What the set itself declares. A policy is a skill only if it says it is episodic, drives on
     // a constant command, and how long it runs — a gait is not something to ask for by name, a
     // perpetual one needs a hold length that only a person can choose, and a phase-encoded one
     // is the ground pick.
-    if let Some(manifest) = manifest {
-        let from_set: Vec<SkillDef> = manifest
-            .skills()
-            .filter_map(|p| {
-                Some(SkillDef {
-                    name: p.skill_name(),
-                    path: Some(PathBuf::from(POLICY_DIR).join(&p.file)),
-                    duration: p.duration_s?,
-                    chain: p.chain,
-                    unwind: p.command.as_ref().and_then(|c| c.idle).unwrap_or_default(),
-                    unwind_s: p.unwind_s.unwrap_or(0.0),
-                    params: SkillOverrides {
-                        action_scale: p.action_scale,
-                        ..Default::default()
-                    },
+    manifest
+        .into_iter()
+        .flat_map(SetManifest::skills)
+        .filter_map(|p| {
+            Some(SkillDef {
+                name: p.skill_name(),
+                path: Some(PathBuf::from(POLICY_DIR).join(&p.file)),
+                duration: p.duration_s?,
+                chain: p.chain,
+                unwind: p.command.as_ref().and_then(|c| c.idle).unwrap_or_default(),
+                unwind_s: p.unwind_s.unwrap_or(0.0),
+                params: SkillOverrides {
+                    action_scale: p.action_scale,
                     ..Default::default()
-                })
+                },
+                ..Default::default()
             })
-            .collect();
-        if !from_set.is_empty() {
-            return from_set;
-        }
-    }
-
-    fallback_skills()
+        })
+        .collect()
 }
 
-/// The three skills every robot has had since the prototype, for a board whose set says nothing
-/// about itself — and the timing a skill slot borrows when it names one the set left out.
-fn fallback_skills() -> Vec<SkillDef> {
-    let kick = |name: &str, file: &str| SkillDef {
+/// Timing for an explicit standard skill-slot override when the installed set has no entry by
+/// that name. `robotctl policy load kick_left /path/to/policy.onnx` writes only the slot path, so
+/// these three command roles still need their established window semantics. No file is inferred:
+/// the caller immediately supplies the explicit path.
+fn skill_slot_default(name: &str) -> Option<SkillDef> {
+    let (duration, chain) = match name {
+        "roulade" => (1.0, true),
+        "kick_left" | "kick_right" => (0.5, false),
+        _ => return None,
+    };
+    Some(SkillDef {
         name: name.to_owned(),
-        // The kick files are `ball_kick_*.onnx`, which is not `<name>.onnx` — the names are the
-        // roles and the files are the training runs. The set's manifest keeps that indirection
-        // in its own `name` field; this is the same thing for a set that predates it.
-        path: Some(PathBuf::from(POLICY_DIR).join(file)),
-        duration: 0.5,
-        chain: false,
+        path: None,
+        duration,
+        chain,
         command: [0.0; 3],
         unwind: [0.0; 3],
         unwind_s: 0.0,
         params: SkillOverrides::default(),
-    };
-    vec![
-        // Order is priority, replacing the hardcoded `roulade > kick` precedence.
-        SkillDef {
-            name: "roulade".to_owned(),
-            path: None,
-            duration: 1.0,
-            // Holding the button chains rolls, which is how the prototype maps a held trigger
-            // onto a one-shot.
-            chain: true,
-            command: [0.0; 3],
-            unwind: [0.0; 3],
-            unwind_s: 0.0,
-            params: SkillOverrides::default(),
-        },
-        kick("kick_left", "ball_kick_left.onnx"),
-        kick("kick_right", "ball_kick_right.onnx"),
-    ]
-}
-
-fn fallback_skill(name: &str) -> Option<SkillDef> {
-    fallback_skills().into_iter().find(|s| s.name == name)
+    })
 }
 
 /// One policy slot, named — the seven `[policy]` path keys as a value rather than a field name.
@@ -1727,7 +1548,7 @@ pub struct ResolvedPolicy {
     pub sitstand_rise_s: f64,
     /// Seconds the seat takes to settle after the flag flips.
     pub sitstand_ramp_s: f64,
-    /// The one-shot skills, config merged over the built-ins, in priority order.
+    /// The one-shot skills, config merged over the installed set, in priority order.
     pub skills: Vec<SkillDef>,
     pub voltage_adapt: bool,
     pub nominal_voltage: f64,
@@ -1750,32 +1571,32 @@ impl ResolvedPolicy {
 }
 
 impl PolicyParams {
-    /// The built-in skills with config merged over them, by name.
+    /// The installed set's skills with config merged over them, by name.
     ///
     /// Merge rather than replace, for the reason every other key in this file resolves the way it
     /// does: the file is a list of decisions, not a copy of the defaults. Adding `polite-bow` is
-    /// one entry and does not mean re-declaring the three that were already there — and forgetting
-    /// to re-declare one cannot silently remove it, which is the failure mode of the other rule.
+    /// one entry and does not mean re-declaring the set — and forgetting to re-declare one cannot
+    /// silently remove it, which is the failure mode of the other rule.
     ///
-    /// A named skill keeps the built-in's position in the priority order; a new one goes last.
+    /// A named skill keeps the set entry's position in the priority order; a new one goes last.
     ///
     /// **The three skill slots are applied last and win.** `kick_left`, `kick_right` and `roulade`
     /// are `[policy]` keys like `walk`, and `robotctl policy load roulade <file>` writes that key —
     /// so the file it names has to be the one the `roulade` skill runs, or the load reports a
     /// file the robot never touches, which is what it did. A slot naming a skill the set does not
-    /// declare adds it with the built-in's timing; `"none"` switches it off, as it does for a
-    /// `[[policy.skill]]` entry.
+    /// declare adds it with that standard command role's timing; `"none"` switches it off, as it
+    /// does for a `[[policy.skill]]` entry.
     pub fn resolved_skills(&self) -> Vec<SkillDef> {
         self.resolved_skills_with(set_manifest().as_ref())
     }
 
-    /// [`Self::resolved_skills`] against a manifest already read — or none, which is the
-    /// fallback three.
+    /// [`Self::resolved_skills`] against a manifest already read. `None` contributes no implicit
+    /// skills; configured entries and explicit skill-slot overrides still apply.
     pub fn resolved_skills_with(&self, manifest: Option<&SetManifest>) -> Vec<SkillDef> {
-        let mut resolved = builtin_skills(manifest);
+        let mut resolved = set_skills(manifest);
         for configured in &self.skills {
             match resolved.iter_mut().find(|s| s.name == configured.name) {
-                Some(builtin) => *builtin = configured.clone(),
+                Some(existing) => *existing = configured.clone(),
                 None => resolved.push(configured.clone()),
             }
         }
@@ -1786,15 +1607,15 @@ impl PolicyParams {
             match resolved.iter_mut().find(|s| s.name == slot.as_str()) {
                 Some(skill) => skill.path = Some(path.clone()),
                 None => {
-                    if let Some(mut skill) = fallback_skill(slot.as_str()) {
+                    if let Some(mut skill) = skill_slot_default(slot.as_str()) {
                         skill.path = Some(path.clone());
                         resolved.push(skill);
                     }
                 }
             }
         }
-        // A skill whose path is the `"none"` sentinel is switched off, which is how a built-in is
-        // removed without a second mechanism for it.
+        // A skill whose path is the `"none"` sentinel is switched off, which is how a set or
+        // configured skill is removed without a second mechanism for it.
         resolved.retain(|s| s.resolved_path().is_some());
         resolved
     }
@@ -1832,14 +1653,14 @@ impl PolicyParams {
         self.resolved_with(set_manifest().as_ref())
     }
 
-    /// [`Self::resolved`] against a manifest already read — or none, which is what a board whose
-    /// set predates the manifest has, and resolves to the prototype's numbers.
+    /// [`Self::resolved`] against a manifest already read. `None` is the unprovisioned/local
+    /// case; numeric motion tuning still resolves to the safe prototype defaults below.
     ///
     /// **The set says how its own policies run.** The ground pick's cycle and the sit↔stand's rise
     /// used to be literals here, per mode, which meant a retrained pick with a longer cycle was a
     /// daemon release. They come from the set's phase-encoded and posture-flag entries now; the
-    /// literals stay as the fallback, and a `[policy]` key still overrides either, because the
-    /// file is the list of a person's decisions.
+    /// literals remain defaults when a field is omitted, and a `[policy]` key still overrides
+    /// either, because the file is the list of a person's decisions.
     pub fn resolved_with(&self, manifest: Option<&SetManifest>) -> ResolvedPolicy {
         let release = |name: &str| PathBuf::from(POLICY_DIR).join(name);
         let path = |field: &Option<PathBuf>, default: Option<&str>| -> Option<PathBuf> {
@@ -2446,49 +2267,6 @@ fn without_unknown_keys(text: &str) -> Option<(Result<Params, toml::de::Error>, 
     Some((toml::Value::Table(table).try_into::<Params>(), ignored))
 }
 
-/// What [`AudioParams::resolve_devices`] decided.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedAudio {
-    pub playback: String,
-    pub capture: String,
-    /// The card the configured device named and this board lacks, when the fallback was taken.
-    pub missing_card: Option<String>,
-}
-
-/// The card id an ALSA device string names, when it names one by id: `plughw:aic3104`,
-/// `hw:aic3104,0`, `plughw:CARD=aic3104,DEV=0`. `None` for anything else.
-fn named_card(device: &str) -> Option<&str> {
-    let (plugin, args) = device.split_once(':')?;
-    if plugin != "hw" && plugin != "plughw" {
-        return None;
-    }
-    let first = args.split(',').next()?;
-    let card = first.strip_prefix("CARD=").unwrap_or(first);
-    // A numeric card is an index, not an id: nothing to match against /proc/asound/cards.
-    (!card.is_empty() && !card.bytes().all(|b| b.is_ascii_digit())).then_some(card)
-}
-
-/// The card ids in the text of `/proc/asound/cards`, whose card lines read
-/// ` 0 [rockchiprk809  ]: simple-card - rockchip-rk809` (each followed by a description line).
-pub fn alsa_card_ids(proc_asound_cards: &str) -> Vec<String> {
-    proc_asound_cards
-        .lines()
-        .filter_map(|line| {
-            let (index, rest) = line.trim_start().split_once(' ')?;
-            if index.is_empty() || !index.bytes().all(|b| b.is_ascii_digit()) {
-                return None;
-            }
-            let id = rest
-                .trim_start()
-                .strip_prefix('[')?
-                .split(']')
-                .next()?
-                .trim();
-            (!id.is_empty()).then(|| id.to_owned())
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     /// [`Slot::as_str`] must be the *serde key*, because `robotctl policy load` writes
@@ -2605,28 +2383,33 @@ mod tests {
         assert_eq!(names, ["roulade", "kick_left"]);
     }
 
-    /// A manifest that says nothing this build understands must not empty the robot. An older
-    /// set, or one written by a newer publisher, falls back rather than removing every skill.
+    /// The manifest is the set's source of truth: one containing only a gait contributes no
+    /// generic skills, rather than resurrecting names compiled into the daemon.
     #[test]
-    fn a_set_manifest_with_no_skills_falls_back() {
+    fn a_set_manifest_with_no_skills_contributes_none() {
         let manifest: super::SetManifest = serde_json::from_value(serde_json::json!({
             "policies": [{ "file": "alpha_walking.onnx", "kind": "perpetual" }]
         }))
         .unwrap();
         assert!(
-            manifest
-                .policies
-                .iter()
-                .all(|p| p.kind.as_deref() != Some("episodic")),
-            "nothing here is a skill, so builtin_skills keeps the three it knows"
+            super::PolicyParams::default()
+                .resolved_skills_with(Some(&manifest))
+                .is_empty(),
+            "nothing in the manifest is a skill"
+        );
+        assert!(
+            super::PolicyParams::default()
+                .resolved_skills_with(None)
+                .is_empty(),
+            "no manifest must not invent official-set skills"
         );
     }
 
-    /// The manifest the set actually publishes, as this build reads it. One place to see the
-    /// whole shape; the tests below take it apart.
-    fn published_set() -> super::SetManifest {
+    /// A representative set manifest. It exercises every policy role without duplicating the
+    /// independently versioned Hub manifest as a second source of truth.
+    fn representative_set() -> super::SetManifest {
         serde_json::from_value(serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "policies": [
                 { "file": "alpha_walking.onnx", "kind": "perpetual" },
                 { "file": "alpha_stand.onnx",   "kind": "perpetual" },
@@ -2661,7 +2444,7 @@ mod tests {
     /// a mode is that mode's ground pick, and its numbers are the defaults.
     #[test]
     fn the_set_declares_each_modes_ground_pick() {
-        let set = published_set();
+        let set = representative_set();
 
         let walk = super::PolicyParams::default().resolved_with(Some(&set));
         assert_eq!(walk.ground_pick_period, 4.0);
@@ -2690,7 +2473,7 @@ mod tests {
     /// The file is a list of decisions: a `[policy]` key still beats the set.
     #[test]
     fn a_config_key_overrides_the_sets_ground_pick_timing() {
-        let set = published_set();
+        let set = representative_set();
         let tuned = super::PolicyParams {
             mode: super::Mode::Roller,
             ground_pick_period: Some(6.0),
@@ -2710,7 +2493,7 @@ mod tests {
     /// shutdown sit a literal four; the scripted posture-flag entry carries both.
     #[test]
     fn the_set_declares_the_sitstands_timing() {
-        let set = published_set();
+        let set = representative_set();
         let resolved = super::PolicyParams::default().resolved_with(Some(&set));
         assert_eq!(resolved.sitstand_rise_s, 1.5);
         assert_eq!(resolved.sitstand_ramp_s, 2.5);
@@ -2722,10 +2505,10 @@ mod tests {
 
     /// **A phase-encoded or posture-flag policy is never a zero-command skill.** Both are driven
     /// by the daemon through commands it generates; loading either as a generic one-shot would
-    /// run it on all-zeros. The published set's skills are exactly the three the prototype had.
+    /// run it on all-zeros. This representative set has the prototype's three one-shot skills.
     #[test]
-    fn the_published_set_yields_the_three_skills_and_nothing_else() {
-        let set = published_set();
+    fn a_representative_set_yields_only_its_declared_skills() {
+        let set = representative_set();
         let resolved = super::PolicyParams::default().resolved_with(Some(&set));
         let names: Vec<&str> = resolved.skills.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["roulade", "kick_left", "kick_right"]);
@@ -2849,23 +2632,20 @@ mod tests {
         assert!(!pad.bind("triangle", "x"), "and nothing else is");
     }
 
-    /// **Absence resolves to the three a robot has always had.** A board updating onto this
-    /// writes no config and runs no migration, and still has its kicks and its roulade.
+    /// No manifest and no config means no generic skills. An official set supplies them through
+    /// its manifest; an unprovisioned board must not guess filenames from an older layout.
     #[test]
-    fn no_configured_skills_means_the_built_in_three() {
-        let resolved = super::PolicyParams::default().resolved();
-        let names: Vec<&str> = resolved.skills.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, vec!["roulade", "kick_left", "kick_right"]);
+    fn no_manifest_and_no_config_means_no_skills() {
         assert!(
-            resolved.skills.iter().all(|s| s.resolved_path().is_some()),
-            "each names a file"
+            super::PolicyParams::default()
+                .resolved_skills_with(None)
+                .is_empty()
         );
     }
 
-    /// Adding one skill does not mean re-declaring the others — the file is a list of decisions.
-    /// A rule where config replaced the lot would make forgetting an entry a silent removal.
+    /// A configured community skill does not need an official-set manifest.
     #[test]
-    fn a_new_skill_is_added_without_re_declaring_the_built_ins() {
+    fn a_configured_skill_works_without_a_set_manifest() {
         use std::path::PathBuf;
 
         let params = super::PolicyParams {
@@ -2882,18 +2662,17 @@ mod tests {
         };
 
         let names: Vec<String> = params
-            .resolved()
-            .skills
+            .resolved_skills_with(None)
             .iter()
             .map(|s| s.name.clone())
             .collect();
-        assert_eq!(names, ["roulade", "kick_left", "kick_right", "polite-bow"]);
+        assert_eq!(names, ["polite-bow"]);
     }
 
-    /// Naming a built-in changes it and keeps its place in the priority order — a retuned
+    /// Naming a set skill changes it and keeps its place in the priority order — a retuned
     /// roulade must not become the last thing the cascade considers.
     #[test]
-    fn naming_a_built_in_retunes_it_in_place() {
+    fn naming_a_set_skill_retunes_it_in_place() {
         let params = super::PolicyParams {
             skills: vec![super::SkillDef {
                 name: "roulade".into(),
@@ -2909,17 +2688,17 @@ mod tests {
             ..Default::default()
         };
 
-        let resolved = params.resolved();
+        let resolved = params.resolved_with(Some(&representative_set()));
         assert_eq!(resolved.skills[0].name, "roulade", "still first");
         assert_eq!(resolved.skills[0].duration, 2.5);
         assert_eq!(resolved.skills[0].params.action_scale, Some(0.7));
         assert_eq!(resolved.skills.len(), 3, "and nothing was added");
     }
 
-    /// The `"none"` sentinel removes a built-in, so taking one away needs no second mechanism —
+    /// The `"none"` sentinel removes a set skill, so taking one away needs no second mechanism —
     /// it is the same word that switches off a policy slot.
     #[test]
-    fn a_built_in_can_be_switched_off_by_name() {
+    fn a_set_skill_can_be_switched_off_by_name() {
         use std::path::PathBuf;
 
         let params = super::PolicyParams {
@@ -2934,43 +2713,35 @@ mod tests {
         };
 
         let names: Vec<String> = params
-            .resolved()
-            .skills
+            .resolved_skills_with(Some(&representative_set()))
             .iter()
             .map(|s| s.name.clone())
             .collect();
         assert_eq!(names, ["roulade", "kick_right"]);
     }
 
-    /// A skill with no path runs `<name>.onnx` from this robot's own set, so a built-in needs no
-    /// path written and a fetched one carries what `policy load` recorded.
+    /// A configured skill with no path runs `<name>.onnx` from this robot's own set.
     #[test]
     fn a_skill_without_a_path_runs_its_own_name() {
-        let resolved = super::PolicyParams::default().resolved();
-        let roulade = &resolved.skills[0];
+        let params = super::PolicyParams {
+            skills: vec![super::SkillDef {
+                name: "local-trick".into(),
+                duration: 1.0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let resolved = params.resolved_skills_with(None);
+        let skill = &resolved[0];
         assert_eq!(
-            roulade.resolved_path().unwrap(),
-            std::path::Path::new(super::POLICY_DIR).join("roulade.onnx")
-        );
-        // The kicks are the exception the built-ins spell out: their files are named for the
-        // training run, not the role.
-        let kick = resolved
-            .skills
-            .iter()
-            .find(|s| s.name == "kick_left")
-            .unwrap();
-        assert!(
-            kick.resolved_path()
-                .unwrap()
-                .ends_with("ball_kick_left.onnx"),
-            "{:?}",
-            kick.resolved_path()
+            skill.resolved_path().unwrap(),
+            std::path::Path::new(super::POLICY_DIR).join("local-trick.onnx")
         );
     }
 
     /// **A skill slot is the file the skill runs.** `robotctl policy load roulade <file>` writes
     /// `[policy] roulade`, and until this the daemon reported that file in the slot while the
-    /// `roulade` skill went on running the built-in — a load that changed the report and nothing
+    /// `roulade` skill went on running the set entry — a load that changed the report and nothing
     /// else.
     #[test]
     fn a_skill_slot_override_is_what_the_skill_runs() {
@@ -2981,7 +2752,7 @@ mod tests {
             kick_left: Some(PathBuf::from("/srv/left.onnx")),
             ..Default::default()
         };
-        let resolved = params.resolved();
+        let resolved = params.resolved_with(None);
 
         let file = |name: &str| {
             resolved
@@ -2992,12 +2763,7 @@ mod tests {
         };
         assert_eq!(file("roulade"), Some(PathBuf::from("/srv/roll.onnx")));
         assert_eq!(file("kick_left"), Some(PathBuf::from("/srv/left.onnx")));
-        assert!(
-            file("kick_right")
-                .unwrap()
-                .ends_with("ball_kick_right.onnx"),
-            "an untouched slot keeps the built-in"
-        );
+        assert_eq!(file("kick_right"), None, "an unset slot invents no skill");
         // And the report agrees with the list, in both directions.
         assert_eq!(resolved.roulade, file("roulade"));
         assert_eq!(resolved.kick_left, file("kick_left"));
@@ -3022,7 +2788,7 @@ mod tests {
             ..Default::default()
         };
         let roulade = params
-            .resolved()
+            .resolved_with(None)
             .skills
             .into_iter()
             .find(|s| s.name == "roulade")
@@ -3040,7 +2806,7 @@ mod tests {
             kick_right: Some(PathBuf::from("none")),
             ..Default::default()
         };
-        let resolved = params.resolved();
+        let resolved = params.resolved_with(Some(&representative_set()));
         let names: Vec<&str> = resolved.skills.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["roulade", "kick_left"]);
         assert_eq!(resolved.kick_right, None, "and the report says so");
@@ -3069,18 +2835,21 @@ mod tests {
             }],
             ..Default::default()
         };
-        let resolved = params.resolved();
+        let resolved = params.resolved_with(None);
         let flamingo = resolved.skills.last().unwrap();
         assert_eq!(flamingo.command, [1.0, 1.0, 0.0]);
         assert_eq!(flamingo.unwind, [0.0, 1.0, 0.0]);
         assert_eq!(flamingo.unwind_s, 3.0);
     }
 
-    /// And the common case declares none of it. A zero command with no unwind is what every
-    /// one-shot published so far is, and writing that out would be noise in every config file.
+    /// And the official set's common case declares none of it. A zero command with no unwind is
+    /// what every one-shot published so far is.
     #[test]
-    fn the_built_ins_need_no_command_or_unwind() {
-        for skill in super::PolicyParams::default().resolved().skills {
+    fn representative_set_skills_need_no_command_or_unwind() {
+        for skill in super::PolicyParams::default()
+            .resolved_with(Some(&representative_set()))
+            .skills
+        {
             assert_eq!(skill.command, [0.0; 3], "{} drives on zeros", skill.name);
             assert_eq!(skill.unwind_s, 0.0, "{} ends itself", skill.name);
         }
@@ -3242,43 +3011,6 @@ mod tests {
         assert_eq!(spelled_out.capture_device(), "plughw:aic3104,0");
     }
 
-    /// A board without the configured card plays and records on ALSA's `default`, which the
-    /// board's own ALSA configuration routes; one with it is untouched.
-    #[test]
-    fn a_missing_audio_card_falls_back_to_the_alsa_default() {
-        let beta = alsa_card_ids(concat!(
-            " 0 [rockchiprk809  ]: simple-card - rockchip-rk809\n",
-            "                      rockchip-rk809\n",
-            " 1 [facemic        ]: simple-card - face-mic\n",
-            "                      face-mic\n",
-        ));
-        assert_eq!(beta, ["rockchiprk809", "facemic"]);
-
-        let params = AudioParams::default();
-        let resolved = params.resolve_devices(&beta);
-        assert_eq!(resolved.playback, "default");
-        assert_eq!(resolved.capture, "default");
-        assert_eq!(resolved.missing_card.as_deref(), Some("aic3104"));
-
-        let zero3 = alsa_card_ids(" 0 [aic3104        ]: simple-card - aic3104\n");
-        let resolved = params.resolve_devices(&zero3);
-        assert_eq!(resolved.playback, "plughw:aic3104");
-        assert_eq!(resolved.capture, "plughw:aic3104,0");
-        assert_eq!(resolved.missing_card, None);
-
-        // Spellings that name a card are checked; ones that do not are used as written.
-        assert_eq!(named_card("plughw:CARD=aic3104,DEV=0"), Some("aic3104"));
-        assert_eq!(named_card("hw:aic3104,0"), Some("aic3104"));
-        assert_eq!(named_card("hw:1,0"), None);
-        assert_eq!(named_card("default"), None);
-        assert_eq!(named_card("dmix:aic3104"), None);
-        let custom = AudioParams {
-            device: "speaker".to_owned(),
-            ..AudioParams::default()
-        };
-        assert_eq!(custom.resolve_devices(&[]).playback, "speaker");
-    }
-
     /// An unprovisioned board must still come up. A daemon that refuses to start because a
     /// config file is absent is far harder to diagnose on a robot than one running on
     /// documented defaults.
@@ -3363,44 +3095,6 @@ mod tests {
                 toml::from_str(&format!("[media]\nsource = \"{label}\"\n")).expect("parses");
             assert_eq!(parsed.media.source, source);
         }
-    }
-
-    #[test]
-    fn every_media_sensor_label_round_trips() {
-        assert_eq!(MEDIA_SENSOR_LABELS.len(), MediaSensor::ALL.len());
-        for (label, sensor) in MEDIA_SENSOR_LABELS.iter().zip(MediaSensor::ALL) {
-            assert_eq!(*label, sensor.label());
-            let parsed: Params =
-                toml::from_str(&format!("[media]\nsensor = \"{label}\"\n")).expect("parses");
-            assert_eq!(parsed.media.sensor, sensor);
-            if let Some(forced) = sensor.forced() {
-                assert_eq!(
-                    forced.label(),
-                    *label,
-                    "a forced choice is the sensor's own name"
-                );
-            }
-        }
-    }
-
-    /// The board decides unless a sensor is named, and an unset key is `board`.
-    #[test]
-    fn the_head_camera_is_the_boards_unless_forced() {
-        use board::Board;
-        let unset: Params = toml::from_str("").unwrap();
-        assert_eq!(unset.media.sensor, MediaSensor::Board);
-        assert_eq!(
-            MediaSensor::Board.resolve(Board::Zero3),
-            CameraSensor::Imx219
-        );
-        assert_eq!(
-            MediaSensor::Board.resolve(Board::Beta),
-            CameraSensor::Gc2093
-        );
-        assert_eq!(
-            MediaSensor::Imx219.resolve(Board::Beta),
-            CameraSensor::Imx219
-        );
     }
 
     /// **The key that was replaced must not come back as a silent default.** A robot carrying the
@@ -3665,7 +3359,9 @@ mod tests {
     /// the robot moves relative to the thing this daemon replaces.
     #[test]
     fn walk_mode_resolves_to_the_prototype_alpha_config() {
-        let p = Params::default().policy.resolved();
+        let p = Params::default()
+            .policy
+            .resolved_with(Some(&representative_set()));
         assert_eq!(p.mode, Mode::Walk);
         assert_eq!(p.action_scale, 0.9);
         assert_eq!(p.standing_action_scale, 1.0);
@@ -3731,17 +3427,20 @@ mod tests {
         assert_eq!(c.head_alpha, 0.2);
     }
 
-    /// One line — `mode = "roller"` — must reproduce the prototype's whole roller preset,
-    /// which its installer rebased on the alpha defaults: the roller policy and its tuning
-    /// (kp 200, scale 0.8, the crouch on the ground-pick trigger at 3 s / 0.8), and
+    /// One line — `mode = "roller"` — must reproduce the current set's roller preset, based on
+    /// the prototype's alpha defaults: the roller policy and its tuning (kp 200, scale 0.8, the
+    /// crouch on the ground-pick trigger at its manifest's trained 5 s / 0.8), and
     /// everything else exactly as walking mode has it — sit/stand, kicks, roulade, the
     /// trained low-pass. Only the standing network stays out (the prototype loads it and
     /// then skips every standing transition in roller mode, so it never runs).
     #[test]
-    fn roller_mode_resolves_to_the_prototype_roller_preset() {
+    fn roller_mode_resolves_to_the_current_set_preset() {
         let dir = tempfile::tempdir().unwrap();
         let path = write(dir.path(), "[policy]\nmode = \"roller\"\n");
-        let p = Params::load(&path, true).unwrap().policy.resolved();
+        let p = Params::load(&path, true)
+            .unwrap()
+            .policy
+            .resolved_with(Some(&representative_set()));
 
         assert_eq!(p.mode, Mode::Roller);
         assert_eq!(p.walk, PathBuf::from(POLICY_DIR).join("roller.onnx"));
@@ -3776,7 +3475,7 @@ mod tests {
                 .ends_with("roller_crouch.onnx")
         );
         assert_eq!(p.action_scale, 0.8);
-        assert_eq!(p.ground_pick_period, 3.0);
+        assert_eq!(p.ground_pick_period, 5.0);
         assert_eq!(p.ground_pick_action_scale, 0.8);
         assert_eq!(
             p.head_lowpass,

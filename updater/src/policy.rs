@@ -6,10 +6,10 @@
 //! this is the daemon that has both: `robotd` has neither by design, and `robotctl` must not link
 //! an HTTP client because it is the tool that has to work when everything else is broken.
 //!
-//! **Why it exists.** A board installs its set from a pin that ships inside the daemon release
-//! (`scripts/seed-policies.sh`), which makes the pin a *minimum* rather than a ceiling: without
-//! something to move past it, a retrained gait would still need a daemon release to reach a
-//! robot, which is the thing the whole channel was meant to stop. This is that something.
+//! **Why it exists.** A daemon release declares the minimum official-set revision it supports;
+//! `scripts/seed-policies.sh` downloads that revision independently from the Hub when a board is
+//! fresh or behind. The pin is a *minimum*, not a ceiling: this module is what lets a retrained
+//! gait move past it without a daemon release.
 //!
 //! The layout is the seeder's, and deliberately: `releases/<name>/` beside a `current` symlink,
 //! swapped by rename. So a set installed here and a set installed by the seeder are the same
@@ -40,8 +40,7 @@ pub const DETECTOR_FILES: [&str; 2] = ["duck_detect.rknn", "duck_detect.onnx"];
 /// Where a set's file list comes from.
 #[derive(Debug, Clone, Copy)]
 pub enum Contents {
-    /// The revision's `manifest.json`, falling back to what the installed set holds — the
-    /// official policy set, whose list can grow with a tag.
+    /// The revision's `manifest.json` — the official policy set, whose list can grow with a tag.
     Manifest,
     /// A fixed list — the detector, whose two files have fixed names and no manifest.
     Fixed(&'static [&'static str]),
@@ -116,26 +115,6 @@ impl Source {
 pub fn installed(root: &Path) -> Option<Source> {
     let text = std::fs::read_to_string(root.join("current").join(SOURCE_FILE)).ok()?;
     Source::parse(&text)
-}
-
-/// Every `.onnx` in the installed set — the fallback download list.
-///
-/// **Second choice.** [`set_files`] asks the revision what it contains, which is the only list
-/// that can grow; this one can only ever re-fetch what the board already has, so a revision that
-/// added a tenth policy would install nine and the tag would have been for nothing. It is here
-/// for a revision tagged before the manifest existed, and goes when every tagged set carries one
-/// — the same rule, and the same wording, as `seed-policies.sh`'s `FALLBACK_FILES`.
-fn installed_files(root: &Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(root.join("current")) else {
-        return Vec::new();
-    };
-    let mut names: Vec<String> = entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.ends_with(".onnx"))
-        .collect();
-    names.sort();
-    names
 }
 
 /// A tag's version, as a list of numbers, or `None` when it is not a version at all.
@@ -223,25 +202,24 @@ pub async fn check(root: &Path) -> crate::proto::PolicyCheckResult {
 
 /// What a revision says it contains, and the manifest bytes to install beside it.
 ///
-/// Empty when the revision has no `manifest.json`, or one nothing can be read out of — which is
-/// a fact about an older tag rather than a failure, so the caller falls back rather than
-/// refusing. The bytes are returned verbatim rather than re-serialised: `robotd` reads fields
-/// this crate has no type for, and a round trip through the subset understood here would drop
-/// them.
+/// The manifest is required for an official set revision: it is both the authoritative download
+/// list and the metadata `robotd` uses after installation. The bytes are returned verbatim rather
+/// than re-serialised: `robotd` reads fields this crate has no type for, and a round trip through
+/// the subset understood here would drop them.
 async fn set_files(
     client: &reqwest::Client,
     repo: &str,
     version: &str,
-) -> (Vec<String>, Option<Vec<u8>>) {
+) -> Result<(Vec<String>, Vec<u8>), Error> {
     let url = format!("https://huggingface.co/{repo}/resolve/{version}/{MANIFEST_FILE}");
-    let Ok(bytes) = http::get_bytes(client, &url, None).await else {
-        return (Vec::new(), None);
-    };
+    let bytes = http::get_bytes(client, &url, None).await?;
     let files = files_in_manifest(&bytes);
-    match files.is_empty() {
-        true => (files, None),
-        false => (files, Some(bytes)),
+    if files.is_empty() {
+        return Err(Error::Network(format!(
+            "{repo}@{version}'s manifest lists no usable policies"
+        )));
     }
+    Ok((files, bytes))
 }
 
 /// The `file` of every policy a manifest lists, and nothing that is not a plain file name.
@@ -314,18 +292,14 @@ pub async fn install_set(
 
     let (files, manifest) = match contents {
         Contents::Manifest => {
-            let (files, manifest) = set_files(&client, &source.repo, &version).await;
-            match files.is_empty() {
-                false => (files, manifest),
-                true => (installed_files(root), None),
-            }
+            let (files, manifest) = set_files(&client, &source.repo, &version).await?;
+            (files, Some(manifest))
         }
         Contents::Fixed(names) => (names.iter().map(|n| (*n).to_owned()).collect(), None),
     };
     if files.is_empty() {
         return Err(Error::Network(format!(
-            "{}@{version} lists no policies, and the installed set has no .onnx files to \
-             replace — there is nothing to fetch",
+            "{}@{version} lists no files to install",
             source.repo
         )));
     }
@@ -359,10 +333,10 @@ pub async fn install_set(
 
     // **The manifest is installed with the set, not just read to build the list.** `robotd`
     // reads `<current>/manifest.json` to know which policies are skills and how each one is
-    // tuned; a set installed without it falls back to the three names this build was compiled
-    // with. So an update that fetched only the `.onnx` files would quietly undo every skill the
+    // tuned. An update that fetched only the `.onnx` files would quietly remove every skill the
     // set declares — the exact coupling the manifest exists to remove, reintroduced by the
-    // command whose whole job is moving between revisions.
+    // command whose whole job is moving between revisions. Official-set installs cannot reach
+    // this point without one; the option is for fixed-file sets such as the detector.
     if let Some(manifest) = &manifest {
         std::fs::write(staging.join(MANIFEST_FILE), manifest).map_err(|e| Error::Io {
             path: staging.join(MANIFEST_FILE),
@@ -551,37 +525,12 @@ mod tests {
         );
     }
 
-    /// A revision tagged before the manifest existed says nothing, which is a fact about the tag
-    /// rather than a failure — `install` falls back to what the board holds.
+    /// An unreadable or empty document cannot supply an official set's download list.
     #[test]
-    fn a_revision_without_a_manifest_says_nothing() {
+    fn a_manifest_without_usable_policy_entries_says_nothing() {
         assert!(files_in_manifest(b"not json at all").is_empty());
         assert!(files_in_manifest(b"{}").is_empty());
         assert!(files_in_manifest(br#"{"policies": []}"#).is_empty());
-    }
-
-    /// The fallback list is what is on the board, so a revision with no manifest still replaces
-    /// a set file for file. The `.source` record is not one of them.
-    #[test]
-    fn the_fetch_list_is_what_the_installed_set_holds() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        std::fs::create_dir_all(root.join("releases/seed-v1")).unwrap();
-        for name in ["alpha_walking.onnx", "roulade.onnx"] {
-            std::fs::write(root.join("releases/seed-v1").join(name), "x").unwrap();
-        }
-        std::fs::write(
-            root.join("releases/seed-v1/.source"),
-            "repo=o/r\nversion=v1\n",
-        )
-        .unwrap();
-        swap_current(root, "seed-v1").unwrap();
-
-        assert_eq!(
-            installed_files(root),
-            vec!["alpha_walking.onnx".to_string(), "roulade.onnx".to_string()],
-            "the .source record is not a policy"
-        );
     }
 
     /// Installs accumulate a directory each, so moving between revisions a few times would fill
@@ -1034,32 +983,13 @@ mod tests {
             result.unreachable
         );
     }
-
-    /// A set whose provenance record is missing still counts as installed, and the version comes
-    /// from the directory name — which is the shape of a board seeded before the record existed.
-    /// The seeder back-fills it, but this must not report "nothing installed" in the meantime.
-    #[test]
-    fn a_set_without_a_record_is_still_a_set_on_disk() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        std::fs::create_dir_all(root.join("releases/seed-v1")).unwrap();
-        std::fs::write(root.join("releases/seed-v1/alpha_walking.onnx"), "w").unwrap();
-        swap_current(root, "seed-v1").unwrap();
-
-        assert!(installed(root).is_none(), "no record, so no repo to name");
-        assert_eq!(
-            installed_files(root),
-            vec!["alpha_walking.onnx".to_string()],
-            "but the policies are plainly there"
-        );
-    }
 }
 
 // ── the community library ────────────────────────────────────────────────────
 //
 // One policy, from any Hub repo, into a slot. Separate from the official set above and
-// deliberately so: a set is nine files that version together and fill every slot, and this is one
-// file somebody wants to try in one of them.
+// deliberately so: a set is a family of files that version together and fill every slot, and
+// this is one file somebody wants to try in one of them.
 //
 // A community policy is sandboxed rather than installed as executable system code: `robotd`
 // holds the only write handle to the bus behind joint clamps, a fall reflex and an intent deadman,

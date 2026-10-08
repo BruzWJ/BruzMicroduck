@@ -20,10 +20,8 @@
 
 mod chorale;
 mod control;
-mod head_imu;
 mod idle_head;
 mod intents;
-mod leds;
 mod params;
 mod pickup;
 mod posture;
@@ -394,6 +392,17 @@ impl SlotErrors {
     }
 }
 
+/// A policy bundle that could not be loaded, and whether that is an installation-state problem
+/// rather than evidence against the daemon release being tested.
+///
+/// Kept as one swapped value so health can never pair a new reason with the previous reason's
+/// verdict while the control loop is changing modes or reloading a set.
+#[derive(Debug)]
+struct PolicyFailure {
+    reason: String,
+    missing_official_set: bool,
+}
+
 /// Where a policy file came from, for `robot.policies`.
 ///
 /// Three origins, and the path is enough to tell them apart because the path is *made* of the
@@ -465,8 +474,8 @@ fn slot_report(
 /// fault that belongs to the board rather than to the release being gated, where reverting the
 /// daemon cannot help and only churns the boot counter.
 ///
-/// **Only overrides.** An official path that will not load is a broken bundle and must reach the
-/// health gate as unhealthy, which is exactly what rolls it back.
+/// **Only overrides.** An official path that will not load is a broken installed set and must
+/// reach the health gate as unhealthy, which is exactly what gates the daemon update.
 ///
 /// **And only faults that name a file.** A missing ONNX Runtime fails every path equally; taking
 /// it as evidence against each override in turn would silently strip a board's whole
@@ -581,13 +590,6 @@ struct RobotState {
     imu_stale_run: AtomicU64,
     imu_ready: AtomicBool,
     shutdown: AtomicBool,
-    /// What `robot.flashlight` last asked for, as [`leds::Flashlight`] stores it.
-    flashlight: AtomicU8,
-    /// Whether this board has a flashlight, so `robot.flashlight` refuses on one that does not
-    /// rather than accepting into the dark. Read once: an LED does not appear on a running board.
-    has_flashlight: bool,
-    /// Wakes the LED task now, rather than at its next second — a flashlight press, the shutdown.
-    leds_changed: tokio::sync::Notify,
     /// Fan-out for `robot.state`. Bounded and lossy by design — see [`STATE_BUFFER`].
     state_tx: tokio::sync::broadcast::Sender<proto::RobotState>,
     /// What `btd` should be advertising, published when it changes.
@@ -597,21 +599,16 @@ struct RobotState {
     /// that has fallen behind on beacons wants the newest one, not a backlog of beats that have
     /// already passed.
     chorale_tx: tokio::sync::broadcast::Sender<proto::ChoraleAdvertise>,
-    /// Fan-out for `head_imu.stream` on a `beta` (see [`head_imu`]). Lossy like the state stream:
-    /// a subscriber that falls behind loses samples, the reader never waits.
-    head_imu_tx: tokio::sync::broadcast::Sender<proto::HeadImuFrame>,
-    /// What a `head_imu.stream` subscriber is told before the frames: the chip, or why none.
-    head_imu: head_imu::HeadImuStatus,
-    /// Which board this robot is (`[board] version`). Decides the body IMU's mount.
-    board: robotd_params::board::Board,
-    /// Why the policy is not loaded, if it is not. Set once at startup; the loop keeps
-    /// running and holds the pose, so a broken bundle is a rollback rather than a crash.
-    policy_error: ArcSwapOption<String>,
+    /// Why the policy is not loaded, if it is not. The loop keeps running and holds the pose.
+    /// A broken installed set is unhealthy; a board on which the official set has never been
+    /// installed is degraded because rolling the daemon back cannot create it.
+    policy_error: ArcSwapOption<PolicyFailure>,
     /// Why the last policy change failed, when it named no slot to blame it on.
     ///
     /// **Not [`RobotState::policy_error`]**, and the difference is the health verdict.
-    /// That one is the release's own policy failing to load, which is unhealthy and rolls the
-    /// release back. This is somebody's *change* failing — a reload after a skill was added, a
+    /// That one is the selected controller failing to load. A broken installed official set is
+    /// unhealthy and gates the daemon update; a completely absent set is a degraded provisioning
+    /// condition. This is somebody's *change* failing — a reload after a skill was added, a
     /// whole-robot reset — where the robot is still running the policy it had, so it is degraded
     /// and a rollback would fix nothing.
     ///
@@ -624,7 +621,7 @@ struct RobotState {
     /// control thread has finished loading anything — a client that subscribes during startup
     /// gets the answer rather than a race. What *failed* to load is `policy_error`; this is
     /// what was asked for, and the pair is what distinguishes "no policy wanted" from "the
-    /// policy this release ships would not load".
+    /// selected policy would not load".
     ///
     /// **One swap for the whole set rather than seven fields**, because a mode switch replaces
     /// all of them at once: a reader that caught `walk` from roller beside `stand` from walking
@@ -734,14 +731,8 @@ impl RobotState {
             imu_stale_run: AtomicU64::new(0),
             imu_ready: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
-            flashlight: AtomicU8::new(0),
-            has_flashlight: leds::flashlight_fitted(),
-            leds_changed: tokio::sync::Notify::new(),
             state_tx: tokio::sync::broadcast::Sender::new(STATE_BUFFER),
             chorale_tx: tokio::sync::broadcast::Sender::new(8),
-            head_imu_tx: tokio::sync::broadcast::Sender::new(head_imu::FRAME_BUFFER),
-            head_imu: head_imu::HeadImuStatus::new(),
-            board: params.board.version,
             policy_error: ArcSwapOption::empty(),
             policy_change_error: ArcSwapOption::empty(),
             policies: ArcSwap::from_pointee(PolicyNames::of(&params.policy.resolved())),
@@ -858,18 +849,24 @@ impl RobotState {
             return unhealthy("control loop has not completed a cycle yet".into());
         }
 
-        // A daemon that came up but cannot run its policy is not healthy, however well the
-        // loop is ticking. This is what makes the updater roll back a release whose bundle
-        // is wrong, instead of leaving a robot that holds a pose and never walks again.
-        if let Some(reason) = self.policy_error.load_full() {
-            return unhealthy(format!("policy unavailable: {reason}"));
+        // A daemon that came up but cannot run its policy is not healthy, however well the loop
+        // is ticking. A set that exists but is broken is release-gating. No installed official
+        // set at all is a board/provisioning condition: reverting the daemon cannot fetch it, so
+        // it is degraded and a later update remains installable while the Hub is unavailable.
+        if let Some(failure) = self.policy_error.load_full() {
+            let reason = format!("policy unavailable: {}", failure.reason);
+            return if failure.missing_official_set {
+                degraded(reason)
+            } else {
+                unhealthy(reason)
+            };
         }
 
         // A slot running its default because an override would not load. Degraded rather than
         // unhealthy, and the distinction is load-bearing: this is a property of the *board* —
         // somebody's file is missing — so reverting the daemon cannot fix it, and gating on it
         // would make every subsequent release fail its health check over a stale config line.
-        // The robot walks; it walks with the policy it shipped with, and says so.
+        // The robot walks; it walks with the installed set's default policy, and says so.
         let fell_back = self.policy_slots.load();
         let mut fell_back = fell_back
             .iter()
@@ -1059,8 +1056,6 @@ async fn main() -> ExitCode {
 
     let intents = Arc::new(Intents::new());
 
-    start_head_imu(&state, &params, args.fake || args.sim.is_some());
-
     // The real thing. `setsid` detaches the command from this process's cgroup, so the
     // poweroff proceeds while systemd is busy killing robotd itself.
     let poweroff: PowerOff = Arc::new(|| {
@@ -1086,8 +1081,6 @@ async fn main() -> ExitCode {
         }
     };
 
-    let leds = tokio::spawn(leds::run(Arc::clone(&state)));
-
     let serving = serve(
         Arc::clone(&state),
         Arc::clone(&intents),
@@ -1108,10 +1101,7 @@ async fn main() -> ExitCode {
     // Ask the loop to stop and let it finish the tick it is in, rather than aborting
     // mid-transaction and leaving a half-written packet on the bus.
     state.shutdown.store(true, Ordering::Relaxed);
-    state.leds_changed.notify_one();
     let _ = control.join();
-    // Bounded: an LED write that hangs on the expander must not hold the daemon up.
-    let _ = tokio::time::timeout(Duration::from_secs(1), leds).await;
     let _ = std::fs::remove_file(&args.socket);
     code
 }
@@ -1126,7 +1116,6 @@ fn run_init(params: &Params, duration: Duration) -> ExitCode {
         &params.bus,
         &params.body_imu,
         params.control.hz,
-        params.board.version,
         0,
         &mut Vec::new(),
         &mut false,
@@ -1282,12 +1271,7 @@ impl WaitingVoice {
         if !params.audio.enabled {
             return None;
         }
-        // The same device choice the loop makes, so a board without the configured card plays
-        // on ALSA's default here too.
-        let audio = params.audio.resolve_devices(&robotd_params::alsa_card_ids(
-            &std::fs::read_to_string("/proc/asound/cards").unwrap_or_default(),
-        ));
-        let mut voice = sound::Sound::new(params.audio.bank.clone(), audio.playback);
+        let mut voice = sound::Sound::new(params.audio.bank.clone(), params.audio.device.clone());
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = Arc::clone(&stop);
         let thread = std::thread::Builder::new()
@@ -1350,7 +1334,6 @@ async fn open_bus_waiting(
             bus,
             body_imu,
             control_hz,
-            state.board,
             attempt,
             &mut missing,
             &mut imu_missing,
@@ -1379,22 +1362,11 @@ async fn open_bus_waiting(
     None
 }
 
-/// The body IMU's sensor→trunk mount on `board`: the power board stands on edge in a `zero3`
-/// and lies flat in a `beta`.
-fn body_imu_mount(board: robotd_params::board::Board) -> [f64; 4] {
-    use duck_control::imu::SflpDecoder;
-    match board {
-        robotd_params::board::Board::Zero3 => SflpDecoder::DEFAULT_MOUNT,
-        robotd_params::board::Board::Beta => SflpDecoder::BETA_MOUNT,
-    }
-}
-
 #[cfg(target_os = "linux")]
 fn open_bus(
     bus: &params::Bus,
     body_imu: &params::BodyImuParams,
     control_hz: u32,
-    board: robotd_params::board::Board,
     attempt: u32,
     missing: &mut Vec<u8>,
     imu_missing: &mut bool,
@@ -1423,7 +1395,6 @@ fn open_bus(
             return None;
         }
     };
-    io.set_imu_mount(body_imu_mount(board));
     if loud {
         tracing::info!(
             bus = %body_imu.bus,
@@ -1529,7 +1500,6 @@ fn open_bus(
     _bus: &params::Bus,
     _body_imu: &params::BodyImuParams,
     _control_hz: u32,
-    _board: robotd_params::board::Board,
     _attempt: u32,
     _missing: &mut Vec<u8>,
     _imu_missing: &mut bool,
@@ -1712,20 +1682,21 @@ async fn adopt_startup_pose<T: RobotIo>(
 /// above it can command a motor.
 ///
 /// A policy that failed to load is survivable, and deliberately so: the loop keeps running
-/// at rate, holds its pose, and `robot.health` says why. The updater then rolls the release
-/// back. The alternative — refusing to start — becomes a crashloop under
+/// at rate, holds its pose, and `robot.health` says why. If an installed set is present, that
+/// failure gates the daemon update. The alternative — refusing to start — becomes a crashloop under
 /// `Restart=always` and reaches the health gate as `Unreachable`, which blames the wrong
 /// thing in the journal.
 /// Load one mode's policy bundle, reporting why not.
 ///
 /// `Ok(None)` is "no policy was wanted", which is healthy; `Err` is "one was wanted and could not
 /// be loaded", which is not. Collapsing those two would either make a bench robot look broken or
-/// let a release with an unusable bundle pass the health gate.
+/// let a daemon update with an unusable installed set pass the health gate.
 ///
 /// Separate from [`build_controller`] because two callers want opposite things from a failure.
-/// Startup and a mode switch want it recorded as *the* policy error, which is unhealthy and gets
-/// the release rolled back. A `robot.loadPolicy` wants the reason handed back so it can keep the
-/// controller it already had — a robot must not lose its gait because somebody tried a file.
+/// Startup and a mode switch want it recorded as *the* policy error. A broken installed set is
+/// unhealthy and gates the daemon update; a wholly absent set is degraded because rollback cannot
+/// install it. A `robot.loadPolicy` wants the reason handed back so it can keep the controller it
+/// already had — a robot must not lose its gait because somebody tried a file.
 /// A policy change between being asked for and being applied.
 ///
 /// The networks load on a thread of their own. `Policy::load` validates and warms up every
@@ -2007,10 +1978,41 @@ fn build_controller(
         Ok(controller) => controller,
         Err(e) => {
             tracing::error!(error = %e, "policy unavailable; holding the pose");
-            state.policy_error.store(Some(Arc::new(e.to_string())));
+            state.policy_error.store(Some(Arc::new(PolicyFailure {
+                reason: e.to_string(),
+                missing_official_set: official_policy_set_is_absent(
+                    policy_cfg,
+                    Path::new(params::POLICY_DIR),
+                ),
+            })));
             None
         }
     }
+}
+
+/// Whether this controller needs the official set and that set has never been installed.
+///
+/// `symlink_metadata` is deliberate: a dangling `current` symlink is an installed-but-broken set
+/// and must remain unhealthy. Only the complete absence of a directory entry is the accepted
+/// first-boot state. The path is injected so the boundary can be tested without touching `/opt`.
+fn official_policy_set_is_absent(policy_cfg: &params::ResolvedPolicy, policy_dir: &Path) -> bool {
+    if !policy_cfg.enabled {
+        return false;
+    }
+
+    let uses_official_set = Slot::ALL
+        .into_iter()
+        .filter_map(|slot| policy_cfg.slot(slot))
+        .any(|path| path.starts_with(params::POLICY_DIR))
+        || policy_cfg.skills.iter().any(|skill| {
+            skill
+                .resolved_path()
+                .is_some_and(|path| path.starts_with(params::POLICY_DIR))
+        });
+
+    uses_official_set
+        && std::fs::symlink_metadata(policy_dir)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
 }
 
 async fn control_loop<T: RobotIo>(
@@ -2172,30 +2174,17 @@ async fn control_loop<T: RobotIo>(
     // walks identically — the player degrades to a debug line, and the mic worker is only
     // spawned when configured, with its own retry loop when arecord flaps.
     //
-    // A configured card this board lacks means ALSA's `default` instead (resolve_devices).
-    let audio = params.audio.resolve_devices(&robotd_params::alsa_card_ids(
-        &std::fs::read_to_string("/proc/asound/cards").unwrap_or_default(),
-    ));
-    if params.audio.enabled
-        && let Some(card) = &audio.missing_card
-    {
-        tracing::info!(
-            configured = %params.audio.device,
-            missing = %card,
-            "no such sound card; playing and recording on ALSA's default"
-        );
-    }
     let mut voice = params
         .audio
         .enabled
-        .then(|| sound::Sound::new(params.audio.bank.clone(), audio.playback.clone()));
+        .then(|| sound::Sound::new(params.audio.bank.clone(), params.audio.device.clone()));
     let pet: Option<pet_detect::worker::PetHandle> = if params.audio.enabled
         && params.audio.pet_detect_resolved(params.policy.mode)
         && let Some(model) = params.audio.pet_model_resolved()
         && model.exists()
     {
         match pet_detect::worker::PetHandle::spawn(pet_detect::worker::PetConfig {
-            alsa_device: audio.capture.clone(),
+            alsa_device: params.audio.capture_device(),
             model_path: model.clone(),
             enter_threshold: params.audio.pet_enter_threshold,
             exit_threshold: params.audio.pet_exit_threshold,
@@ -4083,71 +4072,6 @@ async fn claim_socket(socket_path: &Path) -> std::io::Result<(std::fs::File, Uni
     Ok((lock, listener))
 }
 
-/// Read the head IMU on its own thread, if this board's head IMU is robotd's and it is on.
-///
-/// Only the `beta`'s is: on `zero3` the Qwiic head sensor is tofd's,
-/// and a subscriber here is told so rather than handed silence.
-fn start_head_imu(state: &Arc<RobotState>, params: &Params, no_hardware: bool) {
-    use robotd_params::board::Board;
-    let board = params.board.version;
-    if board != Board::Beta {
-        state.head_imu.lost(format!(
-            "on this board the head IMU is read by {}: subscribe to head_imu.stream on its socket",
-            robotd_params::HeadImuParams::reader(board)
-        ));
-        return;
-    }
-    if !params.head_imu.enabled_on(board) {
-        tracing::info!("the head IMU is off; [head_imu] enabled = true to read it");
-        state.head_imu.off();
-        return;
-    }
-    if no_hardware {
-        state
-            .head_imu
-            .lost("--fake/--sim: there is no head IMU behind either".to_owned());
-        return;
-    }
-    let state = Arc::clone(state);
-    let spawned = std::thread::Builder::new()
-        .name("head-imu".into())
-        .spawn(move || head_imu::run(&state.head_imu, &state.head_imu_tx, &state.shutdown));
-    if let Err(e) = spawned {
-        tracing::error!(error = %e, "cannot start the head IMU reader");
-    }
-}
-
-/// A `head_imu.stream` subscription: frames as notifications until the client goes away.
-///
-/// The connection is the stream from here on, as on `tofd`'s socket: one request, then only
-/// server notifications. Input is read and discarded so a hang-up is noticed even while no frame
-/// is coming (an IMU that is off or absent never wakes the channel).
-async fn stream_head_imu(
-    write_half: &mut tokio::net::unix::OwnedWriteHalf,
-    lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
-    frames: &mut tokio::sync::broadcast::Receiver<proto::HeadImuFrame>,
-) -> std::io::Result<()> {
-    loop {
-        tokio::select! {
-            line = lines.next_line() => {
-                if line?.is_none() {
-                    return Ok(());
-                }
-            }
-            received = frames.recv() => match received {
-                Ok(frame) => {
-                    write_line(write_half, &proto::Request::notify_head_imu_frame(&frame)).await?;
-                }
-                // Lagged: the gap shows in `seq`; carry on from the newest.
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::debug!(dropped = n, "head IMU subscriber fell behind");
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
-            },
-        }
-    }
-}
-
 async fn serve(
     state: Arc<RobotState>,
     intents: Arc<Intents>,
@@ -4315,13 +4239,6 @@ async fn handle(
             }
             continue;
         };
-
-        if let Ok(proto::Call::HeadImuStream) = &call {
-            let response = proto::Response::ok(Some(id), &state.head_imu.result());
-            write_line(&mut write_half, &response).await?;
-            let mut frames = state.head_imu_tx.subscribe();
-            return stream_head_imu(&mut write_half, &mut lines, &mut frames).await;
-        }
 
         if let Ok(proto::Call::ChoraleSubscribe) = &call {
             // `btd` asking what to put on the air. One connection carries both directions: this
@@ -5101,21 +5018,6 @@ fn dispatch(
             proto::Response::ok(Some(id), &result)
         }
 
-        // The task that owns the LED switches it; this only records what was asked and wakes it.
-        proto::Call::RobotFlashlight(p) => {
-            let result = if state.has_flashlight {
-                let current = state.flashlight.load(Ordering::Relaxed);
-                state
-                    .flashlight
-                    .store(leds::flashlight_after(current, p), Ordering::Relaxed);
-                state.leds_changed.notify_one();
-                proto::IntentResult::accepted()
-            } else {
-                proto::IntentResult::refused("this board has no flashlight")
-            };
-            proto::Response::ok(Some(id), &result)
-        }
-
         // Sit, then power the machine off. Never refused for being inconvenient — a robot
         // that cannot sit (no sitstand policy, not driving) cuts torque and powers off
         // directly, which is still what was asked for.
@@ -5302,7 +5204,7 @@ fn dispatch(
                                 "no policy configured; holding the startup pose".to_owned()
                             })
                         },
-                        |e| Some(format!("policy would not load: {e}")),
+                        |failure| Some(format!("policy would not load: {}", failure.reason)),
                     ),
                 },
             )
@@ -5620,6 +5522,13 @@ mod tests {
         (dir, state)
     }
 
+    /// A manifest-less local/community skill, for request tests that need a configurable name.
+    fn state_with_skill(name: &str) -> (tempfile::TempDir, Arc<RobotState>) {
+        state_over(&format!(
+            "[[policy.skill]]\nname = {name:?}\npath = \"/srv/{name}.onnx\"\nduration = 1.0\n"
+        ))
+    }
+
     /// **A new skill needs a duration and an existing one does not**, so a client may send one
     /// field. Without the fallback, changing a skill's command would silently reset its length.
     #[test]
@@ -5720,17 +5629,14 @@ mod tests {
         }
     }
 
-    /// **`robot.skills` lists the built-ins separately**, because they are not table entries and
+    /// **`robot.skills` lists the daemon-driven actions separately**, because they are not table entries and
     /// a client that only read the table would conclude they do not exist.
     #[test]
     fn the_skills_report_names_the_daemon_driven_ones_apart() {
         let (_cfg, state) = state_over("");
         let report = skills_report(&state);
 
-        assert!(
-            report.skills.iter().any(|s| s.name == "roulade"),
-            "the table has the configurable ones"
-        );
+        assert!(report.skills.is_empty(), "no set manifest and no config");
         assert!(
             report.skills.iter().all(|s| !s.overridden),
             "nothing is overridden on a bare config"
@@ -5739,6 +5645,7 @@ mod tests {
             !report.skills.iter().any(|s| s.name == "ground_pick"),
             "the scripted one is not a table entry"
         );
+        assert_eq!(report.built_in, ["ground_pick", "sit_toggle"]);
     }
 
     /// Removing something that was never configured is not a failure — asking twice must not
@@ -5823,7 +5730,7 @@ mod tests {
     /// `configd`: a refusal naming the real skills is worth much more than a dead button.
     #[test]
     fn binding_an_unknown_skill_is_refused_naming_the_real_ones() {
-        let (_dir, state) = state_over("");
+        let (_dir, state) = state_with_skill("roulade");
         let before = std::fs::read_to_string(state.config_path.clone()).expect("read");
 
         let result = bind_pad_request(
@@ -5873,7 +5780,7 @@ mod tests {
     /// `robot.loadPolicy` uses for a path.
     #[test]
     fn an_empty_skill_is_off_and_an_absent_one_is_the_default() {
-        let (_dir, state) = state_over("");
+        let (_dir, state) = state_with_skill("kick_left");
 
         let off = bind_pad_request(
             &proto::PadBindParams {
@@ -5908,7 +5815,7 @@ mod tests {
     /// untouched slot. A write would be a file change with nothing behind it.
     #[test]
     fn binding_what_is_already_bound_writes_nothing() {
-        let (_dir, state) = state_over("");
+        let (_dir, state) = state_with_skill("kick_left");
         let result = bind_pad_request(
             &proto::PadBindParams {
                 button: "lb".to_owned(),
@@ -6145,7 +6052,7 @@ mod tests {
     #[test]
     fn setting_the_mode_accepts_refuses_and_says_which() {
         let params = Params::default();
-        assert_eq!(params.policy.mode, Mode::Walk, "the shipped default");
+        assert_eq!(params.policy.mode, Mode::Walk, "the built-in default");
         let s = RobotState::new(
             &params,
             std::path::Path::new("/test/robotd.toml"),
@@ -6477,34 +6384,6 @@ mod tests {
         );
     }
 
-    /// A board without a flashlight says so; one with it records the toggle for the LED task.
-    #[test]
-    fn robot_flashlight_is_refused_without_one_and_toggles_with_one() {
-        let intents = Intents::new();
-        let toggle = proto::Call::RobotFlashlight(proto::FlashlightParams {
-            toggle: true,
-            ..Default::default()
-        });
-        let ask = |s: &RobotState| -> proto::IntentResult {
-            dispatch(s, &intents, proto::Id::Number(1), &toggle)
-                .result_as()
-                .unwrap()
-        };
-
-        let mut s = state();
-        s.has_flashlight = false;
-        let refused = ask(&s);
-        assert!(!refused.accepted);
-        assert!(refused.reason.is_some(), "a refusal must say why");
-        assert_eq!(s.flashlight.load(Ordering::Relaxed), 0);
-
-        s.has_flashlight = true;
-        assert!(ask(&s).accepted);
-        assert_ne!(s.flashlight.load(Ordering::Relaxed), 0);
-        assert!(ask(&s).accepted);
-        assert_eq!(s.flashlight.load(Ordering::Relaxed), 0);
-    }
-
     /// `robotctl quack` exists to answer "which duck am I talking to", and it answers by
     /// making a noise. A robot that cannot make one must say so — accepting the call and
     /// staying silent inverts the answer, sending whoever asked off to look for a duck they
@@ -6575,7 +6454,7 @@ mod tests {
     /// the request must reach the intents for the loop to take.
     #[test]
     fn robot_do_refuses_what_is_not_configured_and_queues_what_is() {
-        let s = state(); // default params: every walk-mode skill configured
+        let s = state(); // default params: the daemon-driven walk-mode actions are configured
         let intents = Intents::new();
         let id = || proto::Id::Number(1);
         // A skill needs the policy driving, which is the pad's Start and the home ramp done.
@@ -6602,13 +6481,22 @@ mod tests {
         // refuse, not queue — and the refusal names what this robot *does* have, since the set
         // is config and a client cannot assume it.
         let mut params = Params::default();
-        params.policy.skills = vec![params::SkillDef {
-            name: "kick_left".into(),
-            path: Some(PathBuf::from("none")),
-            duration: 0.5,
-            chain: false,
-            ..Default::default()
-        }];
+        params.policy.skills = vec![
+            params::SkillDef {
+                name: "roulade".into(),
+                path: Some(PathBuf::from("/srv/roulade.onnx")),
+                duration: 1.0,
+                chain: true,
+                ..Default::default()
+            },
+            params::SkillDef {
+                name: "kick_left".into(),
+                path: Some(PathBuf::from("none")),
+                duration: 0.5,
+                chain: false,
+                ..Default::default()
+            },
+        ];
         let unconfigured = RobotState::new(
             &params,
             std::path::Path::new("/test/robotd.toml"),
@@ -7114,9 +7002,10 @@ mod tests {
             false,
             false,
         ));
-        broken
-            .policy_error
-            .store(Some(Arc::new("ONNX Runtime not loadable".to_owned())));
+        broken.policy_error.store(Some(Arc::new(PolicyFailure {
+            reason: "ONNX Runtime not loadable".to_owned(),
+            missing_official_set: false,
+        })));
         let result: proto::SubscribeResult = dispatch(
             &broken,
             &Intents::new(),
@@ -7288,7 +7177,8 @@ mod tests {
     /// **The policy-failure contract.** A policy that cannot load must not stop the robot
     /// working: the loop keeps ticking at rate, holds its pose, and health says why.
     ///
-    /// This is the branch that makes a broken bundle a rollback instead of an outage. It
+    /// This is the branch that makes a broken installed set fail the health gate instead of
+    /// becoming an outage. It
     /// nearly did not work at all — `ort` does not return an error when ONNX Runtime is
     /// missing, it `expect`s deep inside a lazy init, so the control thread died, no tick
     /// ever landed, and health reported "the loop has not completed a cycle" forever. The
@@ -8027,6 +7917,79 @@ mod tests {
     // being a way to break a robot: what is refused before anything is queued, and what a
     // failure costs.
 
+    /// Only a completely uninstalled official set is a non-gating policy failure. An entry at
+    /// `current` means installation was attempted and must be held to the normal integrity/load
+    /// checks; a controller made entirely from local paths is not waiting for the official set.
+    #[test]
+    fn only_an_uninstalled_official_set_is_classified_as_absent() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let current = root.path().join("current");
+        let official = Params::default().policy.resolved();
+
+        assert!(official_policy_set_is_absent(&official, &current));
+
+        std::fs::create_dir(&current).expect("create installed set");
+        assert!(
+            !official_policy_set_is_absent(&official, &current),
+            "an existing set with missing files is broken, not uninstalled"
+        );
+
+        #[cfg(unix)]
+        {
+            std::fs::remove_dir(&current).expect("remove installed set");
+            std::os::unix::fs::symlink(root.path().join("missing-target"), &current)
+                .expect("create dangling current symlink");
+            assert!(
+                !official_policy_set_is_absent(&official, &current),
+                "a dangling selection is an installed-but-broken set"
+            );
+            std::fs::remove_file(&current).expect("remove dangling symlink");
+        }
+
+        let mut local = official;
+        local.walk = PathBuf::from("/srv/policies/walk.onnx");
+        local.stand = None;
+        local.sitstand = None;
+        local.ground_pick = None;
+        local.kick_left = None;
+        local.kick_right = None;
+        local.roulade = None;
+        local.skills.clear();
+        assert!(
+            !official_policy_set_is_absent(&local, &current),
+            "a local-only controller does not depend on the official set"
+        );
+    }
+
+    /// Missing seed data is visible but cannot condemn a daemon update: reverting the daemon
+    /// cannot create files that have never been installed. A present but unusable set stays a
+    /// strict failure so corruption and model/runtime incompatibilities still roll back.
+    #[test]
+    fn an_uninstalled_policy_set_is_degraded_but_a_broken_set_is_unhealthy() {
+        let s = state();
+        ticked(&s, 1);
+        s.policy_error.store(Some(Arc::new(PolicyFailure {
+            reason: "official policy set is not installed".to_owned(),
+            missing_official_set: true,
+        })));
+
+        let absent = s.health();
+        assert!(!absent.healthy);
+        assert!(absent.degraded, "this must not roll a daemon release back");
+        assert!(
+            absent.reason.unwrap().contains("not installed"),
+            "the operator still needs the cause"
+        );
+
+        s.policy_error.store(Some(Arc::new(PolicyFailure {
+            reason: "installed manifest names a missing graph".to_owned(),
+            missing_official_set: false,
+        })));
+        let broken = s.health();
+        assert!(!broken.healthy);
+        assert!(!broken.degraded, "a broken installed set must still gate");
+    }
+
     fn shape_error(path: &str) -> PolicyError {
         PolicyError::Shape {
             path: PathBuf::from(path),
@@ -8041,7 +8004,7 @@ mod tests {
     /// The failure this prevents is quiet and total: without the check, a missing dylib fails
     /// every path in turn, each failure reads as "that slot's file is bad", and a robot silently
     /// loses its whole policy configuration because a library was not installed. The daemon then
-    /// runs release defaults it was told not to, while the config file still says otherwise.
+    /// runs installed-set defaults it was told not to, while the config file still says otherwise.
     #[test]
     fn a_fault_that_names_no_file_drops_nothing() {
         let mut policy = params::PolicyParams::default();
@@ -8087,9 +8050,9 @@ mod tests {
         assert!(reason.contains("51"), "and it names the shape: {reason}");
     }
 
-    /// **Only overrides are dropped.** An official path that will not load is a broken release,
-    /// and it has to reach the health gate as unhealthy — that is what rolls it back. Quietly
-    /// falling back would leave a duck standing still and a release that passed.
+    /// **Only overrides are dropped.** An official path that will not load is a broken installed
+    /// set, and it has to reach the health gate as unhealthy. Quietly falling back would leave a
+    /// duck standing still while the daemon update passed.
     #[test]
     fn an_official_path_is_never_validated_away() {
         let mut policy = params::PolicyParams::default();
@@ -8105,7 +8068,7 @@ mod tests {
         assert_eq!(
             asked.into_inner(),
             vec!["/srv/mine.onnx".to_string()],
-            "the six slots resolving to release defaults are not this check's business"
+            "the slots resolving to installed-set defaults are not this check's business"
         );
     }
 
@@ -8613,7 +8576,7 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let resolved = params.policy.resolved();
+        let resolved = params.policy.resolved_with(None);
 
         let published = PolicyNames::of(&resolved).skills;
         let paths: Vec<_> = resolved
@@ -8624,12 +8587,8 @@ mod tests {
 
         assert_eq!(
             published,
-            vec![
-                "roulade".to_string(),
-                "kick_left".to_string(),
-                "polite-bow".to_string()
-            ],
-            "kick_right is switched off and roulade keeps its place"
+            vec!["polite-bow".to_string()],
+            "the disabled entry contributes nothing and no set skills are invented"
         );
         assert_eq!(paths.len(), published.len(), "one path per published name");
         assert_eq!(
@@ -8713,15 +8672,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("robotd.toml");
         std::fs::write(&config, "[policy]\n").unwrap();
-        assert_eq!(
+        assert!(
             params::Params::load(&config, false)
                 .unwrap()
                 .policy
-                .resolved()
+                .resolved_with(None)
                 .skills
-                .len(),
-            3,
-            "the built-in three"
+                .is_empty(),
+            "no manifest and no configured entries"
         );
 
         std::fs::write(
@@ -8732,7 +8690,7 @@ mod tests {
         let names: Vec<String> = params::Params::load(&config, false)
             .unwrap()
             .policy
-            .resolved()
+            .resolved_with(None)
             .skills
             .iter()
             .map(|s| s.name.clone())
@@ -8893,13 +8851,14 @@ mod tests {
         assert!(result.enabled);
         assert_eq!(result.slots.len(), Slot::ALL.len());
         for slot in &result.slots {
-            // `stand` is the empty row by default — velstand stands on its own — and an
-            // empty slot has no file to have come from anywhere.
-            let expected = (slot.slot != "stand").then_some("official");
+            // With no installed set manifest, only the daemon-driven default paths exist. The
+            // generic skill rows remain present but empty rather than guessing old filenames.
+            let expected = matches!(slot.slot.as_str(), "walk" | "sitstand" | "ground_pick")
+                .then_some("official");
             assert_eq!(
                 slot.origin.as_deref(),
                 expected,
-                "a default robot runs the release's own set: {slot:?}"
+                "each row reports whether it has an official path: {slot:?}"
             );
             assert!(!slot.overridden, "{slot:?}");
             assert!(slot.error.is_none(), "{slot:?}");

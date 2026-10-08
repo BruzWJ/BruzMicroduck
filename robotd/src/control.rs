@@ -100,7 +100,7 @@ pub struct SkillTuning {
     /// rest pose.
     pub sitstand_ramp_s: f64,
     /// The one-shot skills, in priority order — name, duration, whether holding chains, and
-    /// what each changes about the robot while it runs. Config, resolved over the built-ins.
+    /// what each changes about the robot while it runs. Config, resolved over the installed set.
     pub skills: Vec<robotd_params::SkillDef>,
 }
 
@@ -851,7 +851,7 @@ mod tests {
 
     /// The ground pick ends at 70% of its cycle — ending at 100% replays the reach on the
     /// way out, which is the prototype bug the 0.7 cutoff fixed there. The cutoff and the rise
-    /// come from the set's manifest now; these are what a board with no manifest gets.
+    /// come from the set's manifest now; these are the defaults when those fields are omitted.
     #[test]
     fn the_ground_pick_cutoff_is_the_prototypes() {
         assert_eq!(robotd_params::DEFAULT_GROUND_PICK_END_PHASE, 0.7);

@@ -236,9 +236,9 @@ pub struct PolicyPaths {
 
 /// The loaded networks.
 ///
-/// A configured path that fails to load fails the whole load — the policies ship inside the
-/// release, so a missing or corrupt file is a broken bundle, and the right outcome is
-/// "unhealthy, roll it back", not a robot that silently lost its kick.
+/// A configured path that fails to load fails this whole candidate atomically, so the caller can
+/// keep the running controller or classify startup health from the path's origin. A partial load
+/// would silently remove capabilities from a set that is meant to be coherent.
 pub struct Policy {
     walk: Network,
     stand: Option<Network>,
@@ -702,9 +702,8 @@ mod tests {
         assert_eq!(DEFAULT_STANDING_THRESHOLD, 0.05);
     }
 
-    /// A bundle without a standing policy must never select one. Slice 2 can ship a single
-    /// policy, and `will_stand` returning true there would index a session that is not
-    /// loaded.
+    /// A configuration without a standing policy must never select one. `will_stand` returning
+    /// true there would index a session that is not loaded.
     #[test]
     fn without_a_standing_policy_it_never_stands() {
         // Constructed directly rather than via `load`, which needs ONNX Runtime present.

@@ -1300,7 +1300,7 @@ enum Policy {
         #[arg(long)]
         unwind_s: Option<f64>,
     },
-    /// Take a skill out. One this robot's release ships comes back.
+    /// Take a skill out. One declared by the installed official set comes back.
     Unskill { name: String },
     /// Re-read every slot from the config file.
     ///

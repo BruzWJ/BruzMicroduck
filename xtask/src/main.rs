@@ -677,24 +677,26 @@ mod tests {
         }
     }
 
-    /// The policy set, as `robotd-params` resolves it across both drive modes.
+    /// The policy set used by the seeder tests.
     ///
-    /// The one list everything else must agree with: these are the files a slot can default to,
-    /// so they are exactly the files that have to exist on a board.
-    fn policies_robotd_expects() -> Vec<String> {
+    /// It includes every file a slot defaults to across both drive modes, plus one file known only
+    /// to the manifest. That last entry is the contract under test: the daemon's compiled paths
+    /// are not an alternative download list for a set that can grow independently.
+    fn fake_policy_files() -> Vec<String> {
         let mut names = Vec::new();
         for mode in [robotd_params::Mode::Walk, robotd_params::Mode::Roller] {
             let params = robotd_params::PolicyParams {
                 mode,
                 ..Default::default()
             };
-            let resolved = params.resolved();
+            let resolved = params.resolved_with(None);
             for slot in robotd_params::Slot::ALL {
                 if let Some(path) = resolved.slot(slot) {
                     names.push(path.file_name().unwrap().to_string_lossy().into_owned());
                 }
             }
         }
+        names.push("manifest-only-skill.onnx".to_owned());
         names.sort();
         names.dedup();
         names
@@ -702,7 +704,7 @@ mod tests {
 
     /// Run `scripts/seed-policies.sh` against a throwaway tree, with the Hub faked by a directory.
     ///
-    /// `base_url` of `None` is an unreachable Hub, which is the case the fallback is for.
+    /// `base_url` of `None` is an unreachable Hub, which must leave the board unchanged.
     /// Returns what `current` points at, and what the walking policy contains through it.
     fn seed(
         root: &std::path::Path,
@@ -736,9 +738,23 @@ mod tests {
     /// A directory standing in for the Hub repo at some revision.
     fn fake_hub(dir: &std::path::Path, marker: &str) {
         std::fs::create_dir_all(dir).expect("mkdir");
-        for name in policies_robotd_expects() {
-            std::fs::write(dir.join(&name), format!("{marker}-{name}")).expect("policy");
+        let names = fake_policy_files();
+        for name in &names {
+            std::fs::write(dir.join(name), format!("{marker}-{name}")).expect("policy");
         }
+        let policies: Vec<_> = names
+            .into_iter()
+            .map(|file| serde_json::json!({ "file": file }))
+            .collect();
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "policies": policies,
+            }))
+            .expect("manifest json"),
+        )
+        .expect("manifest");
     }
 
     /// **The pin is in two places and they must agree.** `seed-policies.sh` runs from inside a
@@ -953,44 +969,12 @@ mod tests {
         assert_eq!(link, None);
     }
 
-    /// **The fallback list must still be what `robotd` can ask for.**
-    ///
-    /// The download list comes from the set's own `manifest.json` now, so a tenth policy is a tag
-    /// rather than an edit here. What is left in the script is the fallback for a revision tagged
-    /// before the manifest existed — and it is still a list that can go wrong in both directions:
-    /// a name nothing asks for is dead weight on the eMMC, and one a slot defaults to that is
-    /// missing is a slot that will not load, reported as degraded on every board.
-    ///
-    /// This goes with the fallback, once every tagged set carries a manifest.
-    #[test]
-    fn the_fallback_list_is_exactly_what_robotd_defaults_to() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        let script = std::fs::read_to_string(root.join("scripts/seed-policies.sh")).unwrap();
-        let line = script
-            .lines()
-            .find(|l| l.starts_with("FALLBACK_FILES="))
-            .expect("seed-policies.sh must declare FALLBACK_FILES");
-        let mut listed: Vec<String> = line
-            .trim_start_matches("FALLBACK_FILES=")
-            .trim_matches('"')
-            .split_whitespace()
-            .map(str::to_owned)
-            .collect();
-        listed.sort();
-
-        assert_eq!(
-            listed,
-            policies_robotd_expects(),
-            "the fallback list and robotd's own defaults have drifted"
-        );
-    }
-
     /// **The seeder's `sed` must match what the manifest actually says.**
     ///
     /// There is no JSON parser where that script runs — a release on a board with curl and a
     /// POSIX shell — so the file list is extracted with one pattern over a file whose shape is
     /// ours. That is fine exactly as long as the two agree, and silently downloads nothing the
-    /// moment they do not: a fresh board would fall back to nine names and never see a tenth.
+    /// moment they do not: a fresh board would install no policy set.
     #[test]
     fn the_seeders_pattern_reads_the_manifest_it_is_given() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
@@ -1072,7 +1056,11 @@ mod tests {
             .filter(|n| n.ends_with(".onnx"))
             .collect();
         installed.sort();
-        assert_eq!(installed, policies_robotd_expects(), "the whole set");
+        assert_eq!(
+            installed,
+            fake_policy_files(),
+            "the whole manifest-defined set"
+        );
         assert!(
             root.join("releases/seed-v1/.source").exists(),
             "and a record of where it came from, which is what `policy check` reads"
@@ -1132,39 +1120,36 @@ mod tests {
         assert_eq!(seed(&root, "v1", None), first);
     }
 
-    /// **A set installed before the provenance record existed must gain one.**
-    ///
-    /// From a board: the fast path — the pinned set is already installed, so no network — exits
-    /// before anything is written, which is right for the policies and wrong for the record. A
-    /// board seeded by the previous version of this script would take that branch forever and
-    /// never gain one, and `robotctl policy check` reported a robot with a perfectly good set as
-    /// having nothing installed.
+    /// **A directory name is not provenance.** A set without a `.source` record may have been
+    /// installed by another tool, even when its directory happens to start with `seed-`; the
+    /// release seeder must neither claim nor replace it.
     #[test]
-    fn a_set_with_no_provenance_record_gains_one() {
+    fn a_set_without_provenance_is_left_unclaimed() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("policies");
         let seeded = root.join("releases/seed-v1");
         std::fs::create_dir_all(&seeded).unwrap();
-        for name in policies_robotd_expects() {
-            std::fs::write(seeded.join(&name), "x").unwrap();
-        }
+        std::fs::write(seeded.join("velstand.onnx"), "unclaimed").unwrap();
         std::os::unix::fs::symlink("releases/seed-v1", root.join("current")).unwrap();
+
+        let hub = tmp.path().join("hub-v5");
+        fake_hub(&hub, "official");
+        let (link, content) = seed(&root, "v5", Some(&hub));
+
+        assert_eq!(link.as_deref(), Some("releases/seed-v1"));
+        assert_eq!(content.as_deref(), Some("unclaimed"));
         assert!(
             !root.join("current/.source").exists(),
-            "the board's starting state"
+            "the seeder must not manufacture ownership"
         );
-
-        // No Hub, deliberately: the point is that this happens on the branch that touches no
-        // network at all, which is the branch such a board takes every time.
-        seed(&root, "v1", None);
-
-        let record = std::fs::read_to_string(root.join("current/.source")).unwrap();
-        assert!(record.contains("version=v1"), "{record}");
-        assert!(record.contains("repo=pollen-robotics/"), "{record}");
+        assert!(
+            !root.join("releases/seed-v5").exists(),
+            "an unowned live set blocks replacement"
+        );
     }
 
-    /// And it is written once. This runs on every update, and rewriting the file each time just
-    /// to move a timestamp is churn on an eMMC for nothing.
+    /// A newly installed set gets its provenance once. This runs on every update, and rewriting
+    /// the file each time just to move a timestamp is churn on an eMMC for nothing.
     #[test]
     fn a_provenance_record_is_not_rewritten_on_every_update() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1298,6 +1283,23 @@ mod tests {
         assert_eq!(content.as_deref(), Some("old-velstand.onnx"));
     }
 
+    /// A policy revision is defined by its manifest. Model files beside a missing manifest are
+    /// not enough to reconstruct the set: guessing from robotd's current defaults would silently
+    /// omit any policy introduced by that revision.
+    #[test]
+    fn a_revision_without_a_manifest_is_not_guessed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("policies");
+        let hub = tmp.path().join("hub-without-manifest");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&hub).unwrap();
+        for name in fake_policy_files() {
+            std::fs::write(hub.join(name), "unowned").unwrap();
+        }
+
+        assert_eq!(seed(&root, "v1", Some(&hub)), (None, None));
+    }
+
     /// A board that cannot reach the Hub on a first install ends up with no policies, and that
     /// is the accepted shape rather than a bug: `robotd` holds its pose and reports *degraded*,
     /// the update gate passes, and the next update fetches. What must not happen is the seeder
@@ -1352,7 +1354,7 @@ mod tests {
         // A revision that is missing one file, which is what a half-published set looks like.
         let broken = tmp.path().join("hub-v2");
         fake_hub(&broken, "two");
-        std::fs::remove_file(broken.join("roulade.onnx")).unwrap();
+        std::fs::remove_file(broken.join("manifest-only-skill.onnx")).unwrap();
 
         let (link, content) = seed(&root, "v2", Some(&broken));
         assert_ne!(
