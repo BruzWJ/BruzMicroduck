@@ -26,14 +26,14 @@ designed it to be.
 Three ways in, in order of how much you have to type. Everything after this section is the same
 thing with the reasons attached — read it when something disagrees with you, not before.
 
-### Dev board, repository private — this is today
+Every path requires one published stable `daemon-v*` release to exist first. Ignore any
+`daemon-dev-*` prereleases; if no stable release exists, follow the one-time manual workflow linked from
+[`install-dev.md`](../docs/robot/install-dev.md#install); it creates the tag and release for you.
+
+### Dev board, from a clone
 
 One command from a clone, covered step by step in
 [`docs/robot/install-dev.md`](../docs/robot/install-dev.md):
-
-```bash
-export DUCK_TOKEN=github_pat_replace_with_your_token
-```
 
 ```bash
 ./scripts/provision-board.sh microduck@192.168.1.42
@@ -43,16 +43,13 @@ export DUCK_TOKEN=github_pat_replace_with_your_token
 this clone's `provision.sh` rather than fetching it, which is what makes testing an unpushed change
 to it possible.
 
-### On the board, without a clone
+### On the board, without a clone or token
 
-Two commands, and what `provision-board.sh` is doing on your behalf above:
-
-```bash
-export DUCK_TOKEN=github_pat_replace_with_your_token
-```
+The repository and its release assets are public. Download the provisioning script from this
+fork's `replica` branch, then run it on the board:
 
 ```bash
-curl -fsSL -H "Authorization: Bearer $DUCK_TOKEN" https://raw.githubusercontent.com/pollen-robotics/microduck/main/scripts/provision.sh -o /tmp/provision.sh && sudo DUCK_TOKEN="$DUCK_TOKEN" sh /tmp/provision.sh
+curl -fsSL https://raw.githubusercontent.com/BruzWJ/BruzMicroduck/replica/scripts/provision.sh -o /tmp/provision.sh && sudo sh /tmp/provision.sh
 ```
 
 `provision.sh` runs `setup-board.sh`, `migrate-network.sh` and `install.sh` in order, warns for
@@ -77,18 +74,6 @@ during this exact window the journal can still be RAM-only.
 No `newgrp robot` on either path, and that is deliberate rather than an omission: the `robot`
 group is created before the reboot, so the session you log back into already has it.
 
-### Regular user, repository public
-
-No token is needed.
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/pollen-robotics/microduck/main/scripts/provision.sh -o /tmp/provision.sh && sudo sh /tmp/provision.sh
-```
-
-```bash
-robotctl health
-```
-
 Downloaded rather than piped even here: the second half runs after a reboot, so there has to be
 a file left on disk for it to be. It refuses a pipe rather than stranding you halfway.
 
@@ -98,7 +83,7 @@ a file left on disk for it to be. It refuses a pipe rather than stranding you ha
 is the shape to use when you want to see each step's status block go past:
 
 ```bash
-sudo DUCK_NO_REBOOT=1 DUCK_TOKEN="$DUCK_TOKEN" sh /tmp/provision.sh
+sudo DUCK_NO_REBOOT=1 sh /tmp/provision.sh
 ```
 
 ```bash
@@ -154,12 +139,12 @@ backstop. If the backstop fired and restored netplan, re-cutting over unattended
 it, fail the same way, reboot, and go round again; it says so in the log and leaves wifi alone.
 The unit file stays on disk, disabled, as a record of what ran.
 
-While the repository is private, the token is needed three times, and only the first two end with
-provisioning: fetching these scripts, fetching the release, and then permanently — `updaterd`
-reads `GITHUB_TOKEN` from a systemd drop-in on every later update check. Passing `DUCK_TOKEN`
-through is what makes private-repository updates work *after* provisioning, not just during it,
-and `provision.sh` ends by saying which of the two copies it removed and which one stayed. Once
-the repository and release assets are public, a board with no token installs and updates normally.
+No token is needed for the public `BruzWJ/BruzMicroduck` repository. If `DUCK_REPO` points at a
+private repository, the token is needed three times, and only the first two end with provisioning:
+fetching these scripts, fetching the release, and then permanently — `updaterd` reads
+`GITHUB_TOKEN` from a systemd drop-in on every later update check. Passing `DUCK_TOKEN` through
+is what makes private-repository updates work *after* provisioning, not just during it, and
+`provision.sh` ends by saying which of the two copies it removed and which one stayed.
 
 It also creates the `robot` group in its first phase, which is the only reason the flow above
 has no `newgrp robot` in it. `install.sh` does the same thing correctly and too late — by the
@@ -169,7 +154,7 @@ it starts. Moving it ahead of the reboot means the login session you return to a
 **The token, and why a wrong URL is the wrong diagnosis.** `raw.githubusercontent.com` answers
 **404**, not 401, for a private path with no credentials, so a missing header looks exactly like
 a typo. There are two separate tokens in play: the one in your shell, which fetches scripts, and
-the one `updaterd` needs to reach release assets — [that one](#-while-the-repository-is-private-a-robot-needs-a-token)
+the one `updaterd` needs to reach release assets — [that one](#a-private-override-repository-needs-a-token)
 is a systemd drop-in and outlives the shell. The two meet when `provision.sh` reaches
 `install.sh`: passing `DUCK_TOKEN` through is what writes the drop-in.
 
@@ -182,10 +167,7 @@ file is patched directly.
 The servo link is the OpenRB-150's USB CDC device, not a Radxa header UART. `setup-board.sh`
 delegates its host setup to `scripts/setup-openrb.sh`, which installs the ROBOTIS `2f5d:2202`
 udev rule, excludes that port from ModemManager probing, and creates the stable
-`/dev/openrb-dxl` name. Every release carries the same helper, and `hooks/postinstall`
-runs it before robotd restarts so already-provisioned boards receive the rule during an update.
-`setup-board.sh` also removes the retired `uart2-m0` overlay word from upgraded boards. The
-physical servo wiring, OpenRB firmware and power path are owned by
+`/dev/openrb-dxl` name. The physical servo wiring, OpenRB firmware and power path are owned by
 [`robotd-design.md` §1.1](../docs/design/robotd-design.md#11-the-two-buses-and-who-owns-them).
 
 It also provisions the sensor bus independently of the optional audio HAT: installs `i2c-tools`
@@ -196,8 +178,6 @@ the overlay deliberately disables that USB-C PD controller: USB-C remains a 5 V 
 maskrom flashing still works, but PD negotiation does not. Removing the audio HAT does not remove
 that pinmux consequence.
 
-Re-running migrates an older board in place: `i2c3-pihat` becomes `i2c3-qwiic`, the stale
-`99-robot-i2c-pihat.rules` file is removed, and `/dev/i2c-qwiic` replaces `/dev/i2c-pihat`.
 After the requested reboot, the expected Linux 7-bit addresses are `0x29` (VL53L5CX), `0x6a`
 (head LSM6DSV16X, address jumper moved to ground), and `0x6b` (body Micro LSM6DSV16X, factory
 address):
@@ -209,20 +189,9 @@ sudo i2cdetect -y 3
 The connector order and pull-up preparation are in the
 [purchase list](../docs/robot/purachse-list.md#qwiic-assembly).
 
-This is a hard hardware cutover, not a mixed-fleet compatibility mode: the new daemon no longer
-reads the custom Dynamixel IMU, BMI088, or VL53L8CX paths. Fit and provision the Qwiic chain, then
-install/restart the matching release in the same maintenance session. In particular, do not use an
-unattended stable rollout to stage the daemon before the body IMU exists: missing startup hardware
-is deliberately reported as *degraded* (so an unpowered bench robot is not rolled back forever),
-and the updater therefore cannot certify that the physical retrofit happened.
-
-The same cutover replaces the custom HAT's half-duplex motor interface with the OpenRB. A robot
-whose existing `/etc/robot/robotd.toml` still contains the exact old shipped line
-`port = "/dev/ttyS2"` is migrated once to `/dev/openrb-dxl` by the shared release setup script;
-fresh installs and ordinary updates use the same migration, and any other custom port is
-preserved. There is no `/dev/ttyS2` or custom-HAT fallback in this release. Complete the physical
-retrofit in the same maintenance session; without it, the software still installs but health
-reports no motor bus.
+The runtime requires the Qwiic sensor chain and OpenRB motor controller described above. Provision
+them before installing the release; missing startup hardware is reported as *degraded* so an
+unpowered bench robot remains recoverable, but the updater cannot certify incomplete wiring.
 
 ⚠ A kernel upgrade that repoints `/boot/{Image,dtb,uInitrd}` can undo it. A board that stops
 seeing `/dev/i2c-qwiic` after an `apt upgrade` needs this re-run. The USB motor link is independent
@@ -239,17 +208,17 @@ wifi is merely slow reverts the board. It takes the SSID and key from netplan it
 changes **nothing** and prints the `nmcli` commands to create the profile by hand.
 
 **`install.sh`** needs `curl` and coreutils and nothing else — `tar` and `zstd` are linked into
-`updaterd`. Idempotent, and it never overwrites an existing `/etc/robot/updater.toml`. It is two
-commands rather than `curl … | sudo sh` while the repo is private, because the header goes on the
-fetch and `sudo` does not pass a variable through on its own; a pipe carries neither. Everything
-it takes is an environment variable, since it is normally run through a pipe where flags are
-awkward:
+`updaterd`. Idempotent, and it never overwrites an existing `/etc/robot/updater.toml`. A private
+override repository takes two commands rather than `curl … | sudo sh`, because the authorization
+header goes on the fetch and `sudo` does not pass a variable through on its own; a pipe carries
+neither. Everything it takes is an environment variable, since it is normally run through a pipe
+where flags are awkward:
 
 | | |
 |---|---|
-| `DUCK_TOKEN` | token for a private repo — the fetch *and* the release assets |
-| `DUCK_REPO` | the repository, for a fork or a test repo |
-| `DUCK_REF` | the branch the provisioning scripts are read from; pin to a tag for a reproducible run |
+| `DUCK_TOKEN` | optional token for a private override repo — the fetch *and* the release assets |
+| `DUCK_REPO` | repository override; defaults to `BruzWJ/BruzMicroduck` |
+| `DUCK_REF` | source branch override; defaults to `replica`. When explicitly supplied to `provision.sh` (normally through `provision-board.sh --ref`), it also requests that branch's dev build; the implicit default does not. |
 | `DUCK_CONFIG_REF` | where `updater.toml` comes from. Defaults to the tag of the release being installed, and `DUCK_REF` does not change it — a config field is only understood by binaries from its own version onwards, so pairing a branch's config with the last stable binary is how `updaterd` ends up refusing to start. Set this only to test a config change with a build that understands it. |
 | `DUCK_FORCE_REINSTALL` | reinstall over a live release using the release's own `updaterd` |
 
@@ -264,7 +233,7 @@ live, so that can never silently disable auto-rollback on a working robot. `--fr
 installs from local files instead: the offline and factory path, and what CI uses to verify a
 release before publishing it.
 
-### ⚠ While the repository is private, a robot needs a token
+### A private override repository needs a token
 
 A private repo's release assets are unreachable without credentials — the
 `releases/download/...` URL 404s even with one, so the engine resolves assets through the
@@ -274,10 +243,10 @@ means a systemd drop-in, not a shell export.
 That is fine on a developer's board and **not** fine on a customer robot: a fleet-wide
 credential in an image is one that leaks and cannot be rotated without updating every image.
 
-`install.sh` therefore writes the drop-in **only when `DUCK_TOKEN` was supplied** — mode 600,
-and it says so loudly. A customer robot installs from a public artifact repository and passes
-no token, so it never reaches that path. Without the drop-in, only a private-repository updater
-is unable to fetch; public GitHub releases need no token.
+`install.sh` writes the drop-in **only when `DUCK_TOKEN` was supplied** — mode 600, and it says so
+loudly. An empty token selects anonymous access and removes any old token drop-in before restarting
+`updaterd`, so a rerun cannot silently retain a stale credential. Without the drop-in, only a
+private-repository updater is unable to fetch; public GitHub releases need no token.
 
 Artifact hosting is therefore public for production releases. The complete source and integrity
 contract is [`../docs/design/updater-design.md`](../docs/design/updater-design.md) §6.

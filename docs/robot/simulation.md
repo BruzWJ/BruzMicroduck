@@ -182,7 +182,7 @@ cameras, or a headless viewer are the fixes, in that order.
 
 **Ducks do not hot-join.** MuJoCo compiles its model, so changing the number of ducks restarts the
 simulator. The daemons survive that: `RemoteIo` reconnects on the next tick, and a duck whose body
-is briefly gone reports unhealthy rather than dying, the same as a robot with no power on the bus.
+is briefly gone reports degraded rather than dying, the same as a robot with no power on the bus.
 
 **`--sim` is not `--fake`.** `robotd --fake` is a robot made of nothing: no physics, positions echo
 back perfectly, nothing falls over. It is for unit tests and for laptop work that needs no body at

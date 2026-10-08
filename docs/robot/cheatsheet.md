@@ -142,7 +142,7 @@ Three properties worth trusting:
   daemon's own loader first, atomically (temp file + rename), and rejected with the reason.
 
 Saving offers what the change actually needs, from the daemon that actually reads it: a restart
-for most keys (`[media]` and `[duck_detector]` are `mediad`'s, `[head_imu]` is `tofd`'s on a zero3 and `robotd`'s on a beta), a `robotd`
+for most keys (`[media]` and `[duck_detector]` are `mediad`'s, `[head_imu]` is `tofd`'s), a `robotd`
 *reload* for `[policy]` — the motors stay powered — and nothing at all for `[pad]`,
 `[pad_imu_head_control]` and `[pad_drive]`, which `padd` picks up within a second. `sudo`, because the file
 is root-owned — without it the editor opens read-only and says so on the first write.
@@ -179,8 +179,9 @@ journalctl -u mediad -b | grep streaming
 ### Policies and skills
 
 A **slot** is what the robot runs by default — the walking gait, the standing network. A
-**skill** is what it runs when asked: a kick, the roulade, a bow. Both are files on the Hub, both
-change without a daemon release, and nothing below needs a restart.
+**skill** is what it runs when asked: a kick, the roulade, a bow. Official defaults come from the
+Hub set; overrides may come from another Hub repo or a local file. Both change without a daemon
+release, and nothing below needs a restart.
 
 What this robot is running right now:
 
@@ -302,8 +303,8 @@ an all-zero command and being selected *is* the trigger. A policy that reads its
 something else — flamingo's is `[flag, side, 0]` — needs it spelled out, and its README says
 what the slots mean.
 
-`sudo robotctl policy remove <name>` takes one out. A skill this robot's release ships comes back
-when you do, since removing the entry only removes the override.
+`sudo robotctl policy remove <name>` takes one out. A skill declared by the installed official set
+comes back when you do, since removing the entry only removes the override.
 
 The robot must be driving for a skill to run — press **Start** on the pad first, or the request
 is refused saying so.
@@ -383,9 +384,8 @@ oddly and you are not sure what was left set.
 #### The slots, and four things worth knowing
 
 The slots are `walk`, `stand`, `sitstand`, `ground_pick`, `kick_left`, `kick_right` and
-`roulade`. `load` writes the choice into `/etc/robot/robotd.toml`, so it survives a reboot and
-survives updates — a release replaces the binaries and the policies it ships, not the line that
-points elsewhere.
+`roulade`. `load` writes the choice into `/etc/robot/robotd.toml`, so it survives a reboot, daemon
+updates and official-set updates; those operations do not remove the line that points elsewhere.
 
 - **Resetting something already reset does nothing, and says so.** No homing, no reload, and no
   `sudo` needed when there is also nothing to write.
@@ -394,9 +394,10 @@ points elsewhere.
 - **A load that fails anyway keeps the policy that was running.** Trying a gait cannot cost you
   the one you had.
 - **A file that has gone missing by the next boot costs its slot, not the robot.** The slot falls
-  back to this robot's own policy, `robotctl health` reports *degraded* and names the file, and
-  `policy reset <slot>` clears it. An official policy that will not load is still **unhealthy** —
-  that is a broken release, and the updater rolls it back.
+  back to the installed official policy, `robotctl health` reports *degraded* and names the file,
+  and `policy reset <slot>` clears it. No official set installed yet is also degraded. A present
+  official set whose required policy will not load is **unhealthy**; select a working set with
+  `policy update --version`, or fix the daemon regression that made it unloadable.
 
 `none` switches a slot off — every slot except `walk`, which is what the others fall back to and
 cannot be empty. Some policies need that: one that does its own standing wants the standing
@@ -404,8 +405,8 @@ network out of the way, or the robot hands itself to that whenever the command i
 
 #### Publishing a policy for every robot
 
-A policy in the official set reaches every robot, and adding one is four steps with no daemon
-release:
+A policy in the official set becomes available to every robot, and adding one is four steps with
+no daemon release:
 
 1. Upload the `.onnx` to `pollen-robotics/microduck-policies`.
 2. Add an entry to its `manifest.json`:
@@ -413,8 +414,10 @@ release:
    { "file": "polite-bow.onnx", "kind": "episodic", "duration_s": 4.0 }
    ```
    The set's manifest is `schema_version: 2`; a plain one-shot needs no more than those three.
-3. Tag it — `hf repos tag create pollen-robotics/microduck-policies v4`.
-4. On a robot: `sudo robotctl policy update`.
+3. Tag it with the next numeric version — for example
+   `hf repos tag create pollen-robotics/microduck-policies v8` after `v7`.
+4. On each robot that should take it now: `sudo robotctl policy update`. A later daemon release
+   may raise `[workspace.metadata.policies]` when fresh or behind boards must seed at least this tag.
 
 That entry is what a one-shot needs and nothing more: **`episodic` with a `duration_s`, on the
 all-zero command it was trained against, becomes a skill the robot answers to by name** — ready
@@ -820,8 +823,8 @@ This is the sensor's own frame, not the robot's: there is no reprojection until
 the kinematics exist, which is also what makes the block the right place to check
 a mounting angle.
 
-`tofd` owns the ToF at `0x29` and, on zero3, the head IMU at `0x6a`; `robotd` owns the body
-IMU at `0x6b` on the same Qwiic bus. The beta face board's head IMU is read by `robotd`.
+`tofd` owns the ToF at `0x29` and head IMU at `0x6a`; `robotd` owns the body IMU at `0x6b`
+on the same Qwiic bus.
 It is still safe to stop `tofd`: Linux serialises access to the shared adapter and no other
 process opens its sensor addresses. It is an ordinary service —
 `sudo systemctl stop tofd` is safe, nothing depends on it, and `monitor` says
@@ -851,41 +854,15 @@ order, the head address jumper, and the required pull-up cuts are in the
 
 #### The head IMU (`head_imu.stream`)
 
-Gyro, acceleration and on-chip SFLP orientation from the head LSM6DSV16X. The reader and
-default depend on the board:
-
-- **zero3**: `tofd` reads the Qwiic sensor at `0x6a`, **off by default** to save bandwidth and
-  wakeups until a consumer needs it. `tofd --imu` reads it for one session; `--imu-hz` sets the
-  publication rate (100 Hz by default, using the chip's 120 Hz SFLP setting).
-- **beta**: `robotd` reads the face board's sensor at 60 Hz, **on by default**. The chip fuses
-  and batches samples; it needs no CPU fusion.
-
-`[head_imu] enabled` in `robotd.toml` overrides either default. `robotctl configure` offers the
-restart of whichever daemon reads it. Ask the other daemon and it names the right one; while the
-sensor is off, a subscription names the key instead of staying silent.
+Gyro, acceleration and on-chip SFLP orientation from the head LSM6DSV16X. `tofd` reads the Qwiic
+sensor at `0x6a`, **off by default** to save bandwidth and wakeups until a consumer needs it.
+`tofd --imu` reads it for one session; `--imu-hz` sets the publication rate (100 Hz by default,
+using the chip's 120 Hz SFLP setting). `[head_imu] enabled` in `robotd.toml` changes the persistent
+setting, and `robotctl configure` offers the required `tofd` restart. While the sensor is off, a
+subscription names the key instead of staying silent.
 
 None of this touches depth: the ToF ranges either way, so the grid above works on
 a duck whose IMU has never been switched on.
-
-### The face LEDs
-
-```
-robotctl led list
-robotctl led set rgb:red on
-robotctl led set all off
-robotctl led blink cam:red
-robotctl led trigger green1:green heartbeat
-robotctl flashlight on --color cyan
-robotctl flashlight toggle
-```
-
-The beta board's face has twelve LEDs (`face:<place>:<colour>`, on a GPIO expander), and `led`
-switches them through the kernel's LED class — names with or without the `face:` prefix, or `all`.
-A board without a face board says so. Each LED has an owning daemon, and what it shows is
-[`architecture.md` §3.2](../design/architecture.md#32-the-face-leds); `led set` overrides it only
-until that daemon next has a change to show, so this is the bench tool. `flashlight` asks `robotd`,
-which owns that LED, and is what the pad's Home button does. A blink rate other than the default
-500/500 ms (`--on-ms`, `--off-ms`) needs `sudo`.
 
 ### The camera (`mediad`)
 
@@ -1061,7 +1038,7 @@ did, then the journal for the same window:
 ```
 run 42 · daemon · 2025-08-27 13:06:40 UTC
   applied 0.1.3 → 0.1.4
-  asked for latest, from github.com/pollen-robotics/microduck, onto 0.1.3
+  asked for latest, from github.com/BruzWJ/BruzMicroduck, onto 0.1.3
   requested by uid=1000 gid=1000 pid=2317
 
   13:06:41      +1s  manifest     0.1.4 · 184.2 MB · sha256 3f9a1c2b… · rev 88efc03

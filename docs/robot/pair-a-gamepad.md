@@ -49,23 +49,6 @@ robot prefers one in pairing mode; both stay paired afterwards and `padd` drives
 The cost is that re-running with nothing new in pairing mode waits out the whole search window
 before reporting the pad you already have — `--timeout 5` if you are only repairing trust.
 
-### With an NFC tag
-
-On a robot with an NFC reader plugged in (a CLRC663 board on USB, `/dev/ttyACM0`), a tag that
-carries the pad's address does the same thing with nothing typed: put the pad in pairing mode, touch
-the tag to the reader. The robot quacks when it has read the tag, and greets — a different sound,
-often a double "wak-wak" — once the pad is paired; a refusal gets no second sound. `nfcd.service` is
-always running and picks a reader up within thirty seconds of it being plugged in.
-
-- **A pad already connected wins.** If one is driving, a touch does nothing, so a tag brushed against
-  the robot never hands the bond to someone else's pad.
-- **One attempt per touch.** If it did not pair, lift the tag and touch again.
-- The tag holds a text or URI record with the address in it — `98:B6:E9:28:06:09`, with `-` or no
-  separator also fine. From a laptop with the reader plugged in, winnie's tool writes one:
-  `ntag write --text 98:B6:E9:28:06:09`.
-
-What it did is in `journalctl -u nfcd -b`.
-
 ## Check it
 
 ```bash
@@ -159,10 +142,10 @@ pairing agent gave the controller behind, and a pad still refuses to bond — a 
 effect, which is how this was found. Never `systemctl restart bluetooth` instead: on this board that
 leaves no adapter at all until a reboot.
 
-`--weird-ble` is the default in [`install-dev.md`](install-dev.md), because about half these boards
-need it and nothing measurable says which. But a board that does not need it should not carry it —
-the flag costs a `btd` stop and an adapter power cycle on every pairing — so that page also says how
-to check and how to drop it.
+`--pause-btd-on-pair` is the default in [`install-dev.md`](install-dev.md). Use `--weird-ble` only
+when the pad still cannot bond while `btd` is paused. A board that does not need it should not carry
+it: the additional `Privacy = device` setting makes some pads flap after pairing. That page names
+both failure signatures and explains how to switch modes.
 
 Both are workarounds for the aic8800 radio, not properties of the design. They go when the radio
 does.

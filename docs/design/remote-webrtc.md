@@ -537,9 +537,7 @@ robot streaming a test pattern, or one where `media-ctl` would not set the senso
 case the sensor is in its 3280×2464 boot mode, whose field of view is the whole array rather than
 the 1920×1080 crop, and every intrinsic would be off by about 1.7×. `mediad::camera` has the
 arithmetic and the mode table, including the fact that reading 720p off the sensor would *narrow*
-the view to 27° rather than saving anything. It is also a robot whose sensor nobody has measured —
-the beta board's GC2093 has no field of view and no family solve in `mediad::sensor`, so it
-publishes geometry only once that robot carries its own `[media.intrinsics]`.
+the view to 27° rather than saving anything.
 
 ## 11. Everything on the wire should carry the time it happened — **wanted**
 
@@ -578,7 +576,6 @@ along with a transport. `remote-access-design.md` §9 carries it as open.
 - **Multi-peer video.** One media session at a time, plus control-only clients. Simulcast and
   encode-once-send-many are a real project.
 - **Consent and the streaming indicator.** `architecture.md` §7 wants explicit per-session consent
-  and a visible indicator, and is right that they are cheap now and expensive later. The indicator
-  exists on the beta board — its camera LED, `architecture.md` §3.2; consent does not yet.
+  and a visible indicator; neither is implemented on the off-the-shelf replica hardware yet.
 - **TURN.** LAN-only needs none. A bridge does, and it costs real bandwidth; that decision belongs
   with the rendezvous service, not here.

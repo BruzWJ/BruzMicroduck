@@ -19,9 +19,10 @@ LSM6DSV16X IMUs, and all fifteen required IDs `20–24 / 30–34 / 10–14`.
 
 **The policy path uses the alpha model and the SparkFun LSM6DSV16X body IMU.** The custom
 `imu_to_dxl` body board, v1/v1.5/v1.6 variants, legacy BMI088 head path and Pi path are retired.
-The beta face board's LSM6DSV16X remains a separate head stream owned by `robotd`; it is not a
-policy input. Every shipped policy is `alpha_*`. The wheeled configuration survives as one params
-switch — `policy.mode = "roller"` (§4.2) — because it selects a policy set and a tuning preset,
+The head LSM6DSV16X is a separate stream owned by `tofd`; it is not a policy input. The official
+Hub set contains the alpha-compatible walking family and the roller policies. The wheeled
+configuration survives as one params
+switch — `policy.mode = "roller"` (§4.2) — because it selects policy roles and a tuning preset,
 not a hardware variant.
 
 ## 1. The shape of it
@@ -102,8 +103,8 @@ The shared `qwiic-imu` crate configures the chip's SFLP engine and returns gyro,
 temperature and a fused quaternion. `duck-control::imu` owns only the robot-specific body mount,
 spike rejection and readiness gate. The body breakout is mounted +X forward, +Y left, +Z up, so
 its sensor-to-trunk mount is identity. The head carries the same chip at `0x6a`, but `tofd` owns
-that address and publishes it separately on zero3; beta's face-board head IMU is served by
-`robotd`. Roles are fixed by board and address, never inferred from probe order.
+that address and publishes it separately. Roles are fixed by address, never inferred from probe
+order.
 
 The I2C *adapter* is shared, not the sensor addresses. `tofd` also opens `/dev/i2c-qwiic` for the
 head IMU at `0x6a` and VL53L5CX at `0x29`; Linux serialises their transactions with `robotd`'s
@@ -604,11 +605,11 @@ Start is the person deciding the robot should drive. The
 height is the signal because the joint angles are not: three recorded seats with little in common
 joint by joint all read 15–39 % of standing height.
 
-Policy files come from paths in the params file, defaulting into the release directory — so a
-normal update carries the policy trained against the binary, and a dev points a path at their
-own `.onnx` and iterates without cutting a release.
+Policy files come from paths in the params file. Unset slots resolve through
+`/opt/robot/policies/current`, the independently installed official Hub set; a dev can point a
+slot at another local or community `.onnx` and iterate without cutting a release.
 
-*Which* file fills a slot — the release's copy, a component from the Hub, or something a dev
+*Which* file fills a slot — the official-set default, a community download, or something a dev
 dropped on the board — is [`policy-channel-design.md`](policy-channel-design.md)'s, along with
 the commands that change it and what happens when a load fails. This section owns what a policy
 is and how it is validated and run, and stops there.
@@ -629,11 +630,13 @@ this design rejected. `policy::ensure_runtime` therefore probes for the dylib wi
 loader and search rule `ort` uses, before `ort` is touched, so a missing library becomes an
 ordinary error.
 
-**`policy.enabled` separates "no policy wanted" from "policy broken".** The first is healthy
-and is the right configuration for bench updater testing; the second is unhealthy, so the
-updater rolls the release back. Collapsing them would either make a bench robot look broken or
-let an unusable bundle pass the gate. `robotd --no-policy` sets it, and the gate tests use it,
-since neither CI nor a laptop has ONNX Runtime installed.
+**`policy.enabled` separates "no policy wanted" from "policy requested".** The first is healthy
+and is the right configuration for bench updater testing. With policy enabled, an official set
+that has never been installed is degraded, while a present official set whose required network
+will not load is unhealthy. That distinction lets a fresh board recover its independently
+delivered set without letting a daemon regression against a valid installed set pass the gate.
+`robotd --no-policy` disables it for gate tests, since neither CI nor a laptop has ONNX Runtime
+installed.
 
 ONNX Runtime is a **board prerequisite**, installed by `scripts/install.sh`, not shipped in the
 release. It changes far less often than the daemon, and ~20 MB in every artifact would enlarge
@@ -905,8 +908,8 @@ drive.
 
 Two conditions gate the bring-up, each for its own reason:
 
-- **A loaded policy.** `enable` means "enable the policy"; powering the joints to run one that
-  is disabled or would not load would stand a robot up on a broken release and then hold it.
+- **A loaded policy.** `enable` means "enable the policy"; powering the joints when policy is
+  disabled or unavailable would stand a robot up with no controller and then hold it.
 - **A fresh sample.** The ramp starts from where the joints are. Starting from a position nobody
   read is the lurch the ramp exists to avoid.
 
@@ -1038,9 +1041,9 @@ Re-reading `[safety]` or `[control]` under a running loop is a different and muc
 and it is still not made. `robotctl configure` knows which of the three answers a key wants, and
 a key that says nothing fails a test in `robotctl`.
 
-Belonging to the board rather than the release is what makes a hand-edited policy path stick: the
-defaults point inside `releases/<ver>/`, so an ordinary update keeps a policy alongside the
-binaries trained against it, and deleting the override goes back to that. The file may be absent
+Belonging to the board rather than the release is what makes a hand-edited policy path stick. The
+defaults resolve through `/opt/robot/policies/current`, so official-set updates move them without
+rewriting this file, while deleting an override returns to the installed official set. The file may be absent
 entirely — an unprovisioned board comes up on the built-in defaults rather than refusing to start,
 which is far easier to diagnose remotely than a daemon that will not run. The corollary, learned
 the hard way: an *uncommented* value is frozen on that board forever while releases move on, which
@@ -1206,8 +1209,8 @@ Each test's comment says which failure it exists to prevent, per the repo conven
 | bus layer written fresh, constants borrowed | thin code, but the tuned numbers are not re-derived |
 | body IMU poll composed inside `RobotIo::read` | separate physical bus, one complete policy sample; either half failing rejects the tick |
 | Rust consts for the model | one robot exists |
-| params file, not watched | establishes the file and its location; the watcher is later |
-| policy path in params, default = release dir | updates carry the policy; devs override it |
+| params file, mostly startup-read | `[policy]` reloads on request; `padd` polls its three sections (§4.2) |
+| policy path in params, default = official set | policies version separately; devs override one slot without copying defaults |
 | adopt current pose on start | an update must not move a standing robot |
 | bring-up as a state machine, not a flag | `set_torque` is a transaction per joint |
 | the fall verdict reports, it does not gate | what to do about a fall is a control decision (§2.4) |
@@ -1218,8 +1221,8 @@ Each test's comment says which failure it exists to prevent, per the repo conven
 
 ## 8. Deferred, deliberately
 
-MuJoCo backend and the `RemoteIo` protocol · the skill abstraction · policy bundle manifests and
-`model_api` gating · `look`/`pose`/`do` intents · gaze IK · live params reload and the config store ·
+MuJoCo backend and the `RemoteIo` protocol · `look`/`pose`/`do` intents · live reload for the
+remaining startup-only params and the config store ·
 thermal limits · rate limits · per-device IMU calibration.
 
 **Odometry has left this list.** It was deferred because nothing read it; `robotctl monitor`'s

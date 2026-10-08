@@ -12,7 +12,7 @@ Companion to [`architecture.md`](../design/architecture.md) (what we're building
 |---|---|
 | `updater/` | engine, verification, store, journal, hooks, preflight, GitHub/HF/local sources, IPC server, systemd unit — **done** |
 | `duck-control/` | robot model · bus · IMU · `RobotIo` · observations · ONNX policy · safety. A library: no tokio, no sockets, no systemd |
-| `duck-ipc-proto/` | wire contract for every `*.` namespace, at API v14 — serde/serde_json/semver only, so nothing on the recovery path pulls the engine's tree |
+| `duck-ipc-proto/` | wire contract for every `*.` namespace, at API v43 — serde/serde_json/semver only, so nothing on the recovery path pulls the engine's tree |
 | `robotd/` | a 50 Hz loop driving walk/stand/roll through the safety layer, intents, health from deadline adherence and policy state. Since M3: kinematics, contact odometry, gaze IK, the voice, the ToF theremin and the chorale, all hung off the same tick ([`robotd-design.md`](../design/robotd-design.md) §4.4–4.5) |
 | `padd/` | gamepad → intents, as an ordinary socket client; ships in the release and runs as its own unit from boot, so pairing a pad is the only step |
 | `robotctl/` | the operator CLI — `update`, `health`, `version`, `monitor`, `net`, `system`, `robot`, `pad`, `configure`, `quack`, `chorale`, `theremin`, `completions`; depends on `duck-ipc-proto`, not `updater`, so it stays on the recovery path |
@@ -20,14 +20,14 @@ Companion to [`architecture.md`](../design/architecture.md) (what we're building
 | `btd/` | BLE transport adapter — framing, the routed subset, the BlueZ backend, a pairing agent. Works on hardware, unencrypted by default — [`app-path-design.md`](../design/app-path-design.md) §5.5 |
 | `duckctl/` | the robot from a laptop. BLE today; named for the robot rather than the radio |
 | `mediad/` | camera, mic, encode and the WebRTC gateway, plus the console it serves. **Streaming to a browser on the LAN from a Radxa Zero 3W**, hardware H.264 through `mpph264enc`, `control` datachannel alongside |
-| `tof/` | `tofd`: the head's 8×8 ToF matrix on its own socket at 15 Hz. A board with no sensor fitted runs it anyway and says so |
+| `tof/` | `tofd`: the head's 8×8 ToF matrix and head IMU on their own service socket, sharing `/dev/i2c-qwiic` with `robotd`'s body IMU. A board with no sensor fitted runs it anyway and says so |
 | `xtask/` | package — release artifacts use the updater's own formats |
 | `.github/` | ci · release · dev — a manual release run builds, verifies, and publishes one stable release |
 | bootstrap | `updaterd install` + `scripts/install.sh` — a robot installs its first release through the **ordinary engine**, so there is no bootstrap-only code path to drift |
 | recovery | `robot-boot-check.timer` + `robot-rescue` + the `golden` symlink ship and are enabled. **Never exercised on a board** ([`boot-recovery-net.md`](../design/boot-recovery-net.md)) |
-| tests | **942 passing** on a Mac with nothing excluded, a few more on Linux — including the health gate, the battery and thermal readout and the policy/safety path against a real `robotd` process, and `configd`'s authorisation over real sockets in `board-test.sh` |
+| tests | workspace unit/integration tests plus Linux board tests — including the health gate, battery and thermal readout, policy/safety against a real `robotd` process, and `configd` authorisation over real sockets in `board-test.sh` |
 | in flight | `maploc` (#127), the NPU duck detector, the chorale election fix (#151); two design PRs with nothing built — the phone app (#107) and the IPC monitor (#52) |
-| missing | the app, the SDK, the policy channel, the autonomous brain, and reaching a robot from outside the LAN |
+| missing | the app, the SDK, the autonomous brain, and reaching a robot from outside the LAN |
 
 ## The first roadmap reached its target
 
@@ -245,8 +245,8 @@ something that names the part at fault, or says the hardware is fine.
 
 Every policy used to ship **inside the daemon artifact**, so a new gait needed a daemon release
 and a policy trained on a laptop reached a duck only through CI or a sideload of the whole daemon.
-The point of this milestone is that a policy trained in `microduck_rl` — the training repository,
-which is private — can be published, installed and tried on its own version line, and that
+The point of this milestone is that a policy trained in the public `microduck_rl` training
+repository can be published, installed and tried on its own version line, and that
 someone can try one they did not train and get back.
 
 **Designed**, in [`policy-channel-design.md`](../design/policy-channel-design.md), which owns
@@ -254,23 +254,25 @@ the decisions this section used to leave open. The short version: a slot is fill
 three origins — official (`pollen-robotics/*`, the reset target), community (any other
 Hub repo, reported but never auto-applied) or local (a path on the board); `policy
 load` writes the config key and `policy reset` removes it, so persistence and undo are the
-mechanism that already exists; and the official set ships as one `policies` component rather
-than one per slot.
+mechanism that already exists; and the official policies publish and version as one Hub set
+rather than one artifact per slot.
 
-**Most of the engine is already built:** the `hf_hub` source resolves and verifies, a component
-brings its own version line, rollback, pin, boot trial and known-bad history, `on_apply =
-reload` exists, and `xtask package` produces the manifest and hashed artifact.
+**The delivery engine is built:** the official set is seeded and updated by revision, community
+policies can be fetched one at a time, and every live load goes through the same shape and
+home-pose gates.
 
-**Three slices, each useful alone:**
+**Four completed slices:**
 
-1. **The local loop, no network.** `robot.loadPolicy` plus the home-pose reload, and `robotctl
+1. **The local loop, no network.** *Done.* `robot.loadPolicy` plus the home-pose reload, and `robotctl
    policy list` / `load` / `reset`. Delivers "try a policy without editing the toml" end to end,
    touches no Hub and no publishing decisions. `API_VERSION` 17 → 18.
 2. **Official policies leave the artifact.** *Done.* `robotd` reads
    `/opt/robot/policies/current`, which `scripts/seed-policies.sh` fills by downloading the
    pinned set from `pollen-robotics/microduck-policies` — the arrangement `setup-board.sh`
-   already uses for ONNX Runtime. `policies/` and its three `--include` lists are gone, and
-   bumping `[workspace.metadata.policies]` is now the whole of shipping a gait.
+   already uses for ONNX Runtime. `policies/` and its three `--include` lists are gone. Publishing
+   and tagging the Hub set makes a gait independently installable; bumping
+   `[workspace.metadata.policies]` in a later daemon
+   release only raises the minimum set seeded on fresh or behind boards.
 3. **Moving past the pin.** *Done.* `policy.*` on `updaterd`, `robot.reloadPolicies`, and
    `robotctl policy check` / `update` — a retrained gait now reaches a board with no daemon
    release, which was the milestone's whole point. Each set records the repo it came from, so
@@ -282,24 +284,14 @@ reload` exists, and `xtask package` produces the manifest and hashed artifact.
    cannot run here is refused before it is downloaded — which is also where `model_api` stopped
    being designed-and-unimplemented.
 
-`reset` means "remove the override and re-resolve" in all three, so slice 1 ships a correct
-reset against the in-release copies and slice 2 changes what it resolves *to* without touching
-the command.
+`reset` means "remove the override and re-resolve" in all three origins, so it returns to the
+installed official set without embedding or copying those files into a daemon release.
 
-**What is genuinely missing** is at the two ends, not in the middle:
+**No delivery slice remains open.** Training and publishing a new policy are work in the external
+`microduck_rl` and Hub repositories; once an ONNX is local or published, this repository can load,
+validate, update, find and undo it without a daemon release.
 
-- **`robotd` cannot reload on demand.** The machinery exists — `robot.setMode` already rebuilds
-  every ONNX session at the home pose — but there is no per-slot trigger, and a failed load must
-  keep the running controller rather than leaving the robot gaitless.
-- **Nothing publishes a bundle.** `xtask package --channel` is close; it checks `--version`
-  against the crate version, which a policy set does not have, and the HF repo layout does not
-  exist.
-- **`model_api`** is designed and unimplemented on both sides. `robot.modelApi` answers, and
-  nothing consults it.
-- **The training loop.** `microduck_rl` exports ONNX; nothing carries the result to a board.
-  Slice 1 is what makes "train it and try it" a minute rather than a CI run.
-
-**Done when:** a policy trained in `microduck_rl` is published to the Hub, installed on a duck,
+**Done:** a policy trained in `microduck_rl` is published to the Hub, installed on a duck,
 tried, and undone with `robotctl policy reset` — with the control loop never dropping motor
 control through any of it — and someone who did not train it can find it from the robot and try
 it.
@@ -327,16 +319,14 @@ the chorale is something it decides rather than something a command starts.
 
 The numbers above are identifiers. This is the order.
 
-1. **M8, the policy channel.** The next feature. Nothing else is blocked by it, and it unblocks
-   the loop that produces the robot's actual behaviour: train, publish, install, try, roll back.
-2. **M5's transport investigation.** Cheap, and its answer decides whether the Python client is
+1. **M5's transport investigation.** Cheap, and its answer decides whether the Python client is
    fifty lines or a project.
-3. **M6, as shipping approaches**, by lead time: where a customer robot downloads from, then the
+2. **M6, as shipping approaches**, by lead time: where a customer robot downloads from, then the
    PIN, then the recovery net's hardware test. Consent can land any time and should land early.
-4. **M7** — an investigation with no date. It earns priority the first time a duck in someone
+3. **M7** — an investigation with no date. It earns priority the first time a duck in someone
    else's hands develops a fault nobody can name, and the cheapest way to be ready is to decide
    it alongside #52 rather than after it.
-5. **M9, the brain** — later, deliberately. It is the largest piece of work left and the one
+4. **M9, the brain** — later, deliberately. It is the largest piece of work left and the one
    most likely to grow while being built.
 
 ## Decisions that shape work rather than follow it

@@ -16,7 +16,7 @@ A robot on somebody's home network streams its camera to this Space as H.264, an
 over each decoded frame here. Nothing is on the robot's network and no relay is involved.
 
 **Do not edit this Space directly.** The source is `spaces/vision-demo/` in
-`pollen-robotics/microduck`, and `scripts/publish-space.sh vision-demo` is what puts it here.
+`BruzWJ/BruzMicroduck`, and `scripts/publish-space.sh vision-demo` is what puts it here.
 
 ## The robot dials us, and that is the whole design
 

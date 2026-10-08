@@ -318,26 +318,26 @@ Development builds use a separate `daemon-dev-*` prerelease/tag namespace and ar
 an explicit `--ref` request from a locally authorized client. They never participate in the stable
 resolver. A local `dev-push` is selected explicitly with `--from` and is not published at all.
 
-**One-time cutover.** No public stable release used the former signed-release format. An
-old development-board updater that expects those extra assets cannot install the first release in
-this format. Re-run `scripts/provision-board.sh`, or use the forced bootstrap path, once to install
-the current updater before applying the first stable release. This is a migration, not a second
-release mechanism.
+**First-release boundary.** No public stable release used the former signed-release format, so this
+repository carries no compatibility path for it. Flash a clean OS image before provisioning a
+board that ran an unpublished development build from before this format. Reprovisioning an existing
+image is deliberately not presented as a migration: `install.sh` preserves operator-owned updater
+configuration, which may still name the old repository.
 
-### 5.5 Models: one component each
+### 5.5 Independently versioned models can be components
 
-There are several models — walk, jump, stand, ground-pick — **each versioned
-independently**, and all loaded at once rather than one selected from many.
+The generic engine can give an independently versioned model its own component. That is useful
+when the model needs this engine's release manifest, rollback target, pin, boot trial and known-bad
+history.
 
-**The control policies went the other way, and this section is the general rule rather than
-what they do.** They are produced as a family by one training run and the slot→file mapping
-depends on the drive mode, so they ship as a single `policies` component and a per-slot override
-covers the rest — see [`policy-channel-design.md`](policy-channel-design.md) §9. What stays true
-here is the shape: a component is a thing with its own version line, and a robot may have as many
-as it has such things.
+**This robot's control policies do not use updater components.** They are produced as a family,
+installed as one manifest-described Hub set outside the daemon release, and support per-slot local
+or community overrides; [`policy-channel-design.md`](policy-channel-design.md) owns that mechanism.
+They still illustrate the rule: version together what is built as a family, rather than inventing
+one component per file.
 
-That is exactly what a *component* is: a thing with its own version line. So each
-model is its own entry in `updater.toml`, and no special store layout is needed:
+For a future model that really does have its own release lifecycle, one entry in `updater.toml` is
+enough and no special store layout is needed:
 
 ```toml
 [component.model-walk]
@@ -351,13 +351,13 @@ source      = { type = "hf_hub", repo = "ORG/gait-jump", revision = "main" }
 on_apply    = { action = "reload", unit = "robotd", signal = "SIGHUP" }
 ```
 
-Each then gets, for free and independently: its own rollback target, golden release,
+Each such component gets, for free and independently: its own rollback target, golden release,
 pin, boot-counter trial, and known-bad history. `robotctl update apply model-walk`
 updates one model without touching the others. Trying an older version of one is
 `robotctl update select model-walk 1.1.0` — `select` repoints at any installed
 release without downloading.
 
-Models use `reload` (SIGHUP → re-`mmap` weights) rather than `restart`, so a weights
+Component-backed models can use `reload` (SIGHUP → re-`mmap` weights) rather than `restart`, so a weights
 swap never drops motor control. Per-component `on_apply` is what makes that natural,
 and a core reason models and the daemon stay separate components.
 
@@ -417,39 +417,21 @@ What the container cannot cover, and hardware must: a real `systemctl restart`
 against the real filesystem, and whether the health-gate timeouts suit a robot that
 takes tens of seconds to stand up.
 
-**Two boards, one build.** The Zero 3W and the beta are both RK3566, so one aarch64 release
-runs on either. No variant / IMU / camera matrix, no per-device hardware profile, no artifact
-selection logic: what differs between the boards is the daemon's business, keyed on the board
-the robot declares, not the updater's.
+**One supported board, one build.** The replica release targets the Zero 3W. There is no variant,
+IMU or camera artifact matrix.
 
 What the updater keeps is deliberately minimal:
 - **`min_hw_rev`** in the manifest (§5.3): one integer, refused when it is above the robot's.
-- **The robot's revision is its declared board**: `[board] version` in `robotd.toml`
-  (`robotd_params::board::Board::hw_rev`: zero3 is 1, beta is 2), read before every check.
-  `hw_rev` in `updater.toml` applies only when no board is declared — every robot installed
-  before the board was a setting carries `hw_rev = 1`, and a board provisioned against a
-  release that still shipped it does too, so it cannot be allowed to outrank the board.
+- **The robot's revision is 1**, the Zero 3W revision, fixed by the build rather than configurable
+  per installation.
 - A **stable device ID** for the update log (§8.3) and any future phone-home. The
   SoC serial (`/proc/device-tree/serial-number`) works and survives reflashes —
   no provisioning step needed to obtain it.
 
-#### Retiring a board
-
-A board is retired by giving it a last release, in `Board::last_release`. That one change
-does both halves:
-
-- **The warning.** From the release that sets it, `robotctl health` on that board says updates
-  end at that version. Set it a few releases ahead, so the warning is on robots for a while.
-- **The cut-off.** `xtask package` derives `min_hw_rev` from the table
-  (`board::min_hw_rev`): the lowest revision among the boards the release being packaged still
-  supports. The first release after a board's last is packaged above that board's revision, and
-  the updater already on the board refuses it — `requires hardware revision 2 or newer`. That
-  check has been in every updater since the first, so retiring a board needs nothing from the
-  robots being retired.
-
-`min_hw_rev` is one number, so boards retire oldest first; a test holds the table to that.
-A prerelease sorts below its release, so a dev build of a board's last release still installs
-on it.
+There is no board-selection or retirement table: with one target, such a table would be an unused
+second mechanism. If a future release changes the required hardware, that change must introduce
+and document the new target explicitly; the existing manifest check then gives old hardware an
+actionable refusal instead of silently choosing another runtime path.
 
 ### 5.7 Robot-specific state must survive updates
 
@@ -490,9 +472,10 @@ done only when genuinely needed, never unconditionally on every update.
 
 ### 6.1 A private repository cannot serve the fleet — so this one does not stay private
 
-**Decided (2026-08-26): publish `pollen-robotics/microduck`.** While it is private a robot in
-the field cannot download anything, and the reason is worth keeping because it is not obvious:
-a private repo's `releases/download/<tag>/<asset>` URL returns **404 with or without a token**.
+**Decided (2026-10-07): publish `BruzWJ/BruzMicroduck`.** It is public because a robot in the
+field cannot download from a private release repository without credentials, and the reason is
+worth keeping because it is not obvious: a private repo's `releases/download/<tag>/<asset>` URL
+returns **404 with or without a token**.
 Verified directly:
 
 | URL | private repo |
@@ -1079,7 +1062,6 @@ parses it, so it cannot drift from the code. Abridged here:
 
 ```toml
 # /etc/robot/updater.toml
-# hw_rev       = 1                         # fallback only when no board is declared (§5.6)
 state_dir        = "/var/lib/robot/updater"    # must be outside every install_dir
 robot_socket     = "/run/robotd.sock"         # one robot-wide health socket
 
@@ -1101,7 +1083,7 @@ units  = ["robotd", "configd"]                 # additive to shipped units; see 
 probe   = "socket"
 timeout = "30s"
 
-# One component per model — each versions independently (§5.5).
+# Hypothetical independently versioned model component (§5.5); not the control-policy set.
 [component.model-walk]
 install_dir   = "/opt/robot/model/walk"
 keep_previous = 3
@@ -1396,10 +1378,12 @@ exact version a client is running" is always reproducible in the lab.
 This closes the loop that hurt last time: **humans decide when to publish; the machine builds,
 hashes, verifies, applies, and rolls back identically every time.**
 
-### 16.5 Bootstrap state — over for the health gate, not for the payload
+### 16.5 Current payload and health gate
 
-The `daemon` artifact still ships less than it eventually will: `bin/updaterd`,
-`bin/robotctl`, `bin/robotd`, `version.toml`. There is no `mediad` or `btd` yet.
+The `daemon` artifact ships the complete runtime: every service binary, `robotctl`, service units,
+release hooks and support files, plus `version.toml`. The release recipe and the shipped
+`required_files` list are tested against one another so adding or removing a daemon cannot update
+only one side.
 
 That is not circular: §4.1 establishes that `updaterd` and `btd` ship *inside* the daemon
 artifact, so updating the updater with the updater is the real eventual flow — and the
@@ -1449,18 +1433,18 @@ step and the 30s timeout. Both land in M4 on the Radxa.
 
 Known gaps between this document and the implementation, deliberately open:
 
-- **Competing alternatives within one model slot are not supported.** Each model is a
-  component with one version line (§5.5), which covers "walk, jump and stand each
-  update independently". It does *not* cover "two different walk models installed, user
-  picks one". That needs a `(name, version)` store key, which ripples through ~14 files
+- **Competing alternatives inside one generic updater component are not supported.** A component
+  has one version line (§5.5); two named alternatives under that line would need a
+  `(name, version)` store key, which ripples through ~14 files
   — `Store`'s keyed methods, `known_bad`, `PendingUpdate`, `Pins`, `golden`, `pinned`,
   and the wire types (so an `API_VERSION` bump). It also turns four things per-bundle
   rather than global: prune counts, rollback targets, "latest", and golden. Deferred
   until it's known to be needed; guessing at those four is how the deleted
-  `Layout::Library` came about.
-- **No way to discover installable models.** The app can list what *is* installed, but
-  no `Source` can answer "what could be installed" — adding a model means editing
-  config today. Wants a `Source::list_*` operation.
+  `Layout::Library` came about. Control-policy alternatives are instead slots and library entries
+  owned by the policy channel.
+- **No generic way to discover installable components.** The app can list what *is* installed,
+  but no updater `Source` can answer "what could be installed" — adding a component means editing
+  config today. The policy channel has its own search because it owns that narrower problem.
 - **No recovery mode.** §8.2's chain is `current → previous → golden`, all three
   implemented including escalation past a missing or known-bad previous. The final
   "minimal recovery mode that can still re-fetch" does not exist.

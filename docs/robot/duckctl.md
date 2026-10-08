@@ -582,12 +582,13 @@ which are driven by the robot itself and are not table entries.
 duckctl policy unskill polite-bow
 ```
 
-A skill this robot's release ships comes back when you do that, because removing the entry only
-removes the override.
+A skill declared by the installed official set comes back when you do that, because removing the
+entry only removes the override.
 
-Nothing a stranger publishes is verified by anybody. What makes it safe to try is the manifest
-gate before the download, the shape gate at load, the joint clamps and the fall reflex — not the
-description. Have the robot on its stand the first time.
+Nothing a stranger publishes is verified by anybody. When a community repo has a manifest its
+declared compatibility is checked before download; repos without one are still accepted. The
+shape gate at load, joint clamps and fall reflex are the hard boundaries — not the description.
+Have the robot on its stand the first time.
 
 ## Which button runs which skill
 
