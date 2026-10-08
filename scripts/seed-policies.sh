@@ -55,36 +55,15 @@ POLICY_BASE_URL="${POLICY_BASE_URL:-https://huggingface.co/${POLICY_REPO}/resolv
 # downloaded — so adding a tenth policy to the set is a tag on the Hub rather than an edit here
 # and a daemon release to carry it.
 #
-# The fallback below is what robotd's own defaults name (both modes), for a revision tagged
-# before the manifest did. It goes when every tagged set carries one.
-#
 # The grep is over a file we generate, so its shape is ours: one `"file": "name.onnx"` per policy.
 # A JSON parser is not available here — this runs from a release on a board with curl and a
 # POSIX shell — and an xtask test asserts the pattern matches what the manifest actually says.
-FALLBACK_FILES="velstand.onnx alpha_sitstand.onnx alpha_ground_pick.onnx ball_kick_left.onnx ball_kick_right.onnx roller.onnx roller_crouch.onnx roulade.onnx"
 
 # Per-file, because `hooks/postinstall` runs inside an update under a 120-second hook timeout and
 # a hook that times out fails the update and rolls it back. Ten files at eight seconds is 80,
 # which leaves the rest of the hook room; a link that cannot move 800 KB in eight seconds is one
-# the fallback below is for, and the next update tries again.
+# the retry on the next update is for.
 CURL_OPTS="--fail --location --silent --show-error --connect-timeout 5 --max-time 8"
-
-# Where a set came from, written beside it.
-#
-# It is what lets `robotctl policy check` ask the Hub whether there is anything newer without
-# anybody configuring the repo a second time. One writer, one copy, no drift — and a set that a
-# different tool installs later carries its own, so "what is this and where is it from" has the
-# same answer however it arrived.
-#
-# Only written when missing, so an update does not rewrite the file just to change a timestamp.
-write_source() {
-    [ ! -f "$1/.source" ] || return 0
-    {
-        echo "repo=${POLICY_REPO}"
-        echo "version=${2}"
-        echo "fetched=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    } > "$1/.source" || echo "seed-policies: cannot record where this set came from" >&2
-}
 
 target="releases/seed-${POLICY_VERSION}"
 live="$(readlink "${POLICY_ROOT}/current" 2>/dev/null || true)"
@@ -103,9 +82,8 @@ live="$(readlink "${POLICY_ROOT}/current" 2>/dev/null || true)"
 # So the version decides. The record beside the set says what it is; a set from our repo whose
 # version is a lower number than the pin is replaced by the pin (below), and everything else is
 # left alone: a newer set, a set from another repo, a set that says nothing about itself, or one
-# whose version is not a plain number. A board seeded before the record existed has it
-# back-filled from the directory name, because `policy check` cannot ask about a set that will
-# not say where it came from — and so that this comparison can read it next time.
+# whose version is not a plain number. A directory name is not provenance: a set without a record
+# remains unclaimed and untouched.
 number_of() {
     # "v5" -> 5; anything that is not a plain vN is "" and never compares.
     case "$1" in
@@ -115,8 +93,7 @@ number_of() {
 }
 if [ -n "$live" ]; then
     case "$live" in
-        releases/*)
-            write_source "${POLICY_ROOT}/${live}" "${live#releases/seed-}" ;;
+        releases/seed-*) ;;
         *)
             echo "seed-policies: ${POLICY_ROOT}/current is not ours; leaving it alone" >&2
             exit 0 ;;
@@ -139,20 +116,22 @@ mkdir -p "$staging" || { echo "seed-policies: cannot create ${staging}" >&2; exi
 
 # Everything into staging first, so a partial download is never what `current` points at.
 ok=yes
+downloaded=no
 
 # The manifest, and the file list from it. Fetched into staging like everything else, so it is
 # installed beside the policies it describes and `robotd` can read what it says.
 # shellcheck disable=SC2086
-if curl $CURL_OPTS -o "${staging}/manifest.json" "${POLICY_BASE_URL}/manifest.json"; then
-    POLICY_FILES="$(sed -n 's/.*"file"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-        "${staging}/manifest.json" | tr '\n' ' ')"
-else
-    rm -f "${staging}/manifest.json"
-    POLICY_FILES=""
+if ! curl $CURL_OPTS -o "${staging}/manifest.json" "${POLICY_BASE_URL}/manifest.json"; then
+    rm -rf "$staging"
+    echo "seed-policies: ${POLICY_VERSION} has no readable manifest; leaving the current set alone" >&2
+    exit 0
 fi
+POLICY_FILES="$(sed -n 's/.*"file"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    "${staging}/manifest.json" | tr '\n' ' ')"
 if [ -z "$POLICY_FILES" ]; then
-    echo "seed-policies: no manifest in ${POLICY_VERSION}; taking the set this release knows" >&2
-    POLICY_FILES="$FALLBACK_FILES"
+    rm -rf "$staging"
+    echo "seed-policies: ${POLICY_VERSION}'s manifest lists no policies; leaving the current set alone" >&2
+    exit 0
 fi
 
 for name in $POLICY_FILES; do
@@ -171,9 +150,10 @@ for name in $POLICY_FILES; do
         ok=no
         break
     fi
+    downloaded=yes
 done
 
-if [ "$ok" = no ]; then
+if [ "$ok" = no ] || [ "$downloaded" = no ]; then
     # Nothing partial ever goes live, and nothing already installed is disturbed. A half-published
     # revision or a link that was down leaves the board exactly as it was — on the previous set if
     # it has one, with none if it does not — and the pin is retried at the next update. A board
@@ -181,13 +161,24 @@ if [ "$ok" = no ]; then
     # then reports unhealthy and the update rolls back, which is the honest outcome and the
     # message above is the reason.
     rm -rf "$staging"
-    echo "seed-policies: leaving the policies already installed alone" >&2
+    echo "seed-policies: no complete usable policy set was fetched; leaving the policies already installed alone" >&2
     exit 0
 fi
 
 chmod 644 "$staging"/*.onnx 2>/dev/null || true
 
-write_source "$staging" "${POLICY_VERSION}"
+# Where this set came from. A new set does not go live without the record: it is what lets
+# `robotctl policy check` find updates, and without it a later seeder must treat the directory as
+# somebody else's rather than infer ownership from its name.
+if ! {
+    echo "repo=${POLICY_REPO}"
+    echo "version=${POLICY_VERSION}"
+    echo "fetched=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+} > "$staging/.source"; then
+    rm -rf "$staging"
+    echo "seed-policies: cannot record where this set came from" >&2
+    exit 0
+fi
 
 rm -rf "${POLICY_ROOT:?}/${target}"
 mv "$staging" "${POLICY_ROOT}/${target}" \
