@@ -451,8 +451,9 @@ mod linux {
                 let mut record = [0; 7];
                 let tag_without_parity = (tag << 3) | ((slot & 0x03) << 1);
                 record[0] = tag_without_parity | (tag_without_parity.count_ones() as u8 & 1);
-                for (bytes, value) in record[1..].chunks_exact_mut(2).zip(xyz) {
-                    bytes.copy_from_slice(&value.to_le_bytes());
+                for (index, value) in xyz.into_iter().enumerate() {
+                    let start = 1 + index * 2;
+                    record[start..start + 2].copy_from_slice(&value.to_le_bytes());
                 }
                 record
             }
