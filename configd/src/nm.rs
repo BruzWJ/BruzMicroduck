@@ -56,6 +56,11 @@ mod ids {
     pub const SEC_KEY_MGMT_SAE: u32 = 0x400;
     /// `NM_802_11_AP_FLAGS_PRIVACY`
     pub const AP_FLAGS_PRIVACY: u32 = 0x1;
+
+    /// `NM_SETTING_WIRELESS_POWERSAVE_DISABLE`. A headless robot values a stable management link
+    /// over the small idle saving, and relying on a distro or driver default made that policy
+    /// change across images.
+    pub const POWERSAVE_DISABLE: u32 = 2;
 }
 
 /// How long to wait for a join to resolve one way or the other.
@@ -368,6 +373,41 @@ fn failure_of(state: u32, reason: u32) -> (proto::ConnectFailure, Option<String>
     (failure, detail)
 }
 
+/// The saved NetworkManager profile used for one join.
+///
+/// Kept separate from `connect` so the property that keeps a headless board reachable can be
+/// tested without a real system bus. The migration profile and profiles added later through BLE
+/// must make the same power-saving decision.
+fn connection_settings<'a>(
+    ssid: &'a str,
+    psk: Option<&'a str>,
+) -> HashMap<&'static str, HashMap<&'static str, Value<'a>>> {
+    let mut wireless: HashMap<&str, Value<'_>> = HashMap::new();
+    wireless.insert("ssid", Value::from(ssid.as_bytes().to_vec()));
+    wireless.insert("mode", Value::from("infrastructure"));
+    wireless.insert("powersave", Value::from(ids::POWERSAVE_DISABLE));
+
+    let mut connection: HashMap<&str, Value<'_>> = HashMap::new();
+    connection.insert("id", Value::from(ssid));
+    connection.insert("type", Value::from("802-11-wireless"));
+
+    let mut settings: HashMap<&str, HashMap<&str, Value<'_>>> = HashMap::new();
+    settings.insert("connection", connection);
+    settings.insert("802-11-wireless", wireless);
+
+    if let Some(psk) = psk {
+        let mut security: HashMap<&str, Value<'_>> = HashMap::new();
+        // `wpa-psk` covers WPA2 and WPA2/WPA3-transition. A WPA3-only network wants `sae`,
+        // and NM is lenient enough to negotiate in practice — if a board proves otherwise,
+        // this is where the scan's `Security` should choose.
+        security.insert("key-mgmt", Value::from("wpa-psk"));
+        security.insert("psk", Value::from(psk));
+        settings.insert("802-11-wireless-security", security);
+    }
+
+    settings
+}
+
 #[async_trait]
 impl Net for NetworkManager {
     async fn status(&self) -> NetResult<proto::NetStatusResult> {
@@ -632,30 +672,10 @@ impl Net for NetworkManager {
 
         let manager = ManagerProxy::new(&self.bus).await.map_err(bus_err)?;
 
-        // The settings dictionary NM wants. Only `802-11-wireless.ssid` and the key are ours to
-        // state; `autoconnect` defaults on, which is what makes the robot rejoin by itself after
-        // a reboot — the property that keeps `configd` out of the reconnect business entirely.
-        let mut wireless: HashMap<&str, Value<'_>> = HashMap::new();
-        wireless.insert("ssid", Value::from(ssid.as_bytes().to_vec()));
-        wireless.insert("mode", Value::from("infrastructure"));
-
-        let mut connection: HashMap<&str, Value<'_>> = HashMap::new();
-        connection.insert("id", Value::from(ssid));
-        connection.insert("type", Value::from("802-11-wireless"));
-
-        let mut settings: HashMap<&str, HashMap<&str, Value<'_>>> = HashMap::new();
-        settings.insert("connection", connection);
-        settings.insert("802-11-wireless", wireless);
-
-        if let Some(psk) = psk {
-            let mut security: HashMap<&str, Value<'_>> = HashMap::new();
-            // `wpa-psk` covers WPA2 and WPA2/WPA3-transition. A WPA3-only network wants `sae`,
-            // and NM is lenient enough to negotiate in practice — if a board proves otherwise,
-            // this is where the scan's `Security` should choose.
-            security.insert("key-mgmt", Value::from("wpa-psk"));
-            security.insert("psk", Value::from(psk));
-            settings.insert("802-11-wireless-security", security);
-        }
+        // `autoconnect` defaults on, which makes the robot rejoin by itself after a reboot. The
+        // same profile explicitly disables wifi power saving: reachability is more valuable on a
+        // headless robot than a small idle saving, and distro/driver defaults are not a contract.
+        let settings = connection_settings(ssid, psk);
 
         let root = zbus::zvariant::ObjectPath::try_from("/").map_err(bus_err)?;
         let device = zbus::zvariant::ObjectPath::try_from(device_path.as_str()).map_err(bus_err)?;
@@ -867,5 +887,14 @@ mod tests {
             failure_of(ids::STATE_FAILED, 999).0,
             proto::ConnectFailure::Other
         );
+    }
+
+    /// A network provisioned after first boot replaces `robot-wifi`, so fixing only the migration
+    /// profile would bring the one-minute disappearances back the next time the owner changes AP.
+    #[test]
+    fn saved_wifi_profiles_disable_power_saving() {
+        let settings = connection_settings("Pollen", Some("correct-key"));
+        let powersave = settings["802-11-wireless"]["powersave"].clone();
+        assert_eq!(u32::try_from(powersave).unwrap(), ids::POWERSAVE_DISABLE);
     }
 }

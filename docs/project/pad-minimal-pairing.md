@@ -225,22 +225,8 @@ export DUCK_REF=pad-privacy-device-not-off
 
 Steps 1 and 2 need neither a token nor the network.
 
-## Untested differences against `microduck_runtime`
-
-`microduck_runtime`'s installer disables wifi powersave on the active NetworkManager connection
-(`install.sh:244`, `:383`):
-
-```
-sudo nmcli con mod "$WIFI_CON" wifi.powersave 2
-```
-
-`scripts/` has no equivalent. The aic8800 is a combined wifi and Bluetooth part sharing one radio
-over SDIO, so this is a candidate for the third row above — but the value on the bare board that
-worked was never read, so it is a candidate and not a finding.
-
-```bash
-iw dev wlan0 get power_save
-```
+The former open difference around wifi power saving is now resolved by the profile policy owned by
+[`app-path-design.md` §2](../design/app-path-design.md#2-wifi-networkmanager-and-why-a-board-has-to-be-migrated-to-it).
 
 ## Fault 3: a bonded pad cannot reconnect while a phone is connected  · **measured** (2026-09-17)
 
