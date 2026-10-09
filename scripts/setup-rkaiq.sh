@@ -60,6 +60,7 @@ set -e
 SENSOR=imx219
 SELF=/usr/local/sbin/robot-setup-rkaiq
 SHIM_SO=/usr/local/lib/rkaiq_modinfo_shim.so
+SHIM_PERSISTED_SRC=/usr/local/lib/rkaiq-modinfo-shim.c
 IQ_DIR=/etc/iqfiles
 DROP_IN_DIR=/etc/systemd/system/rkaiq_3A.service.d
 PIN=/usr/local/bin/rkaiq-pin-sensor-mode
@@ -95,10 +96,21 @@ done
 
 [ "$(id -u)" = 0 ] || die "run as root: sudo sh $0"
 
-# Where this script and its shim source live, so a run from /tmp, from the release, or from a
-# clone all find the C file. The release lays both out side by side under scripts/.
+# A run from /tmp, a release, or a clone finds the C file beside the script. The installed copy
+# needs the persisted-source case below because executables and library sources belong in different
+# directories.
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SHIM_SRC="${HERE}/rkaiq-modinfo-shim.c"
+
+# The first run persists both this script and the source used to build the shim, but they live in
+# the conventional places for executables and library sources rather than beside one another.
+# Only the installed copy may use that persisted source: a release or one-off download missing its
+# sibling must fail instead of quietly compiling an older source left by a previous release.
+if [ ! -f "$SHIM_SRC" ] \
+    && [ "${HERE}/$(basename "$0")" = "$SELF" ] \
+    && [ -f "$SHIM_PERSISTED_SRC" ]; then
+    SHIM_SRC="$SHIM_PERSISTED_SRC"
+fi
 
 # ── the engine and its tuning ─────────────────────────────────────────────────
 
@@ -190,9 +202,10 @@ fi
 # belongs to the running kernel.
 
 if [ ! -f "$SHIM_SRC" ]; then
-    die "no ${SHIM_SRC} beside this script.
+    die "no rkaiq-modinfo-shim.c available to this script.
   The release carries scripts/rkaiq-modinfo-shim.c next to scripts/setup-rkaiq.sh; a copy of
-  the script alone cannot build the shim, and the engine segfaults without it."
+  the script alone cannot build the shim, and the engine segfaults without it. The installed
+  ${SELF} reuses ${SHIM_PERSISTED_SRC}, which a successful first run leaves behind."
 fi
 
 if ! command -v gcc >/dev/null 2>&1; then
@@ -211,14 +224,13 @@ fi
 # kernel it was built against: it brute-forces the kernel's struct size at *runtime*, once, on
 # the first intercepted ioctl. It is built on the board because it must be aarch64, which is the
 # only reason.
-SHIM_BUILT_SRC=/usr/local/lib/rkaiq-modinfo-shim.c
-if [ -f "$SHIM_SO" ] && cmp -s "$SHIM_SRC" "$SHIM_BUILT_SRC"; then
+if [ -f "$SHIM_SO" ] && cmp -s "$SHIM_SRC" "$SHIM_PERSISTED_SRC"; then
     say "the ioctl shim is current"
 else
     say "building the ioctl shim"
     gcc -shared -fPIC -O2 -o "$SHIM_SO" "$SHIM_SRC" -ldl \
         || die "could not build ${SHIM_SRC}"
-    install -m 644 "$SHIM_SRC" "$SHIM_BUILT_SRC"
+    install -m 644 "$SHIM_SRC" "$SHIM_PERSISTED_SRC"
 fi
 
 # ── the sensor-mode pin ───────────────────────────────────────────────────────
@@ -303,7 +315,7 @@ systemctl enable rkaiq_3A >/dev/null 2>&1 || warn "could not enable rkaiq_3A"
 if [ "$(cd "$(dirname "$0")" && pwd)/$(basename "$0")" != "$SELF" ]; then
     mkdir -p /usr/local/sbin
     install -m 755 "$0" "$SELF"
-    install -m 644 "$SHIM_SRC" /usr/local/lib/rkaiq-modinfo-shim.c
+    install -m 644 "$SHIM_SRC" "$SHIM_PERSISTED_SRC"
 fi
 
 # The ISP nodes exist only on the vendor kernel with the camera overlay active. Before the

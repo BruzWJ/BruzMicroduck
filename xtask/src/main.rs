@@ -1711,7 +1711,7 @@ mod tests {
     }
 
     /// `setup-rkaiq.sh` builds an LD_PRELOAD shim from a C file beside it, so the C file has to
-    /// be packaged too.
+    /// be packaged too and remain available to the installed copy after provisioning reboots.
     ///
     /// Not covered by `every_script_the_hooks_run_is_packaged`, which watches `script=scripts/…`
     /// assignments in the hooks: the shim is not a script anything runs, it is a source file the
@@ -1731,6 +1731,19 @@ mod tests {
         assert!(
             script.contains("rkaiq-modinfo-shim.c"),
             "setup-rkaiq.sh must name the shim source it builds"
+        );
+        let installed_fallback = r#"if [ ! -f "$SHIM_SRC" ] \
+    && [ "${HERE}/$(basename "$0")" = "$SELF" ] \
+    && [ -f "$SHIM_PERSISTED_SRC" ]; then
+    SHIM_SRC="$SHIM_PERSISTED_SRC"
+fi"#;
+        assert!(
+            script.contains(installed_fallback),
+            "the installed setup-rkaiq.sh must reuse the shim source its first run persisted"
+        );
+        assert!(
+            script.contains(r#"install -m 644 "$SHIM_SRC" "$SHIM_PERSISTED_SRC""#),
+            "setup-rkaiq.sh must persist the source that its installed copy reuses"
         );
 
         for workflow in PACKAGING_SITES {
