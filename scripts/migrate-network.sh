@@ -149,6 +149,33 @@ nm_owns_wifi() {
     esac
 }
 
+# Keep a headless robot's wifi awake. NetworkManager's enum value 2 means "disable"; putting it
+# on the profile is the durable part, while `iw` applies the same decision to the association
+# carrying this run instead of waiting for its next activation.
+#
+# `iw` is deliberately optional. The profile setting is sufficient after reconnect/reboot, and
+# installing another package during the network cutover would add a failure mode to the one step
+# whose job is keeping this board reachable.
+disable_wifi_power_saving() {
+    _powersave="$(nmcli -g 802-11-wireless.powersave connection show "$NM_PROFILE" \
+        2>/dev/null || true)"
+    case "$_powersave" in
+        2*) ;;
+        *)
+            nmcli connection modify "$NM_PROFILE" \
+                802-11-wireless.powersave 2 >/dev/null \
+                || { warn "could not disable wifi power saving on ${NM_PROFILE}"; return 1; }
+            say "disabled wifi power saving on ${NM_PROFILE}"
+            ;;
+    esac
+
+    if command -v iw >/dev/null 2>&1; then
+        iw dev wlan0 set power_save off >/dev/null 2>&1 \
+            || warn "${NM_PROFILE} will disable wifi power saving on its next activation, but
+  the running wlan0 association could not be changed"
+    fi
+}
+
 # The netplan file holding a `wifis:` stanza, if any. Found by content rather than by name:
 # Armbian's first-run writes `30-wifis-dhcp.yaml`, but that is a convention, not a contract.
 netplan_wifi_file() {
@@ -318,7 +345,8 @@ credentials_from_netplan_yaml() {
 migrate_wifi_profile() {
     if nmcli -t -f NAME connection show 2>/dev/null | grep -qx "$NM_PROFILE"; then
         say "NetworkManager profile ${NM_PROFILE} already exists"
-        return 0
+        disable_wifi_power_saving
+        return $?
     fi
 
     _ssid=""; _psk=""; _keymgmt=wpa-psk
@@ -344,7 +372,7 @@ migrate_wifi_profile() {
             || { warn "could not set the wifi key on ${NM_PROFILE}"; return 1; }
     fi
 
-    return 0
+    disable_wifi_power_saving
 }
 
 # The backstop. Armed before the cutover, disarmed by the run after the reboot.
@@ -524,8 +552,13 @@ main() {
     configure_nm_dns
 
     if nm_owns_wifi; then
-        # Already cut over: confirm, tidy up, and touch nothing else. Re-running must never
-        # disturb a working network.
+        # Already cut over: confirm and tidy up without cycling the connection. Changing a saved
+        # profile is safe here; the best-effort `iw` call only changes the live radio's power
+        # policy.
+        if nmcli -t -f NAME connection show 2>/dev/null | grep -qx "$NM_PROFILE"; then
+            disable_wifi_power_saving \
+                || die "the ${NM_PROFILE} profile exists but its power policy could not be saved"
+        fi
         retire_net_check
         mask_networkd_wait_online
         report

@@ -67,6 +67,12 @@ the board made the choice again rather than inheriting it:
   wifi belongs to NM, networkd's only link is a usually-cableless ethernet port, so `--any` can
   never be satisfied. Marking that link not-required removes the only candidate and guarantees the
   failure. Masking the unit is the fix; `NetworkManager-wait-online` is the honest gate.
+- **Wifi power saving is off in every robot-owned profile.** NetworkManager's value `2` means
+  disabled. The migration writes it to `robot-wifi` and applies it to the live interface with
+  `iw` when that tool is present; `configd` puts the same property in every profile it creates
+  later. The saved property is the contract — the `iw` call only avoids waiting for the next
+  activation. A headless robot has no useful trade for making its only management link depend on
+  a distribution or driver's power-save default.
 
 `scripts/migrate-network.sh` performs the migration once, and refuses to cut over until it has
 copied the board's existing credentials into an NM profile — otherwise a headless board goes
