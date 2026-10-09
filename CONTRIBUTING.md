@@ -87,7 +87,7 @@ the daemons — one crate each, one unit each, all in the same release artifact
 the libraries they drive — no sockets, no systemd, nothing starts them
   duck-ipc-proto/ the wire contract
   duck-control/   the control core: model · bus · IMU · observations · policy · safety
-  qwiic-imu/      shared Linux driver for the body and head LSM6DSV16X boards
+  qwiic-imu/      Linux drivers for explicitly configured LSM6DSO/LSM6DSV16X Qwiic IMUs
   kinematics/     the MJCF model and forward kinematics; head and hand chains
   odometry/       where the robot has been, from foot contacts and the IMU
   sounds/         synthesis, per-robot voice personality, the chorale's score

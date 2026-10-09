@@ -1,14 +1,13 @@
-//! Head LSM6DSV16X reader.
+//! Head IMU reader.
 //!
 //! `tofd` owns this reader because the head IMU and VL53L5CX share the Radxa
 //! Qwiic bus. Each has its own `i2c-dev` descriptor; Linux serialises individual
 //! transactions on the adapter. The IMU runs on a separate thread so the ToF's
 //! firmware upload and retry backoff cannot stall its stream.
 //!
-//! Orientation comes from the LSM6DSV16X's on-chip SFLP game-rotation vector.
 //! Gyroscope, accelerometer and quaternion values remain in the sensor's own
-//! +X-forward, +Y-left, +Z-up axes; consumers use the kinematic `head_imu`
-//! pose to follow the articulated head and place them in the trunk.
+//! +X-forward, +Y-left, +Z-up axes. Consumers use the kinematic `head_imu` pose
+//! to follow the articulated head and place them in the trunk.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -27,19 +26,20 @@ const RETRY_MAX: Duration = Duration::from_secs(30);
 /// this long; otherwise an open-success/first-poll-failure cycle hammers the
 /// shared bus at the minimum interval forever.
 const RETRY_RESET_AFTER: Duration = Duration::from_secs(2);
-/// No FIFO quaternion for this long means the sensor is responsive but SFLP
-/// is not streaming. Reopen it instead of advertising a found, frozen IMU.
-const NO_SAMPLE_MIN: Duration = Duration::from_secs(2);
+/// No observed sensor output for this long means the chip is responsive but
+/// its sampling path is not streaming. Reopen it instead of advertising a
+/// found, frozen IMU.
+const NO_ACTIVITY_MIN: Duration = Duration::from_secs(2);
 
-fn no_sample_timeout(hz: u8) -> Duration {
-    NO_SAMPLE_MIN.max(Duration::from_secs_f64(3.0 / f64::from(hz.max(1))))
+fn no_activity_timeout(hz: u8) -> Duration {
+    NO_ACTIVITY_MIN.max(Duration::from_secs_f64(3.0 / f64::from(hz.max(1))))
 }
 
 /// How far an IMU subscriber may fall behind before it loses samples. At
 /// 100 Hz this is about 2.5 seconds.
 pub const FRAME_BUFFER: usize = 256;
 
-/// What `head_imu.stream` reports: whether the LSM6DSV16X was found and the
+/// What `head_imu.stream` reports: which configured IMU was found and the
 /// consumer-requested publication rate.
 #[derive(Clone)]
 pub struct ImuStatus {
@@ -100,10 +100,11 @@ impl ImuStatus {
     }
 }
 
-/// Read the head LSM6DSV16X forever and broadcast wire-compatible head frames.
+/// Read the explicitly configured head IMU forever and broadcast wire-compatible frames.
 pub fn imu_loop(
     bus: &Path,
     address: u8,
+    model: qwiic_imu::Model,
     hz: u8,
     status: &ImuStatus,
     frames: &tokio::sync::broadcast::Sender<proto::HeadImuFrame>,
@@ -115,7 +116,7 @@ pub fn imu_loop(
     let mut backoff = RETRY_MIN;
 
     while !shutdown.load(Ordering::Acquire) {
-        let mut imu = match open_imu(bus, address, hz) {
+        let mut imu = match open_imu(bus, address, model, hz) {
             Ok(found) => found,
             Err(e) => {
                 status.lost(e.to_string());
@@ -125,16 +126,21 @@ pub fn imu_loop(
                 continue;
             }
         };
+        let sensor_hz = imu.rate_hz();
+        let sensor = imu.model().to_string();
+        let mut ready = imu.ready();
         tracing::info!(
             bus = %bus.display(),
             address = format!("{address:#04x}"),
-            sensor_hz = imu.rate_hz(),
+            model = %sensor,
+            sensor_hz,
             publish_hz = hz,
-            "head LSM6DSV16X answered"
+            ready,
+            "head IMU answered"
         );
         let opened_at = Instant::now();
-        let mut last_sample_at = opened_at;
-        let sample_timeout = no_sample_timeout(hz);
+        let mut last_activity_at = opened_at;
+        let activity_timeout = no_activity_timeout(hz);
         let mut announced = false;
         let mut retry_reset = false;
 
@@ -142,16 +148,29 @@ pub fn imu_loop(
             let tick = Instant::now();
             match imu.poll() {
                 Ok(poll) => {
-                    if let Some(sample) = poll.sample {
-                        last_sample_at = Instant::now();
+                    if poll.observed {
+                        last_activity_at = Instant::now();
                         if !announced {
-                            status.found("LSM6DSV16X");
+                            status.found(&sensor);
                             announced = true;
                         }
                         if !retry_reset && opened_at.elapsed() >= RETRY_RESET_AFTER {
                             backoff = RETRY_MIN;
                             retry_reset = true;
                         }
+                        let now_ready = imu.ready();
+                        if !ready && now_ready {
+                            tracing::info!(model = %sensor, "head IMU orientation is ready");
+                        } else if ready && !now_ready {
+                            tracing::warn!(
+                                model = %sensor,
+                                "head IMU orientation restarted convergence"
+                            );
+                        }
+                        ready = now_ready;
+                    }
+
+                    if let Some(sample) = poll.sample {
                         seq = seq.saturating_add(1);
                         let _ = frames.send(proto::HeadImuFrame {
                             seq,
@@ -162,10 +181,10 @@ pub fn imu_loop(
                             quat: sample.quat,
                             temp_c: sample.temp_c,
                         });
-                    } else if last_sample_at.elapsed() >= sample_timeout {
+                    } else if !poll.observed && last_activity_at.elapsed() >= activity_timeout {
                         let why = format!(
-                            "no fresh SFLP sample for {} ms",
-                            last_sample_at.elapsed().as_millis()
+                            "no head IMU output for {} ms",
+                            last_activity_at.elapsed().as_millis()
                         );
                         status.lost(why.clone());
                         tracing::warn!(reason = %why, "head IMU stopped streaming; reopening");
@@ -192,13 +211,14 @@ pub fn imu_loop(
 }
 
 /// Open the fixed-address head IMU on the one configured Qwiic adapter.
-fn open_imu(bus: &Path, address: u8, requested_hz: u8) -> anyhow::Result<qwiic_imu::Sensor> {
-    qwiic_imu::Sensor::open(bus, address, u16::from(requested_hz)).map_err(|e| {
-        anyhow::anyhow!(
-            "LSM6DSV16X init at {address:#04x} on {}: {e:#}",
-            bus.display()
-        )
-    })
+fn open_imu(
+    bus: &Path,
+    address: u8,
+    model: qwiic_imu::Model,
+    requested_hz: u8,
+) -> anyhow::Result<qwiic_imu::Sensor> {
+    qwiic_imu::Sensor::open(bus, address, model, u16::from(requested_hz))
+        .map_err(|e| anyhow::anyhow!("{model} init at {address:#04x} on {}: {e:#}", bus.display()))
 }
 
 fn sleep_unless_shutdown(dur: Duration, shutdown: &Arc<AtomicBool>) {
@@ -239,8 +259,8 @@ mod tests {
 
     #[test]
     fn a_silent_sensor_has_a_finite_rate_aware_deadline() {
-        assert_eq!(no_sample_timeout(100), NO_SAMPLE_MIN);
-        assert_eq!(no_sample_timeout(1), Duration::from_secs(3));
-        assert_eq!(no_sample_timeout(0), Duration::from_secs(3));
+        assert_eq!(no_activity_timeout(100), NO_ACTIVITY_MIN);
+        assert_eq!(no_activity_timeout(1), Duration::from_secs(3));
+        assert_eq!(no_activity_timeout(0), Duration::from_secs(3));
     }
 }

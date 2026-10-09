@@ -121,9 +121,14 @@ pub const REGISTRY: &[Entry] = &[
         "Qwiic i2c-dev path for the required trunk IMU",
     ),
     entry(
+        "body_imu.model",
+        Kind::Choice(&qwiic_imu::Model::LABELS),
+        "Exact body IMU model; never inferred from its address",
+    ),
+    entry(
         "body_imu.address",
         Kind::Integer,
-        "Seven-bit body LSM6DSV16X address (normally 0x6b)",
+        "Seven-bit body IMU address (normally 0x6b)",
     ),
     // ── [control] ────────────────────────────────────────────────────────────
     entry("control.hz", Kind::Integer, "Control loop rate"),
@@ -415,6 +420,11 @@ pub const REGISTRY: &[Entry] = &[
         Kind::Bool,
         "Read the Qwiic head IMU — off by default",
     ),
+    entry(
+        "head_imu.model",
+        Kind::Choice(&qwiic_imu::Model::LABELS),
+        "Exact head IMU model; never inferred from its address",
+    ),
     // ── [audio] ──────────────────────────────────────────────────────────────
     feature(
         "audio.enabled",
@@ -606,6 +616,7 @@ mod tests {
         for known in [
             "bus",
             "body_imu",
+            "head_imu",
             "control",
             "update_gate",
             "policy",

@@ -1,7 +1,7 @@
 //! The Dynamixel bus through an OpenRB-150 USB bridge.
 //!
 //! One servo `sync_read`, one body-IMU I²C poll, and one servo `sync_write` per tick. The
-//! LSM6DSV16X shares the Radxa's Qwiic bus with the head sensors, not the Dynamixel wire.
+//! configured trunk IMU shares the Radxa's Qwiic bus with the head sensors, not the Dynamixel wire.
 //! The OpenRB runs ROBOTIS's factory `usb_to_dynamixel` sketch: it forwards the host's raw
 //! Protocol 2 packets rather than owning the control loop, so servo configuration, sensing,
 //! safety, and policy execution remain here on the Linux host.
@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use rustypot::servo::dynamixel::xl330::Xl330Controller;
 
-use crate::imu::{ImuData, SflpDecoder};
+use crate::imu::{ImuData, ImuDecoder};
 use crate::io::{ImuStale, IoError, JointTargets, Result, RobotIo, Sensors, SlowSensors};
 use crate::model::{
     BAUD_RATE, EXPECTED_REGISTERS, FACTORY_BAUD_RATE, FACTORY_ID, JOINT_IDS, JOINT_NAMES,
@@ -82,16 +82,16 @@ const EEPROM_SETTLE: Duration = Duration::from_millis(20);
 
 /// Run of consecutive stale reads at which the journal says something.
 ///
-/// The shipped sensor rate is above the control rate (60 Hz for the 50 Hz loop), so normal clock
-/// phase can create one empty poll but not three in a row. Even at the allowed 1 kHz control-rate
-/// ceiling, the 480 Hz SFLP ceiling produces at most two consecutive empty polls. On the third
-/// miss the held orientation is about 60 ms old in the shipped configuration: stop treating it
-/// as a complete policy sample and enter the loop's bounded coast path. Kept in step with
+/// The shipped sensor rate is above the control rate, so normal clock phase can create one empty
+/// poll but not three in a row. Even at the allowed 1 kHz control-rate ceiling, either model's
+/// maximum rate produces at most two consecutive empty polls. On the third miss the held
+/// orientation is about 60 ms old in the shipped configuration: stop treating it as a complete
+/// policy sample and enter the loop's bounded coast path. Kept in step with
 /// `ImuHealth::FROZEN_RUN`; the hardware layer deliberately does not depend on the IPC vocabulary,
 /// so the number lives in both places.
 const STALE_RUN_WARN: u64 = 3;
 
-/// Detects an IMU poll that produced no new SFLP quaternion.
+/// Detects an IMU poll with no hardware activity.
 ///
 /// Split out from the read path so it can be tested without a serial port: the fault it
 /// describes is one nothing else on the robot reports, and it would otherwise be verifiable
@@ -102,9 +102,9 @@ struct StaleImuTracker {
 }
 
 impl StaleImuTracker {
-    /// Records whether a poll yielded a new sample and returns the current stale run.
-    fn observe(&mut self, fresh: bool) -> u64 {
-        if fresh {
+    /// Records whether a poll observed the sensor producing data and returns the stale run.
+    fn observe(&mut self, observed: bool) -> u64 {
+        if observed {
             self.stale.run = 0;
         } else {
             self.stale.total = self.stale.total.saturating_add(1);
@@ -243,10 +243,10 @@ pub struct DynamixelIo {
     /// complete read through that new handle has succeeded.
     port_recovery: PortRecovery,
     body_imu: qwiic_imu::Sensor,
-    imu: SflpDecoder,
+    imu: ImuDecoder,
     last_imu: ImuData,
-    /// Successful polls with no new SFLP quaternion. The control loop holds `last_imu`
-    /// for those ticks, so freshness has to be counted separately.
+    /// Successful polls with no hardware activity. The control loop holds `last_imu` for those
+    /// ticks, so freshness has to be counted separately.
     stale_imu: StaleImuTracker,
 }
 
@@ -258,10 +258,11 @@ impl DynamixelIo {
         fast_sync_read: bool,
         imu_bus: &Path,
         imu_address: u8,
+        imu_model: qwiic_imu::Model,
         requested_hz: u16,
     ) -> Result<Self> {
         let controller = open_controller(port, BAUD_RATE, fast_sync_read)?;
-        let body_imu = qwiic_imu::Sensor::open(imu_bus, imu_address, requested_hz)
+        let body_imu = qwiic_imu::Sensor::open(imu_bus, imu_address, imu_model, requested_hz)
             .map_err(|e| IoError::Bus(format!("open body IMU on {}: {e:#}", imu_bus.display())))?;
 
         Ok(Self {
@@ -270,14 +271,14 @@ impl DynamixelIo {
             fast_sync_read,
             port_recovery: PortRecovery::default(),
             body_imu,
-            imu: SflpDecoder::default(),
+            imu: ImuDecoder::default(),
             last_imu: ImuData::default(),
             stale_imu: StaleImuTracker::default(),
         })
     }
 
-    /// Effective SFLP rate after rounding the control rate to a supported sensor rung.
-    pub fn body_imu_rate_hz(&self) -> u16 {
+    /// Effective sample rate after rounding the control rate to a supported sensor rung.
+    pub fn body_imu_rate_hz(&self) -> f32 {
         self.body_imu.rate_hz()
     }
 
@@ -721,26 +722,27 @@ impl RobotIo for DynamixelIo {
             .body_imu
             .poll()
             .map_err(|e| IoError::Bus(format!("read body IMU: {e:#}")))?;
+        let observed = poll.observed;
         if let Some(sample) = poll.sample {
             self.last_imu = self.imu.decode(sample);
         }
-        let run = self.stale_imu.observe(poll.sample.is_some());
+        let run = self.stale_imu.observe(observed);
         if run == STALE_RUN_WARN || (run > STALE_RUN_WARN && run.is_multiple_of(500)) {
             tracing::warn!(
                 consecutive = run,
                 total = self.stale_imu.stale.total,
-                "body IMU has produced no new SFLP sample for {run} reads — orientation is frozen"
+                "body IMU has shown no sensor activity for {run} reads — orientation is frozen"
             );
         }
         if self.stale_imu.frozen() {
-            // A couple of empty FIFO polls can be the normal phase difference
-            // between the control loop and SFLP. Three in a row is not:
+            // A couple of empty polls can be the normal phase difference between the control
+            // loop and the sensor. Three in a row is not:
             // accepting the held attitude forever would let a walking policy
-            // keep stepping after fusion had stopped. Route a frozen sensor through the same
+            // keep stepping after the sensor had stopped. Route a frozen sensor through the same
             // bounded coast/error path as any other required sensor failure;
-            // a later fresh FIFO record clears the run and recovers normally.
+            // later activity clears the run and recovers normally.
             return Err(IoError::Bus(format!(
-                "body IMU produced no new SFLP sample for {run} consecutive reads"
+                "body IMU showed no sensor activity for {run} consecutive reads"
             )));
         }
         sensors.imu = self.last_imu;
@@ -860,7 +862,7 @@ impl RobotIo for DynamixelIo {
     }
 
     fn imu_ready(&self) -> bool {
-        self.imu.ready()
+        self.body_imu.ready() && self.imu.ready()
     }
 }
 
@@ -976,18 +978,18 @@ mod tests {
         assert!((one_count * 60.0 / (2.0 * PI) - expected_rpm).abs() < 1e-12);
     }
 
-    /// A poll without a FIFO quaternion is stale even before the first sample. Readiness keeps
-    /// the default orientation out of fall detection, while this counter makes the cause visible.
+    /// A poll without sensor activity is stale even before the first sample. Readiness keeps the
+    /// default orientation out of fall detection, while this counter makes the cause visible.
     #[test]
-    fn no_sample_is_stale_from_the_first_poll() {
+    fn no_activity_is_stale_from_the_first_poll() {
         let mut t = StaleImuTracker::default();
         assert_eq!(t.observe(false), 1);
         assert_eq!(t.stale.total, 1);
     }
 
-    /// Fresh samples leave the total alone and clear the current run.
+    /// Observed activity leaves the total alone and clears the current run.
     #[test]
-    fn fresh_samples_count_for_nothing() {
+    fn observed_activity_counts_for_nothing() {
         let mut t = StaleImuTracker::default();
         for _ in 0..10 {
             assert_eq!(t.observe(true), 0);
@@ -995,16 +997,27 @@ mod tests {
         assert_eq!(t.stale, ImuStale { total: 0, run: 0 });
     }
 
-    /// A hiccup: one poll has no new quaternion, then the board recovers. The total remembers it — that
-    /// is what makes "9 over 40 minutes" sayable — while the run goes back to zero, because
-    /// orientation is live again and nothing should be shouting.
+    /// A hiccup: one poll has no activity, then the board recovers. The total remembers it — that
+    /// is what makes "9 over 40 minutes" sayable — while the run goes back to zero, because the
+    /// sensor is live again and nothing should be shouting.
     #[test]
     fn a_hiccup_is_remembered_in_the_total_but_not_the_run() {
         let mut t = StaleImuTracker::default();
         t.observe(true);
-        assert_eq!(t.observe(false), 1, "a missed sample starts a run");
-        assert_eq!(t.observe(true), 0, "a fresh sample ends the run");
+        assert_eq!(t.observe(false), 1, "a silent poll starts a run");
+        assert_eq!(t.observe(true), 0, "sensor activity ends the run");
         assert_eq!(t.stale, ImuStale { total: 1, run: 0 });
+    }
+
+    /// The LSM6DSO reports raw FIFO activity while its host fusion warms up. That activity must
+    /// keep the sensor live even though there is not a fused sample to decode yet.
+    #[test]
+    fn fusion_warmup_activity_is_not_stale() {
+        let mut t = StaleImuTracker::default();
+        for _ in 0..100 {
+            assert_eq!(t.observe(true), 0);
+        }
+        assert_eq!(t.stale, ImuStale { total: 0, run: 0 });
     }
 
     /// A board that has stopped refreshing misses forever, and the run is what separates that

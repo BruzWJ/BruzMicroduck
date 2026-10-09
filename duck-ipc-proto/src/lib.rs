@@ -962,7 +962,7 @@ pub mod method {
     /// One 8×8 depth frame, pushed after [`TOF_STREAM`].
     pub const TOF_FRAME: &str = "tof.frame";
 
-    /// Subscribe to the Qwiic head LSM6DSV16X served by `tofd`. The answer describes the sensor,
+    /// Subscribe to the configured Qwiic head IMU served by `tofd`. The answer describes the sensor,
     /// then [`HEAD_IMU_FRAME`] notifications arrive until the connection closes.
     pub const HEAD_IMU_STREAM: &str = "head_imu.stream";
 
@@ -3640,7 +3640,7 @@ impl BusHealth {
 pub struct ImuHealth {
     /// Has the orientation filter converged?
     pub ready: bool,
-    /// Successful polls with no new SFLP FIFO record, cumulative since startup.
+    /// Successful polls with no new underlying IMU record, cumulative since startup.
     ///
     /// Sporadic hits are ordinary and say nothing about whether orientation is live *now*: the
     /// control loop and the sensor keep their own clocks, so a tick can legitimately arrive
@@ -3650,8 +3650,9 @@ pub struct ImuHealth {
     pub stale_blocks: u64,
     /// Length of the current unbroken run of stale reads; any fresh block resets it to zero.
     ///
-    /// This is the one worth alarming on. A sensor that has stopped fusing can keep answering
-    /// I²C while producing no FIFO record, which makes the run climb. At [`Self::FROZEN_RUN`]
+    /// This is the one worth alarming on. A sensor that has stopped producing data can keep
+    /// answering I²C while producing no FIFO record, which makes the run climb. At
+    /// [`Self::FROZEN_RUN`]
     /// the hardware layer also turns the condition into a required-sensor read failure.
     pub consecutive_stale_blocks: u64,
     /// While the bus is coming up: every servo answered its ping and the IMU board did not.
@@ -3665,10 +3666,10 @@ pub struct ImuHealth {
 impl ImuHealth {
     /// Run length at which orientation is called frozen rather than hiccuping.
     ///
-    /// Three misses is about 60 ms at the shipped 50 Hz loop, whose configured SFLP rate is
-    /// 60 Hz. One phase miss is ordinary there. At the allowed 1 kHz control-rate ceiling the
-    /// sensor tops out at 480 Hz, but normal phase still produces at most two consecutive empty
-    /// polls, so three in a row means fusion is no longer delivering live policy input.
+    /// Three misses is about 60 ms at the shipped 50 Hz loop. The default LSM6DSV16X runs at
+    /// 60 Hz there; an LSM6DSO body runs at 52 Hz. One phase miss is ordinary. Raw DSO records
+    /// observed during software-fusion startup reset the run without claiming orientation is
+    /// ready, so three misses still means the selected backend is no longer delivering live data.
     /// `duck-control` uses the same number for the required-sensor failure, but keeps its own copy
     /// because the hardware layer does not depend on this IPC vocabulary.
     pub const FROZEN_RUN: u64 = 3;
@@ -4889,7 +4890,7 @@ pub struct TofFrame {
 #[serde(default)]
 pub struct HeadImuStreamResult {
     pub accepted: bool,
-    /// The IMU that answered, e.g. `LSM6DSV16X`. `None` when there is none — see `unavailable`.
+    /// The configured IMU model that answered. `None` when there is none — see `unavailable`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sensor: Option<String>,
     /// Why there is no IMU: not fitted, bus unreadable, chip-id mismatch.
@@ -4901,8 +4902,8 @@ pub struct HeadImuStreamResult {
 
 /// One head-IMU sample — a [`method::HEAD_IMU_FRAME`] notification.
 ///
-/// The Qwiic LSM6DSV16X is read by `tofd`. Samples use its +X-forward, +Y-left, +Z-up axes,
-/// and coincide with the neutral head/trunk convention. The head articulates; use
+/// The configured Qwiic head IMU is read by `tofd`. Samples use its +X-forward, +Y-left, +Z-up
+/// mounting axes and coincide with the neutral head/trunk convention. The head articulates; use
 /// [`FramesState::head_imu`] to place a sample in the trunk/camera frame when its mount matches
 /// the board. This is distinct from the body IMU at address `0x6b` on the Qwiic adapter.
 /// Units: rad/s, m/s², unitless quaternion.
@@ -4915,14 +4916,15 @@ pub struct HeadImuFrame {
     pub at_us: u64,
     /// `CLOCK_MONOTONIC` when the sample was read, ns — the clock [`RobotState::t_ns`] shares.
     pub t_ns: u64,
-    /// Angular velocity, rad/s, in the chip's sensor axes. The Qwiic LSM6DSV16X uses +X
+    /// Angular velocity, rad/s, in the chip's sensor axes. The installed board uses +X
     /// forward, +Y left, +Z up. Combine with [`FramesState::head_imu`] to follow the moving
     /// head and place it in the trunk or camera frame.
     pub gyro: [f32; 3],
     /// Specific force, m/s², in the chip's sensor axes.
     pub accel: [f32; 3],
-    /// Orientation, scalar-first `[w, x, y, z]`, sensor→world (gravity down, yaw
-    /// arbitrary). The world here is the IMU's own; relate it to the trunk via the mount pose.
+    /// Fused orientation, scalar-first `[w, x, y, z]`, sensor→world (gravity down, yaw
+    /// arbitrary). Fusion is on-chip for LSM6DSV16X and host-side for LSM6DSO; the world here is
+    /// the IMU's own, so relate it to the trunk via the mount pose.
     pub quat: [f32; 4],
     /// Chip temperature, °C.
     pub temp_c: f32,

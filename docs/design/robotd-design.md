@@ -14,12 +14,14 @@ opens the OpenRB USB serial device with `rustypot` at 1 Mbps, and its
 [wiring](https://github.com/AI-FanGe/Microduck-build-tutorial/blob/49678215d0b40529522772a40c06c216390449dd/README.md#L655-L694)
 is `SBC -> USB -> OpenRB -> splitter -> leg/head chains`. That is the transport precedent,
 not a second robot contract: the tutorial uses a Raspberry Pi, a BNO08x, fourteen required
-servo IDs `1–14` and an optional mouth at `15`. This daemon retains the alpha model, both
-LSM6DSV16X IMUs, and all fifteen required IDs `20–24 / 30–34 / 10–14`.
+servo IDs `1–14` and an optional mouth at `15`. This daemon retains the alpha model, explicitly
+configured Qwiic IMUs, and all fifteen required IDs `20–24 / 30–34 / 10–14`. The physical replica
+defaults to an LSM6DSV16X in the body and an LSM6DSO in the head.
 
-**The policy path uses the alpha model and the SparkFun LSM6DSV16X body IMU.** The custom
-`imu_to_dxl` body board, v1/v1.5/v1.6 variants, legacy BMI088 head path and Pi path are retired.
-The head LSM6DSV16X is a separate stream owned by `tofd`; it is not a policy input. The official
+**The policy path uses the alpha model and the configured SparkFun Qwiic body IMU.** Either IMU
+role can select `lsm6dso` or `lsm6dsv16x`; selection is explicit, never inferred from an address.
+The custom `imu_to_dxl` body board, v1/v1.5/v1.6 variants, legacy BMI088 head path and Pi path are
+retired. The head IMU is a separate stream owned by `tofd`; it is not a policy input. The official
 Hub set contains the alpha-compatible walking family and the roller policies. The wheeled
 configuration survives as one params
 switch — `policy.mode = "roller"` (§4.2) — because it selects policy roles and a tuning preset,
@@ -40,7 +42,7 @@ sketch: it copies raw bytes between USB and `Serial1`, changes the TTL baud rate
 CDC line rate changes, and enables the board's DYNAMIXEL power FET. It does **not** run the ONNX
 policy, the 50 Hz loop, joint mapping or safety; all of those remain in `robotd` on Linux.
 
-The body Micro LSM6DSV16X stays at its factory `0x6b` address on the SBC's Qwiic adapter:
+The default body Micro LSM6DSV16X stays at its factory `0x6b` address on the SBC's Qwiic adapter:
 
 ```text
                     robotd — control thread
@@ -55,7 +57,7 @@ The body Micro LSM6DSV16X stays at its factory `0x6b` address on the SBC's Qwiic
              │ USB-C data                            └── Qwiic SHIM
              ▼                                            │
  OpenRB-150 · factory usb_to_dynamixel                      ├── 0x29 VL53L5CX ToF
-             │ Serial1 · 1 Mbps TTL · protocol v2           ├── 0x6a head LSM6DSV16X
+             │ Serial1 · 1 Mbps TTL · protocol v2           ├── 0x6a head LSM6DSO
              │ one DYNAMIXEL socket                         └── 0x6b body LSM6DSV16X
              ▼
  30–34 neck/head/mouth chain · 5 servos
@@ -94,17 +96,27 @@ topology but does not validate this build's NP-F rail.
 The jumper position, polarity and no-hot-plug rules are shown in the official
 [OpenRB-150 power documentation](https://emanual.robotis.com/docs/en/parts/controller/openrb-150/#connecting-power).
 
-The sensor path remains direct to the SBC and completely outside the OpenRB:
-`Qwiic SHIM -> VL53L5CX ToF -> head LSM6DSV16X -> body Micro LSM6DSV16X`. The optional audio
-HAT remains on its existing codec/overlay path and is unchanged; replacing the motor HAT does
-not remove audio support.
+The sensor path remains direct to the SBC and completely outside the OpenRB. The physical replica
+is `Qwiic SHIM -> VL53L5CX ToF -> head LSM6DSO -> body Micro LSM6DSV16X`. The optional audio HAT
+remains on its existing codec/overlay path and is unchanged; replacing the motor HAT does not
+remove audio support.
 
-The shared `qwiic-imu` crate configures the chip's SFLP engine and returns gyro, acceleration,
-temperature and a fused quaternion. `duck-control::imu` owns only the robot-specific body mount,
-spike rejection and readiness gate. The body breakout is mounted +X forward, +Y left, +Z up, so
-its sensor-to-trunk mount is identity. The head carries the same chip at `0x6a`, but `tofd` owns
-that address and publishes it separately. Roles are fixed by address, never inferred from probe
-order.
+`[body_imu]` and `[head_imu]` each select an explicit `model`; both roles accept exactly `lsm6dso`
+or `lsm6dsv16x`, independently. The installed roles retain their wiring addresses: body `0x6b`,
+head `0x6a`. The physical defaults are body `lsm6dsv16x` and head `lsm6dso`. There is no probe
+order, address-to-model inference, or fallback. `qwiic-imu` checks the selected model's WHO_AM_I
+value (`0x6c` for LSM6DSO, `0x70` for LSM6DSV16X) at that role's address and reports a mismatch.
+
+The shared `qwiic-imu` layer presents the same gyro, acceleration, temperature and fused-quaternion
+field contract for either chip in either role. LSM6DSV16X uses its SFLP engine; LSM6DSO has no SFLP,
+so the shared layer runs software fusion over coherent raw FIFO pairs and exposes readiness only
+after orientation startup and initial rest-bias acquisition. `duck-control::imu` then owns only
+robot-specific body mounting, spike rejection and its additional readiness gate; `tofd` publishes
+the shared sample unchanged. The public gyro field is the uncorrected sensor rate for both models;
+the DSO bias estimate is internal to its orientation filter and does not silently change that field.
+Both installed breakouts use +X forward, +Y left, +Z up. The body sensor-to-trunk mount is identity,
+while the head continues to use the articulated `head_imu` site—changing chip model does not cancel
+or replace that frame transform.
 
 The I2C *adapter* is shared, not the sensor addresses. `tofd` also opens `/dev/i2c-qwiic` for the
 head IMU at `0x6a` and VL53L5CX at `0x29`; Linux serialises their transactions with `robotd`'s
@@ -184,7 +196,7 @@ questions: nothing in the update path can command a motor.
 
 ```text
 duck-ipc-proto/  wire contract — serde only; no tokio, no http, no crypto
-qwiic-imu/       Linux LSM6DSV16X driver · SFLP/FIFO · SI-unit samples
+qwiic-imu/       Explicit LSM6DSV16X/SFLP + LSM6DSO/software-fusion drivers · SI samples
 duck-control/    robot model · bus · IMU · RobotIo · obs · policy · safety
                  everything between reading the bus and writing it
                  no tokio, no sockets, no systemd
@@ -221,7 +233,7 @@ halves succeed:
 
 ```text
 read()          one fast sync_read · 15 servos · regs 124–136
-                then one body LSM6DSV16X FIFO poll · /dev/i2c-qwiic@0x6b   (§2.1)
+                then one configured body-IMU poll · /dev/i2c-qwiic@0x6b   (§2.1)
 decide          observation → policy → targets → clamp                 (§2.2–§2.4)
 write()         one sync_write     · goal positions
 publish         atomics always; a state frame only if someone subscribed     (§4.1)
@@ -234,7 +246,7 @@ Where the data goes, once per period:
 ```text
   OpenRB USB/TTL ── fast sync_read: 15 servos ──┐
                                                 ├─ complete read or error
-  Qwiic I2C3 ──── body SFLP FIFO poll ──────────┘
+  Qwiic I2C3 ──── body fused-IMU FIFO poll ──────┘
                                                 │
                                                 ▼
    Sensors ──────────┬──────────────────────► safety.observe ──► fallen? (debounced)
@@ -336,7 +348,7 @@ intended:
 ### 2.1 The bus layer and `RobotIo`
 
 A thin hardware backend over two libraries: `rustypot` owns the raw Dynamixel byte stream through
-the OpenRB bridge, and `qwiic-imu` owns the body LSM6DSV16X's Linux I2C/FIFO/SFLP mechanics.
+the OpenRB bridge, and `qwiic-imu` owns the selected body IMU's Linux I2C, FIFO and fusion mechanics.
 `DynamixelIo` composes them behind `RobotIo` so callers receive a complete joint-plus-body sample
 or an error, never half of an observation. The OpenRB does not terminate or reinterpret protocol
 2.0 packets, so servo discovery, register provisioning, sync reads and sync writes remain the same
@@ -384,17 +396,21 @@ nothing wants in between — so they are sampled together once a second in their
 transaction (~1 ms) rather than widening the tick's read to 22 bytes per servo at 50 Hz. The
 sampling interval is the same window the achieved rate is measured over, so one clock drives both.
 
-The body sensor opens from `[body_imu]`: `/dev/i2c-qwiic`, address `0x6b`, with its +X-forward,
-+Y-left, +Z-up axes equal to the trunk frame and its SFLP rate rounded up from the control rate
-(50 Hz therefore selects 60 Hz). It is required. An open error
-keeps startup in the existing retry loop; an I2C error fails that tick through the same runtime
-counter as a servo read. A successful poll with no new FIFO quaternion is different: it holds the
-last good `ImuData`, increments `imu_stale`, and waits for the sensor's independent clock. A run of
-three empty polls is no longer a timing difference: it is treated as a failed required-sensor
-read, so the loop takes its bounded coast path rather than walking indefinitely on a frozen
-attitude. The 480 Hz sensor ceiling still permits at most two consecutive empty polls at the
-allowed 1 kHz control-rate ceiling.
-Twenty-five fresh quaternions are still required before `imu_ready` lets fall detection trust it.
+The body sensor opens from `[body_imu]`: model `lsm6dsv16x`, `/dev/i2c-qwiic`, address `0x6b` by
+default, with its +X-forward, +Y-left, +Z-up mounting axes equal to the trunk frame. Its discrete
+rate is rounded up from the control rate (50 Hz selects 60 Hz on LSM6DSV16X or 52 Hz on LSM6DSO).
+It is required. An open error keeps startup in the existing retry loop; an I2C error fails that
+tick through the same runtime counter as a servo read.
+
+A poll reports underlying sensor activity separately from a publishable fused sample. That
+distinction lets an LSM6DSO consume live raw FIFO pairs during software-fusion startup without
+being labelled frozen or becoming policy-ready. Once fusion is ready, a poll with no new sensor
+data holds the last good `ImuData`, increments `imu_stale`, and waits for the sensor's independent
+clock. A run of three empty polls is no longer a timing difference: it is treated as a failed
+required-sensor read, so the loop takes its bounded coast path rather than walking indefinitely on
+a frozen attitude. Twenty-five fresh quaternions are required by the body decoder in addition to
+the selected backend's readiness before `imu_ready` lets policy execution or fall detection trust
+it.
 
 Voltage is averaged across the servos: all fifteen sit on one pack, so a single reading is the
 same measurement with more noise, and a device answering zero is filtered out rather than
@@ -476,9 +492,11 @@ cooler win, for the same reason the hottest zone does — a big.LITTLE board thr
 cores first, and reporting `policy0` there would show a board running freely while the cores the
 loop is on are halved.
 
-**IMU staleness is tracked, permanently.** The control loop and the LSM6DSV16X keep independent
-clocks, so a successful FIFO poll can legitimately have no new SFLP record. `DynamixelIo` holds
-the last good orientation, counts those polls, and clears the current run on every fresh sample.
+**IMU staleness is tracked, permanently.** The control loop and either IMU keep independent clocks,
+so a successful FIFO poll can legitimately contain no new sensor record. `DynamixelIo` holds the
+last good orientation, counts polls with no underlying sensor activity, and clears the current run
+when activity resumes. DSO raw records observed during filter startup are activity, but not a
+ready orientation.
 It says so in the journal only once a run is long enough to mean something — three consecutive
 misses (about 60 ms at 50 Hz), where normal loop/sensor clock phase cannot explain it. At that
 threshold the read fails into the same bounded coast path as any required-sensor error; a later
@@ -694,10 +712,10 @@ has closed by then.
 So `limp_fall` (on by default; with the default velstand gait and no standing network, the
 hand-back is to velstand at zero command) runs a second, separate detector — `duck_control::fall` — on the rate rather than the position. Projected gravity
 rotates with the trunk, so `ġ = −ω × g` is exact and comes straight from the gyro in the same
-LSM6DSV16X sample as the SFLP quaternion; extrapolating it over ~0.3 s says where gravity is
+body-IMU sample as its fused quaternion; extrapolating it over ~0.3 s says where gravity is
 heading. It fires when
 the robot is already tilted (≈26°), still tipping over rather than recovering, and predicted
-past the fall threshold — debounced three ticks. Differentiating the SFLP quaternion instead
+past the fall threshold — debounced three ticks. Differentiating the fused quaternion instead
 would add the filter's lag to the one number whose whole value is being early.
 
 What it buys is not the landing itself but the stand-up after it. The standing policy gets a
@@ -1259,10 +1277,10 @@ projected gravity, and where the camera and the ToF sensor are. All three are ad
   `mono_ns` and `real_ns` at one instant, so RTP timestamps — which RTCP sender reports state in
   wall-clock — can be put on the same axis.
 - **`imu: {gyro, quat}`** is `ImuData` as the loop read it: the trunk IMU, 50 Hz, nothing above
-  it (`docs/design/robotd-design.md` §2.1). The head LSM6DSV16X is owned by `tofd` at `0x6a`
+  it (`docs/design/robotd-design.md` §2.1). The configured head IMU is owned by `tofd` at `0x6a`
   and streams through `head_imu.stream` beside `tof.frame`, not here.
-- **`frames: {camera, tof}`** are trunk-frame poses at this tick's *measured* head joints from
-  `kinematics::head::HeadFk` — the same FK `robot.look` solves against — and **`robot.model`**
+- **`frames: {camera, tof, head_imu}`** are trunk-frame poses at this tick's *measured* head joints
+  from `kinematics::head::HeadFk` — the same FK `robot.look` solves against — and **`robot.model`**
   answers the static geometry (trunk height, joint order, ToF beam directions, the poses at head
   zero). The kinematics stay in one crate; a client asks rather than transcribes.
 

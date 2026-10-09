@@ -1,4 +1,5 @@
-//! `[head_imu]` in `/etc/robot/robotd.toml`, which is where this daemon's one switch lives.
+//! `[head_imu]` in `/etc/robot/robotd.toml`, which selects whether this daemon reads the head IMU
+//! and which of the two supported sensor models is fitted there.
 //!
 //! Read out of `robotd`'s file rather than a file of its own, exactly as `mediad` reads
 //! `[media]`: the schema, the defaults and the validation are `robotd_params`'s, so the value
@@ -60,7 +61,13 @@ mod tests {
     fn the_file_turns_it_on() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("robotd.toml");
-        std::fs::write(&path, "[head_imu]\nenabled = true\n").expect("write");
-        assert!(load(&path, true).head_imu.enabled());
+        std::fs::write(
+            &path,
+            "[head_imu]\nenabled = true\nmodel = \"lsm6dsv16x\"\n",
+        )
+        .expect("write");
+        let params = load(&path, true);
+        assert!(params.head_imu.enabled());
+        assert_eq!(params.head_imu.model, qwiic_imu::Model::Lsm6dsv16x);
     }
 }

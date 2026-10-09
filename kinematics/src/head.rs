@@ -31,7 +31,7 @@ pub struct HeadFk {
     /// true position, a couple of centimetres from the camera it would
     /// otherwise borrow.
     tof: Option<SiteId>,
-    /// The MJCF's `head_imu` site (the head LSM6DSV16X), when the asset carries one. Its
+    /// The MJCF's `head_imu` site, when the asset carries one. Its
     /// +X-forward, +Y-left, +Z-up axes follow the articulated head.
     head_imu: Option<SiteId>,
     joints: [usize; 4],
@@ -88,7 +88,7 @@ impl HeadFk {
         }
     }
 
-    /// Head LSM6DSV16X pose in the trunk frame, when the asset has a `head_imu` site.
+    /// Head-IMU pose in the trunk frame, when the asset has a `head_imu` site.
     ///
     /// The site frame is the sensor's own +X-forward, +Y-left, +Z-up axes. At the neutral head
     /// pose they coincide with the trunk axes; rotating a sensor-frame vector by the result's quat

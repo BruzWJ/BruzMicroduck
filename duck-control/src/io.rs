@@ -91,14 +91,15 @@ pub struct SlowSensors {
     pub temps_c: [f64; NUM_JOINTS],
 }
 
-/// IMU polls that did not produce a new fused quaternion.
+/// IMU polls that showed no fresh sensor activity.
 ///
 /// Two numbers, because they answer two different questions and only one of them is worth
 /// waking someone for. The *total* says how often the board has repeated itself over the whole
 /// run: sporadic hits are ordinary, since the loop and the sensor keep their own clocks and a
-/// tick can land before the next FIFO record. The *run* says whether orientation is frozen right
-/// now — a board that has stopped fusing yields no fresh record on every tick, so its run climbs
-/// without bound while a total on its own looks the same as a handful of hiccups.
+/// tick can land before the next FIFO record. During LSM6DSO startup, a complete raw accel/gyro
+/// pair is live activity even though software fusion deliberately withholds its quaternion. The
+/// *run* says whether the sensor is frozen right now — a board that has stopped producing usable
+/// records increments it on every tick, while a total on its own looks like a handful of hiccups.
 ///
 /// Reported together so no backend can offer one without the other; a run with no total to
 /// scale it against is how the count came to be read as an alarm in the first place.
@@ -106,7 +107,7 @@ pub struct SlowSensors {
 pub struct ImuStale {
     /// Stale reads since startup, cumulative and never reset.
     pub total: u64,
-    /// Length of the current unbroken run of stale reads. Any fresh sample resets it to zero.
+    /// Length of the current unbroken run of stale reads. Fresh sensor activity resets it to zero.
     pub run: u64,
 }
 
@@ -172,8 +173,8 @@ pub trait RobotIo {
     /// Diagnostics the bus keeps about itself. Default to "nothing to report" so a fake or a
     /// future backend is not obliged to invent them.
     ///
-    /// Successful IMU polls that produced no new SFLP record. The last orientation is held for
-    /// that tick, which is invisible unless someone counts it.
+    /// Successful IMU polls with no sensor activity. The last orientation is held for that tick,
+    /// which is invisible unless someone counts it.
     fn imu_stale(&self) -> ImuStale {
         ImuStale::default()
     }

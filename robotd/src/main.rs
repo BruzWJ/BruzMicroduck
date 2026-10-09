@@ -1380,6 +1380,7 @@ fn open_bus(
         bus.fast_sync_read,
         Path::new(&body_imu.bus),
         body_imu.address,
+        body_imu.model,
         control_hz as u16,
     ) {
         Ok(io) => io,
@@ -1399,8 +1400,9 @@ fn open_bus(
         tracing::info!(
             bus = %body_imu.bus,
             address = %format_args!("{:#04x}", body_imu.address),
+            model = %body_imu.model,
             rate_hz = io.body_imu_rate_hz(),
-            "body LSM6DSV16X ready"
+            "body IMU ready"
         );
     }
     // Under the same `loud` rule as everything else here — a board waiting on servo power

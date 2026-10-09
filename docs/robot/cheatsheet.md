@@ -854,12 +854,19 @@ order, the head address jumper, and the required pull-up cuts are in the
 
 #### The head IMU (`head_imu.stream`)
 
-Gyro, acceleration and on-chip SFLP orientation from the head LSM6DSV16X. `tofd` reads the Qwiic
-sensor at `0x6a`, **off by default** to save bandwidth and wakeups until a consumer needs it.
-`tofd --imu` reads it for one session; `--imu-hz` sets the publication rate (100 Hz by default,
-using the chip's 120 Hz SFLP setting). `[head_imu] enabled` in `robotd.toml` changes the persistent
-setting, and `robotctl configure` offers the required `tofd` restart. While the sensor is off, a
-subscription names the key instead of staying silent.
+Gyro, acceleration and fused orientation from the configured head IMU. The physical replica
+defaults to `model = "lsm6dso"` at its wired `0x6a` address; `[head_imu]` and `[body_imu]` can each
+select exactly `lsm6dso` or `lsm6dsv16x`, independently. The body remains at `0x6b`, and neither
+model is guessed from an address. LSM6DSV16X fuses on-chip; the shared driver fuses LSM6DSO raw
+samples in software.
+
+The head reader is **off by default** to save bandwidth and wakeups until a consumer needs it.
+`tofd --imu` reads it for one session; `--imu-model` and `--imu-hz` override that session without
+changing the file. `[head_imu] enabled` and `model` in `robotd.toml` are the
+persistent settings, and `robotctl configure` offers the required `tofd` restart. While
+the sensor is off, a subscription names the key instead of staying silent. Wiring, model
+selection and fusion ownership are specified in
+[the control-loop design](../design/robotd-design.md#11-the-two-buses-and-who-owns-them).
 
 None of this touches depth: the ToF ranges either way, so the grid above works on
 a duck whose IMU has never been switched on.

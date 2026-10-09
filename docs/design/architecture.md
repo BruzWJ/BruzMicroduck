@@ -51,8 +51,8 @@ fails. The rest adapt transports or own sensors and peripherals.
 ```
 
 **`robotd` is the only thing that can actuate the robot.** Its 50 Hz loop owns two separate
-hardware endpoints: `/dev/openrb-dxl`, the USB bridge to the fifteen-servo bus, and the body
-LSM6DSV16X on Qwiic/I2C3. `tofd` owns both Qwiic head sensors.
+hardware endpoints: `/dev/openrb-dxl`, the USB bridge to the fifteen-servo bus, and the configured
+body IMU on Qwiic/I2C3. `tofd` owns both Qwiic head sensors.
 [`robotd-design.md`](robotd-design.md) §1.1 owns the wiring and recovery details.
 Clients send *intents* — "go this fast", "look there", "stand up" — and the safety layer inside
 `robotd` decides what is actually executable. Nothing else in the system can command a motor
@@ -86,7 +86,7 @@ counter ([`updater-design.md`](updater-design.md)).
 | `btd` | nothing — BLE transport for a subset of the API | a BLE GATT service | `robotd`, `configd`, `updaterd` — not `padd` or `tofd`, whose streams a radio this narrow cannot carry |
 | `padd` | nothing — gamepad transport; serves a raw input tap | `/run/padd/pad.sock` (`pad.input` only) | `/run/robotd.sock` |
 | `mediad` | the camera and audio pipeline; nothing of the robot — WebRTC transport and the remote front door (§5.2) | TCP: the console and PNG `GET /frame` on `:8080`, signalling on `:8443`; and one unix socket of its own, `/run/mediad/media.sock`, serving `media.frame` to a local recorder or perception process — and to `robotctl monitor`'s camera block, which asks for one twice a second while it is open and not at all while it is shut. A raw frame is ~1.8 MiB, so it is deliberately not carried on the WebRTC control channel | `robotd`, `configd`, `updaterd` |
-| `tofd` | the head's VL53L5CX depth matrix and LSM6DSV16X orientation stream | `/run/tofd/tof.sock` (`tof.stream`, `head_imu.stream`) | ToF `0x29` and head IMU `0x6a` on `/dev/i2c-qwiic` |
+| `tofd` | the head's VL53L5CX depth matrix and configured IMU orientation stream | `/run/tofd/tof.sock` (`tof.stream`, `head_imu.stream`) | ToF `0x29` and head IMU `0x6a` on `/dev/i2c-qwiic` |
 | `robotctl` | nothing — the CLI, and the tool that must work on a broken robot | — | every socket above |
 
 Where the state lives, and what survives an update:
@@ -133,7 +133,7 @@ safety authority sits (§6).
 | `btd` | BLE GATT server | **Transport adapter only** — owns no state (§4.1). See [`app-path-design.md`](app-path-design.md) |
 | `configd` | wifi, robot identity, power, gamepad pairing | Config must be reachable when `robotd` is dead (§3.1), and `btd` must own nothing (§4.1) — so it is neither's business but its own. Gamepad pairing is here rather than in `padd` because bonding a device needs root and BlueZ, and `padd` is deliberately an unprivileged client (§4.1) |
 | `padd` | gamepad input transport | Sends intents to `robotd` and serves a raw input tap; pairing belongs to `configd` (§4.1) |
-| `tofd` | head VL53L5CX depth and LSM6DSV16X orientation on the shared Qwiic bus | Perception, so split from `robotd` for the reason below. Publishes streams and reads nothing from another service. Missing hardware is reported rather than preventing the daemon from running. See [`robotd-design.md`](robotd-design.md) §1.1 for sensor wiring |
+| `tofd` | head VL53L5CX depth and configured IMU orientation on the shared Qwiic bus | Perception, so split from `robotd` for the reason below. Publishes streams and reads nothing from another service. Missing hardware is reported rather than preventing the daemon from running. See [`robotd-design.md`](robotd-design.md) §1.1 for sensor selection, wiring and fusion ownership |
 | `updaterd` | update engine | See `updater-design.md` |
 
 Splitting `mediad` from `robotd` is deliberate: a media/perception crash must not

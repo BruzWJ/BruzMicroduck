@@ -253,7 +253,7 @@ impl<T: RobotIo> Safety<T> {
     pub fn observe(&mut self, sensors: &Sensors, dt: Duration) {
         // An orientation filter that has not converged does not get a vote.
         //
-        // The SFLP filter needs a few seconds of samples before its quaternion means
+        // The configured orientation filter needs time before its quaternion means
         // anything, and until then projected gravity is not `[0, 0, -1]` — it is whatever the
         // filter is mid-way through deciding, which reads as "above the fall threshold", which
         // reads as "on its side". Two hundred milliseconds of that and an upright robot on a

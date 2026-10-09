@@ -34,14 +34,14 @@ port = "/dev/openrb-dxl"
 # fast_sync_read = true
 
 [body_imu]
-# Required SparkFun LSM6DSV16X in the trunk, mounted +X forward, +Y left, +Z up. setup-board.sh
-# installs this stable alias for the Radxa header's Qwiic adapter; changing it needs a robotd
-# restart. Mount direction is a fixed robot/model contract, not an address setting.
+# Required trunk IMU, mounted +X forward, +Y left, +Z up. This robot uses the SparkFun
+# LSM6DSV16X Micro board. Either supported model can fill the role, but it must be named here;
+# the daemon never guesses a model from its address. setup-board.sh installs the stable bus alias.
 bus = "/dev/i2c-qwiic"
+model = "lsm6dsv16x"
 
-# Seven-bit address. The body Micro breakout keeps the factory 0x6b address; the head board
-# is the one whose address jumper selects 0x6a. Both addresses are accepted for bench wiring,
-# but roles are never inferred by scanning the bus.
+# Seven-bit address. The body role keeps 0x6b; the head role is wired at 0x6a. A model is never
+# inferred by scanning either address.
 address = 0x6b
 
 # Every value below that is commented out shows the built-in default. LEAVE IT COMMENTED
@@ -418,10 +418,14 @@ mode = "walk"
 
 [head_imu]
 # The IMU in the robot's head, served as `head_imu.stream`: gyro, acceleration and an
-# on-chip SFLP orientation. The Qwiic LSM6DSV16X is at 0x6a, mounted +X forward, +Y left,
-# +Z up in the neutral head pose and read by tofd. It is off by default: nothing subscribes to
-# the stream yet, so idle mapping hardware should not spend shared-Qwiic bandwidth and CPU wakeups.
-# `tofd --imu-hz 50` controls the rate when enabled.
+# orientation fused from the configured sensor. This robot uses an LSM6DSO at 0x6a, mounted
+# +X forward, +Y left, +Z up in the neutral head pose. The articulated head-shell transform is
+# applied downstream and is not cancelled by this mounting convention. Either supported IMU model
+# can fill the role, but the daemon does not probe or fall back to another model.
+model = "lsm6dso"
+# It is off by default:
+# nothing subscribes to the stream yet, so idle mapping hardware should not spend shared-Qwiic
+# bandwidth and CPU wakeups. `tofd --imu-hz 50` controls the rate when enabled.
 # While it is off, the answer names this key rather than giving the silence of a board with no
 # sensor fitted. Depth is unaffected either way.
 # enabled = true

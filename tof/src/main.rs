@@ -139,12 +139,16 @@ struct Args {
     #[arg(long)]
     fake: bool,
 
-    /// Head LSM6DSV16X publication rate, Hz. The sensor rate rounds up to an
-    /// SFLP-supported 15/30/60/120/240/480 Hz rung.
+    /// Head-IMU publication rate, Hz. The explicitly selected model rounds it
+    /// up to one of its supported hardware rates.
     #[arg(long, default_value_t = 100, value_parser = parse_nonzero_hz)]
     imu_hz: u8,
 
-    /// Head LSM6DSV16X 7-bit address. The standard board's jumper selects 0x6a.
+    /// Head-IMU model for this session. Otherwise `[head_imu] model` is used.
+    #[arg(long, value_parser = parse_imu_model)]
+    imu_model: Option<qwiic_imu::Model>,
+
+    /// Head-IMU 7-bit address. Override the fixed 0x6a role only for an explicit bench setup.
     #[arg(
         long,
         default_value_t = qwiic_imu::HEAD_ADDRESS,
@@ -212,6 +216,10 @@ fn parse_nonzero_hz(s: &str) -> Result<u8, String> {
     Ok(hz)
 }
 
+fn parse_imu_model(s: &str) -> Result<qwiic_imu::Model, String> {
+    s.parse().map_err(|e| format!("{e:#}"))
+}
+
 // One thread is plenty: the sensor is on its own std thread, and everything here
 // is a socket doing nothing between frames.
 #[tokio::main(flavor = "current_thread")]
@@ -274,11 +282,12 @@ async fn main() -> std::process::ExitCode {
     let config_path = args.config.clone().unwrap_or_else(config::default_path);
     let params = config::load(&config_path, args.config.is_some());
     let configured = params.head_imu.enabled();
+    let imu_model = args.imu_model.unwrap_or(params.head_imu.model);
     let wanted = args.imu || (configured && !args.no_imu);
     let imu_thread = if !wanted || args.fake || args.sim.is_some() {
         // Said out loud, and said by the stream too: a subscriber gets this sentence instead of
-        // frames, because "no samples" and "no LSM6DSV16X fitted" are different answers and only one
-        // of them is somebody's mistake.
+        // frames, because "no samples" and "the configured IMU did not answer" are different
+        // answers, and only one of them is somebody's mistake.
         if !wanted {
             tracing::info!(
                 config = %config_path.display(),
@@ -297,11 +306,20 @@ async fn main() -> std::process::ExitCode {
         let bus = args.bus.clone();
         let hz = args.imu_hz;
         let address = args.imu_address;
+        let model = imu_model;
         Some(
             std::thread::Builder::new()
                 .name("head-imu".to_owned())
                 .spawn(move || {
-                    imu::imu_loop(&bus, address, hz, &imu_status, &imu_frames, &shutdown)
+                    imu::imu_loop(
+                        &bus,
+                        address,
+                        model,
+                        hz,
+                        &imu_status,
+                        &imu_frames,
+                        &shutdown,
+                    )
                 })
                 .expect("spawn the head-imu thread"),
         )
@@ -951,6 +969,31 @@ mod tests {
         assert!(parse_tof_hz("16").is_err());
         assert_eq!(parse_nonzero_hz("100"), Ok(100));
         assert!(parse_nonzero_hz("0").is_err());
+    }
+
+    #[test]
+    fn imu_model_override_is_explicit_and_address_keeps_its_role_default() {
+        let defaults = Args::try_parse_from(["tofd"]).expect("default CLI");
+        assert_eq!(defaults.imu_model, None);
+        assert_eq!(defaults.imu_address, qwiic_imu::HEAD_ADDRESS);
+
+        let dso =
+            Args::try_parse_from(["tofd", "--imu-model", "lsm6dso"]).expect("exact DSO selection");
+        assert_eq!(dso.imu_model, Some(qwiic_imu::Model::Lsm6dso));
+        assert_eq!(dso.imu_address, qwiic_imu::HEAD_ADDRESS);
+
+        let dsv = Args::try_parse_from(["tofd", "--imu-model", "lsm6dsv16x"])
+            .expect("exact DSV16X selection");
+        assert_eq!(dsv.imu_model, Some(qwiic_imu::Model::Lsm6dsv16x));
+
+        assert!(
+            Args::try_parse_from(["tofd", "--imu-model", "auto"]).is_err(),
+            "auto-detection is not a supported model"
+        );
+        assert!(
+            Args::try_parse_from(["tofd", "--imu-model", "dso"]).is_err(),
+            "model aliases are not accepted"
+        );
     }
 
     /// The backoff must climb and stop climbing — a duck with no sensor fitted

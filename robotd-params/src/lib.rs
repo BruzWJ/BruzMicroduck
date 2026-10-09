@@ -22,6 +22,7 @@ pub mod registry;
 
 use std::path::{Path, PathBuf};
 
+use qwiic_imu::Model;
 use serde::{Deserialize, Serialize};
 
 /// Where a release is mounted.
@@ -817,14 +818,25 @@ impl ThereminParams {
     }
 }
 
-/// `[head_imu]` — the Qwiic LSM6DSV16X at `0x6a`, served by `tofd` as `head_imu.stream`.
+/// `[head_imu]` — the configured Qwiic IMU served by `tofd` as `head_imu.stream`.
 /// It is off until explicitly enabled, saving I²C bandwidth and wakeups when nothing consumes it.
 /// `tofd --imu-hz` controls the rate when enabled.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct HeadImuParams {
     /// Read the head IMU at all. Absent means off. `tofd --imu` overrides it for one session.
     pub enabled: Option<bool>,
+    /// Exact sensor model. It is configured explicitly rather than inferred from its address.
+    pub model: Model,
+}
+
+impl Default for HeadImuParams {
+    fn default() -> Self {
+        Self {
+            enabled: None,
+            model: Model::Lsm6dso,
+        }
+    }
 }
 
 impl HeadImuParams {
@@ -842,12 +854,15 @@ mod head_imu_tests {
     fn the_default_is_off_and_the_file_wins() {
         let unset = HeadImuParams::default();
         assert!(!unset.enabled());
+        assert_eq!(unset.model, Model::Lsm6dso);
         let off = HeadImuParams {
             enabled: Some(false),
+            ..HeadImuParams::default()
         };
         assert!(!off.enabled());
         let on = HeadImuParams {
             enabled: Some(true),
+            ..HeadImuParams::default()
         };
         assert!(on.enabled());
     }
@@ -1904,18 +1919,20 @@ pub struct Bus {
     pub fast_sync_read: bool,
 }
 
-/// `[body_imu]` — the required trunk LSM6DSV16X on the shared Qwiic bus.
+/// `[body_imu]` — the required trunk IMU on the shared Qwiic bus.
 ///
-/// Roles are fixed rather than detected by scan: the body Micro breakout keeps the factory
-/// address `0x6b`, while the head breakout is jumpered to `0x6a`. Losing this device makes a
-/// complete control sample impossible, so open/read errors follow the same health path as a
+/// Model and address are explicit rather than detected by scan. The shipped body Micro breakout
+/// is an LSM6DSV16X at `0x6b`; either supported model may fill the role. Losing this device makes
+/// a complete control sample impossible, so open/read errors follow the same health path as a
 /// failed motor-bus transaction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct BodyImuParams {
     /// Stable i2c-dev alias installed for the Radxa header's Qwiic bus.
     pub bus: String,
-    /// Seven-bit I²C address. Only the two LSM6DSV16X strap addresses are valid.
+    /// Exact sensor model. It is configured explicitly rather than inferred from its address.
+    pub model: Model,
+    /// Seven-bit I²C address. Either supported model can use either strap address.
     pub address: u8,
 }
 
@@ -1995,7 +2012,8 @@ impl Default for BodyImuParams {
     fn default() -> Self {
         Self {
             bus: "/dev/i2c-qwiic".into(),
-            address: 0x6b,
+            model: Model::Lsm6dsv16x,
+            address: qwiic_imu::BODY_ADDRESS,
         }
     }
 }
@@ -2152,7 +2170,7 @@ impl Params {
                 got: self.control.hz,
             });
         }
-        if !matches!(self.body_imu.address, 0x6a | 0x6b) {
+        if ![qwiic_imu::HEAD_ADDRESS, qwiic_imu::BODY_ADDRESS].contains(&self.body_imu.address) {
             return Err(ParamsError::BodyImuAddress {
                 path: path.display().to_string(),
                 got: self.body_imu.address,
@@ -3314,6 +3332,7 @@ mod tests {
         assert_eq!(from_file.bus.port, built_in.bus.port);
         assert_eq!(from_file.bus.fast_sync_read, built_in.bus.fast_sync_read);
         assert_eq!(from_file.body_imu, built_in.body_imu);
+        assert_eq!(from_file.head_imu, built_in.head_imu);
         assert_eq!(from_file.control.hz, built_in.control.hz);
         assert_eq!(from_file.control.cmd_alpha, built_in.control.cmd_alpha);
         assert_eq!(from_file.control.head_alpha, built_in.control.head_alpha);
@@ -3616,8 +3635,8 @@ mod tests {
         }
     }
 
-    /// A scan must never decide which of the two identical chips is the body. Accept only the
-    /// LSM6DSV16X strap addresses and let the explicit role configuration choose between them.
+    /// A scan must never decide which device is the body. Accept only the chip's two strap
+    /// addresses and leave the installed role explicit.
     #[test]
     fn an_impossible_body_imu_address_is_rejected_at_startup() {
         let dir = tempfile::tempdir().unwrap();
@@ -3628,6 +3647,25 @@ mod tests {
         for address in ["0x6a", "0x6b"] {
             let path = write(dir.path(), &format!("[body_imu]\naddress = {address}\n"));
             assert!(Params::load(&path, true).is_ok(), "{address} was rejected");
+        }
+    }
+
+    /// Both roles support both drivers, but only their exact public names. An alias would make a
+    /// typo look accepted and undermine the no-probing configuration contract.
+    #[test]
+    fn imu_models_are_explicit_and_exact() {
+        let dir = tempfile::tempdir().unwrap();
+        for role in ["body_imu", "head_imu"] {
+            for model in Model::ALL {
+                let name = model.as_str();
+                let path = write(dir.path(), &format!("[{role}]\nmodel = \"{name}\"\n"));
+                assert!(Params::load(&path, true).is_ok(), "{role} {name} rejected");
+            }
+            let path = write(dir.path(), &format!("[{role}]\nmodel = \"LSM6DSO\"\n"));
+            assert!(
+                Params::load(&path, true).is_err(),
+                "alias accepted for {role}"
+            );
         }
     }
 }

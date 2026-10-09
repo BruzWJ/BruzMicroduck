@@ -86,7 +86,7 @@ fn slow_sensors(&mut self) -> Result<SlowSensors>;   // volts, per-joint tempera
 
 Above it, nothing changes: the 50 Hz loop, the ONNX policies, `Safety`, fall detection, odometry,
 kinematics, maploc, every IPC call, all of `robotctl` and `duckctl`. Below it, `DynamixelIo`
-composes two physical drivers: the fifteen-servo OpenRB/Dynamixel burst and the body LSM6DSV16X
+composes two physical drivers: the fifteen-servo OpenRB/Dynamixel burst and the configured body-IMU
 poll on Qwiic. The simulator returns their logical result together, so it exercises the policy-facing
 complete-sample contract without pretending to exercise either driver.
 
@@ -233,9 +233,9 @@ Modelled — the real code path, synthesised input: actuator response (BAM model
 XL330s), body IMU samples, ToF depth, RSSI, the camera image, and release provenance on an
 x86 host.
 
-Absent — not exercised at all: the Dynamixel bus driver, Linux I2C/Qwiic and both LSM6DSV16X
-drivers, the BLE radio, the camera ISP and rkaiq's 3A, the NPU, the hardware encoder and its RGA
-path, thermals and battery.
+Absent — not exercised at all: the Dynamixel bus driver, Linux I2C/Qwiic and the LSM6DSV16X and
+LSM6DSO drivers, the BLE radio, the camera ISP and rkaiq's 3A, the NPU, the hardware encoder and
+its RGA path, thermals and battery.
 
 **A useful check on that list:** run a week of real bugs past it. A `videoflip` that cost 22 fps by
 breaking the encoder's zero-copy path to the RGA; a 3A engine missing a stream-start event; an

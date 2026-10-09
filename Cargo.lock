@@ -1400,6 +1400,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6d5a32815ae3f33302d95fdcb2ce17862f8c65363dcfd29360480ba1001fc9c"
 
 [[package]]
+name = "fusion-ahrs"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc1e043a83b7a0701acb2560157539a42725ca8c0718147d55bb632b535092f4"
+dependencies = [
+ "libm",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3319,8 +3328,11 @@ version = "0.16.1"
 dependencies = [
  "anyhow",
  "embedded-hal",
+ "fusion-ahrs",
  "linux-embedded-hal",
  "lsm6dsv16x-rs",
+ "serde",
+ "serde_json",
  "st-mems-bus",
 ]
 
@@ -3623,6 +3635,7 @@ version = "0.16.1"
 dependencies = [
  "duck-ipc-proto",
  "kinematics",
+ "qwiic-imu",
  "serde",
  "serde_json",
  "tempfile",

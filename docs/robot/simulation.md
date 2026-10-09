@@ -10,7 +10,7 @@ not a twin of, and why it is built the way it is.
 ## What it is
 
 `robotd --sim host:port` runs the daemon with `duck_control::sim::RemoteIo` in place of the real
-hardware I/O — the OpenRB-backed servo link and the body LSM6DSV16X on Qwiic. Every tick, joint
+hardware I/O — the OpenRB-backed servo link and the configured body IMU on Qwiic. Every tick, joint
 positions, velocities and the IMU come in over a TCP socket from a MuJoCo process, and the policy's
 targets go back out. Everything above that seam — the control loop, the policy, safety, fall detection,
 kinematics, odometry, the whole IPC surface — is the code a robot runs, unchanged and unable to
