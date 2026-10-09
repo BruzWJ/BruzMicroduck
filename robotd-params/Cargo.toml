@@ -14,6 +14,9 @@ description = "robotd's startup parameters — the schema, the defaults, and the
 # library crates; nothing here grows a C toolchain or a network stack.
 kinematics = { path = "../kinematics" }
 duck-ipc-proto = { path = "../duck-ipc-proto" }
+# The selected IMU model is part of the shared driver contract. Its Linux I2C
+# dependencies remain target-scoped, so the parameter schema stays portable.
+qwiic-imu = { path = "../qwiic-imu" }
 serde = { workspace = true }
 toml = "0.9"
 # The official policy set describes itself in JSON, beside its `.onnx` files — what it contains

@@ -1,8 +1,8 @@
-//! Body-frame interpretation of the trunk LSM6DSV16X.
+//! Body-frame interpretation of the configured trunk IMU.
 //!
-//! [`qwiic_imu`] owns the Linux I²C device and the chip's SFLP configuration. This module
-//! keeps the robot-specific part: the sensor-to-trunk mounting transform, spike rejection,
-//! projected gravity, and the readiness gate used by fall detection.
+//! [`qwiic_imu`] owns the Linux I²C device and produces fused samples for either supported
+//! model. This module keeps the robot-specific part: the sensor-to-trunk mounting transform,
+//! spike rejection, projected gravity, and the readiness gate used by fall detection.
 
 use crate::model::NUM_JOINTS;
 use qwiic_imu::Sample;
@@ -32,25 +32,25 @@ impl Default for ImuData {
 
 /// Transforms fused sensor samples into [`ImuData`].
 ///
-/// Stateful only for spike rejection and the readiness count; SFLP runs in the chip. Keeping
-/// the robot-frame transform here means both physical IMU roles can share the hardware driver
-/// without pretending they have the same mounting orientation.
-pub struct SflpDecoder {
+/// Stateful only for spike rejection and the readiness count. Keeping the robot-frame transform
+/// here means both physical IMU roles can share the hardware driver without pretending they have
+/// the same mounting orientation.
+pub struct ImuDecoder {
     /// Sensor→trunk mounting rotation, scalar-first.
     mount: [f64; 4],
-    /// Live SFLP samples. Gates [`SflpDecoder::ready`].
-    quat_samples: u32,
+    /// Live fused samples. Gates [`ImuDecoder::ready`].
+    fused_samples: u32,
     gyro_history: [[f64; 3]; 2],
     gravity_history: [[f64; 3]; 2],
 }
 
-impl Default for SflpDecoder {
+impl Default for ImuDecoder {
     fn default() -> Self {
         Self::new(Self::DEFAULT_MOUNT)
     }
 }
 
-impl SflpDecoder {
+impl ImuDecoder {
     /// The SparkFun Micro board is mounted in the trunk convention: +X forward, +Y left,
     /// +Z up. Sensor and trunk axes therefore coincide.
     pub const DEFAULT_MOUNT: [f64; 4] = [1.0, 0.0, 0.0, 0.0];
@@ -58,7 +58,7 @@ impl SflpDecoder {
     pub fn new(mount: [f64; 4]) -> Self {
         Self {
             mount,
-            quat_samples: 0,
+            fused_samples: 0,
             gyro_history: [[0.0; 3]; 2],
             gravity_history: [[0.0, 0.0, -1.0]; 2],
         }
@@ -69,7 +69,7 @@ impl SflpDecoder {
     /// Until this is true the orientation is a default, not a measurement. Slice 2's fall
     /// detection must not run before it.
     pub fn ready(&self) -> bool {
-        self.quat_samples >= 25
+        self.fused_samples >= 25
     }
 
     pub fn decode(&mut self, sample: Sample) -> ImuData {
@@ -88,7 +88,7 @@ impl SflpDecoder {
         // The shared driver rejects invalid FIFO quaternions. Normalising here only removes
         // conversion and multiplication rounding before the value reaches the policy.
         let quat = [q[0] / norm, q[1] / norm, q[2] / norm, q[3] / norm];
-        self.quat_samples = self.quat_samples.saturating_add(1);
+        self.fused_samples = self.fused_samples.saturating_add(1);
 
         // Normalise *before* the median, matching the runtime. Note the consequence: a
         // component-wise median across three unit vectors is not itself unit-norm, so
@@ -197,8 +197,8 @@ mod tests {
     /// the robot would be judged on a default orientation for the first quarter second.
     #[test]
     fn not_ready_until_the_chip_has_produced_output() {
-        let mut d = SflpDecoder::default();
-        let mounted = SflpDecoder::DEFAULT_MOUNT.map(|v| v as f32);
+        let mut d = ImuDecoder::default();
+        let mounted = ImuDecoder::DEFAULT_MOUNT.map(|v| v as f32);
         for sequence in 1..=24 {
             d.decode(sample(sequence, [0.0; 3], mounted));
         }
@@ -211,8 +211,8 @@ mod tests {
     /// +X-forward, +Z-up axes must reach the policy unchanged.
     #[test]
     fn body_mount_maps_sensor_axes_into_the_trunk() {
-        let mut d = SflpDecoder::default();
-        let mounted = SflpDecoder::DEFAULT_MOUNT.map(|v| v as f32);
+        let mut d = ImuDecoder::default();
+        let mounted = ImuDecoder::DEFAULT_MOUNT.map(|v| v as f32);
         let s = sample(1, [1.0, 2.0, 3.0], mounted);
         // Three identical samples let the component median settle.
         d.decode(s);
@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn body_mount_preserves_roll_and_pitch_direction() {
         let gravity = |quat: [f32; 4]| {
-            let mut d = SflpDecoder::default();
+            let mut d = ImuDecoder::default();
             let s = sample(1, [0.0; 3], quat);
             d.decode(s);
             d.decode(s);
@@ -259,7 +259,7 @@ mod tests {
     /// the note in `decode`).
     #[test]
     fn gravity_is_a_unit_vector_in_steady_state() {
-        let mut d = SflpDecoder::default();
+        let mut d = ImuDecoder::default();
         for quat in [
             [1.0, 0.0, 0.0, 0.0],
             [0.923_879_5, 0.382_683_4, 0.0, 0.0],
@@ -280,7 +280,7 @@ mod tests {
     /// ever gets far from 1.0 the policy is being fed something training never saw.
     #[test]
     fn gravity_stays_close_to_unit_through_a_transient() {
-        let mut d = SflpDecoder::default();
+        let mut d = ImuDecoder::default();
         d.decode(sample(1, [0.0; 3], [1.0, 0.0, 0.0, 0.0]));
         let g = d
             .decode(sample(2, [0.0; 3], [0.923_879_5, 0.382_683_4, 0.0, 0.0]))
@@ -293,8 +293,8 @@ mod tests {
     /// The shared driver supplies signed SI units. Keep the sign through the robot mount.
     #[test]
     fn gyro_sign_is_preserved() {
-        let mut d = SflpDecoder::default();
-        let mounted = SflpDecoder::DEFAULT_MOUNT.map(|v| v as f32);
+        let mut d = ImuDecoder::default();
+        let mounted = ImuDecoder::DEFAULT_MOUNT.map(|v| v as f32);
         let s = sample(1, [-1.25, 0.0, 0.0], mounted);
         d.decode(s);
         d.decode(s);

@@ -497,7 +497,7 @@ install_qwiic_overlay() {
 # off-the-shelf SparkFun boards has no audio HAT, but it still needs I2C3-M0, the i2c group and
 # a stable device name. The physical chain is:
 #
-#   Radxa SHIM -> VL53L5CX 0x29 -> head LSM6DSV16X 0x6a -> body Micro IMU 0x6b
+#   Radxa SHIM -> VL53L5CX 0x29 -> head LSM6DSO 0x6a -> body Micro LSM6DSV16X 0x6b
 #
 # The Micro board has one Qwiic socket, so it is the endpoint. The head address jumper is moved
 # to GND; the body stays at its factory address. All addresses above are Linux 7-bit values.
@@ -906,7 +906,7 @@ report() {
     else
         printf '  %-22s %s\n' "Qwiic sensor bus" "ABSENT"
         warn "/dev/i2c-qwiic is missing. After the overlay is live, this scan should show
-  VL53L5CX=0x29, head LSM6DSV16X=0x6a and body LSM6DSV16X=0x6b:
+  VL53L5CX=0x29, head LSM6DSO=0x6a and body LSM6DSV16X=0x6b:
       sudo i2cdetect -y 3"
     fi
 

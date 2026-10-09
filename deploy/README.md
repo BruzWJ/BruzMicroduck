@@ -179,7 +179,7 @@ maskrom flashing still works, but PD negotiation does not. Removing the audio HA
 that pinmux consequence.
 
 After the requested reboot, the expected Linux 7-bit addresses are `0x29` (VL53L5CX), `0x6a`
-(head LSM6DSV16X, address jumper moved to ground), and `0x6b` (body Micro LSM6DSV16X, factory
+(head LSM6DSO, address jumper moved to ground), and `0x6b` (body Micro LSM6DSV16X, factory
 address):
 
 ```bash

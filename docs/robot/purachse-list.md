@@ -19,7 +19,7 @@ and [control-loop design](../design/robotd-design.md).
 | Side frames | [ROBOTIS FPX330-S102, 4-piece set](https://robotis.us/products/fpx330-s102-4pcs-set?variant=51033242501260) | 1 set (4 pieces) |
 | Head Ball bearings | [McMaster-Carr 6656K181 — 15 mm ID × 22 mm OD × 4 mm thick](https://www.mcmaster.com/6656K181/) | 2 |
 | Feet&Mouth Ball bearings | [McMaster-Carr 6656K68 — 10 mm ID × 15 mm OD × 3 mm thick](https://www.mcmaster.com/6656K68/) | 3 |
-| Head 6DoF IMU | [SparkFun 6DoF IMU Breakout — LSM6DSV16X (Qwiic)](https://www.sparkfun.com/sparkfun-6dof-imu-breakout-lsm6dsv16x-qwiic.html) | 1 |
+| Head 6DoF IMU | [SparkFun 6 Degrees of Freedom Breakout — LSM6DSO (Qwiic), SEN-18020](https://www.sparkfun.com/sparkfun-6-degrees-of-freedom-breakout-lsm6dso-qwiic.html) | 1 |
 | Body 6DoF IMU | [SparkFun Micro 6DoF IMU Breakout — LSM6DSV16X (Qwiic)](https://www.sparkfun.com/sparkfun-micro-6dof-imu-breakout-lsm6dsv16x-qwiic.html) | 1 |
 | 8×8 ToF sensor | [SparkFun Qwiic Mini ToF Imager — VL53L5CX](https://www.sparkfun.com/sparkfun-qwiic-mini-tof-imager-vl53l5cx.html) | 1 |
 | Qwiic connection adapter | [SparkFun Qwiic SHIM for Raspberry Pi](https://www.sparkfun.com/sparkfun-qwiic-shim-for-raspberry-pi.html) | 1 |
@@ -41,7 +41,7 @@ installing it backwards can short the supply.
 Connect the boards in this order, starting at the Radxa:
 
 ```text
-Qwiic SHIM -> VL53L5CX ToF -> head standard LSM6DSV16X -> body Micro LSM6DSV16X
+Qwiic SHIM -> VL53L5CX ToF -> head standard LSM6DSO -> body Micro LSM6DSV16X
 ```
 
 That order is structural, not cosmetic. The ToF and standard IMU each have two Qwiic connectors

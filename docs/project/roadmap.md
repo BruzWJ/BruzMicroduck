@@ -106,9 +106,11 @@ unhealthy reverts on its own.
 A measurement milestone, not a feature one: it exists to turn guesses into numbers on a real
 Radxa. The legacy build established that the loop holds 50.0 Hz on a non-RT kernel (`missed=3` in
 15022 ticks), thermals have a real reading across every zone, `systemctl restart` in `on_apply`
-works against real systemd, and the gate commits and reverts for real. The replacement Qwiic body
-LSM6DSV16X is now the required policy sensor; its shared-bus timing and mount-axis check still need
-to be repeated on the retrofitted hardware.
+works against real systemd, and the gate commits and reverts for real. The explicitly configured
+Qwiic body IMU is now the required policy sensor (this build defaults to LSM6DSV16X, with LSM6DSO
+also supported); its shared-bus timing and mount-axis check still need to be repeated on the
+retrofitted hardware. Sensor selection and fusion are owned by
+[`robotd-design.md`](../design/robotd-design.md#11-the-two-buses-and-who-owns-them).
 
 **The log-retention question was settled by deciding rather than measuring.** `/var/log` is a
 zram device on this image, so `Storage=persistent` gets journald a directory that is itself in

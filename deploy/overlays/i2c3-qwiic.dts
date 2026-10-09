@@ -5,10 +5,10 @@
  * Hardware I2C3 (M0 pinmux) on header pins 3/5 for the Radxa Zero 3W's
  * SparkFun Qwiic SHIM.
  *
- * The three userspace-driven sensors on this bus are fixed by role, not by
- * probe order:
+ * The physical build has these three userspace-driven sensors. Runtime IMU
+ * models come from robotd.toml; roles never come from probe order or guessing:
  *   - VL53L5CX ToF             0x29 (Linux 7-bit address)
- *   - head LSM6DSV16X          0x6a (ADDR jumper moved to GND)
+ *   - head LSM6DSO             0x6a (ADDR jumper moved to GND)
  *   - body LSM6DSV16X Micro    0x6b (factory address)
  * The optional audio HAT adds its TLV320AIC3104 at 0x18 through the
  * separate aic3104-i2c3 overlay. No sensor node is declared here because the

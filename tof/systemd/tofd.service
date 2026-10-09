@@ -3,8 +3,8 @@
 # Perception, deliberately not inside `robotd`: bringing this sensor up uploads
 # ~90 KB of firmware over I²C taking seconds. The Qwiic adapter is shared with
 # robotd's body IMU (and the optional audio codec), but this process owns only
-# the VL53L5CX at 0x29 and head LSM6DSV16X at 0x6a — none of their startup work
-# belongs in the process that owns the motors (architecture.md §1).
+# the VL53L5CX at 0x29 and configured head IMU at its 0x6a role address — none of
+# their startup work belongs in the process that owns the motors (architecture.md §1).
 #
 # Nothing depends on this unit. `robotd` does not read depth, and `robotctl
 # monitor` says "no depth stream" and carries on when the socket is absent, so a

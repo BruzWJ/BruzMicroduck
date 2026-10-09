@@ -1,5 +1,5 @@
-# The head sensors: an 8x8 depth matrix from a VL53L5CX, the optional head
-# LSM6DSV16X stream, and the daemon that serves both.
+# The head sensors: an 8x8 depth matrix from a VL53L5CX, the optional head IMU
+# stream, and the daemon that serves both.
 #
 # The driver is ST's Ultra Lite Driver (vendored C, BSD-3-Clause) behind a flat
 # shim and a safe Rust wrapper — see src/lib.rs for why the C is vendored rather
