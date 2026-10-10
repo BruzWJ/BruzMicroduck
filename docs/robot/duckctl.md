@@ -493,7 +493,7 @@ stands still and does the thing.
 Change what it walks with, live:
 
 ```bash
-duckctl policy load walk /opt/robot/policies/current/alpha_walking.onnx
+duckctl policy load walk /opt/robot/policies/current/walk.onnx
 ```
 
 Put that slot back:

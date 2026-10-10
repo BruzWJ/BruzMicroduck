@@ -23,7 +23,7 @@ and points.
 
 ## 1. What this replaced
 
-All nine `.onnx` files used to ship inside the daemon artifact, and `robotd` loaded them from
+All ten `.onnx` files used to ship inside the daemon artifact, and `robotd` loaded them from
 `/opt/robot/daemon/current/policies/`. That had three consequences:
 
 - a gait retrain needs a daemon release;
@@ -46,11 +46,11 @@ filled from exactly one of three origins:
 
 | | comes from | provenance | per-file hash | auto-updates | reset target |
 |---|---|---|---|---|---|
-| **official** | `pollen-robotics/microduck-policies` | repo + revision in `.source`, plus manifest | no | only the daemon release's minimum pin; otherwise explicit | **yes** |
+| **official** | `BWJ2310/bruzmicroduck-xc330-custom-weight-policies` | repo + revision in `.source`, plus manifest | no | only the daemon release's minimum pin; otherwise explicit | **yes** |
 | **community** | any other HF repo | repo + revision + commit sha | no | no — reported only | no |
 | **local** | a path on the board | none | no | no — unknowable | no |
 
-Origin is decided by the HF org: **`pollen-robotics/*` is official, everything else is
+Origin is decided by the HF org: **`BWJ2310/*` is official, everything else is
 community**. One constant, one place. It is not a config key — a robot that can be told which
 org to trust is a robot whose "official" badge means nothing.
 
@@ -195,7 +195,7 @@ uses semver:
 
 | origin | shown as |
 |---|---|
-| official | the source revision tag — for example `v7` |
+| official | the source revision tag — for example `v1` |
 | community, repo has `v*` tags | the tag |
 | community, tracking a branch | short sha + date |
 | local | `local`, and `check` reports unknown |
@@ -283,9 +283,14 @@ the daemon release, so bumping it *does* need a daemon release — an earlier dr
 claimed otherwise and was simply wrong. The pin decides two things: what a *freshly provisioned*
 board installs, and the oldest official set this daemon runs with. A board whose set is from our
 repo and below the pin is moved up to it by the post-install hook — the daemon's slot defaults
-name files, and a default that names a file only a newer set carries (v5's `velstand.onnx`) would
+name files, and a default that names a file only the current set carries (`walk_stand.onnx`) would
 otherwise leave a board that updated the daemon alone unable to load its gait, unhealthy, and
 rolled back. A set past the pin, from another repo, or without a `.source` record is left alone.
+Daemon 0.16.3 changes the official repository and filenames. A board still recorded as
+`pollen-robotics/microduck-policies@v7` must explicitly install Bruz v1 or be reprovisioned before
+applying that daemon release; the seeder deliberately does not overwrite a set from another repo.
+The same cutover must set head/leg low-pass and nominal voltage to `1.0 / 1.0 / 7.0`, as fresh
+installs do in `deploy/robotd.toml`. There is no permanent alias or version-specific migration API.
 Moving past it is `robotctl policy update` (§9.1), which is the thing that makes a retrained gait
 reach a robot without a daemon release, and therefore the thing that makes this whole channel
 worth having.
@@ -325,8 +330,9 @@ error path exits zero and says so on stderr.
 **One versioned set, not one repo per slot.** The updater design sketched
 `model-walk`, `model-jump` and so on (§5.5), and per-slot components are what its own machinery
 would give most naturally. Against that: the files are produced as a *family* by one
-training run, the slot→file mapping is mode-dependent (`walk` is `alpha_walking.onnx` on legs
-and `roller.onnx` on wheels, which postdates that section), and one component per policy would
+training run, the slot→file mapping is mode-dependent (`walk` defaults to `walk_stand.onnx` on legs
+and `roller.onnx` on wheels, while `walk.onnx` remains available as a manual override),
+and one component per policy would
 mean one repo, manifest, config block and round trip per file, plus a skew matrix in which nothing
 records that a given walk and stand were ever trained together. One
 set means a mode switch downloads nothing and the policies are versioned the way they are built.
@@ -652,7 +658,7 @@ is a 50 Hz stream answering a question asked once, and BLE deliberately does not
 The Hub revision's `manifest.json` is the only authoritative membership and role list (§9.3), so
 this repository does not copy the current table. On a board, inspect
 `/opt/robot/policies/current/manifest.json`; for a candidate revision, inspect the same file in
-`pollen-robotics/microduck-policies` before tagging it. Stable file names are roles rather than
+`BWJ2310/bruzmicroduck-xc330-custom-weight-policies` before tagging it. Stable file names are roles rather than
 training-run identities, so a retrain changes the set without rewriting every robot's config.
 
 **Only the 61-D family.** The prototype also ships a 51-D one — `3 gyro + 3 gravity + 42 joints +
@@ -677,7 +683,7 @@ its meaning for the things that genuinely are models and not control policies, s
 | A request already satisfied queues no work | Otherwise `reset` on an untouched robot is a ten-second non-event (§4) |
 | …except on a slot carrying an error | A fallen-back slot looks untouched, and clearing it is what reset is for (§4) |
 | A failed community override is degraded, not unhealthy | Otherwise a stale config gates every daemon update (§5) |
-| `pollen-robotics/*` is official, hardcoded | A configurable trust org makes the badge meaningless (§2) |
+| `BWJ2310/*` is official, hardcoded | A configurable trust org makes the badge meaningless (§2) |
 | Community policies carry no declared per-file hash | The safety layer and the shape gate are the boundary (§2) |
 | One official set, not one repo per slot | The set is trained as a family; per-slot overrides already cover the rest (§9) |
 | The fetch lives in `updaterd` | `robotctl` must not link an HTTP stack (§8) |

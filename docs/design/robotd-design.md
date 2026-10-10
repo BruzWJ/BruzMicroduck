@@ -260,7 +260,7 @@ Where the data goes, once per period:
                      │           stand (by |twist|, or forced) > walk
                      │  [f32; 14]   — mouth excluded
                      ▼
-              home pose + scale × action ──► low-pass on head and legs
+              home pose + scale × action ──► optional low-pass on head and legs
                      │
                      │  [f64; 15] proposed targets
                      ▼
@@ -536,7 +536,7 @@ That preserves type-checking of the complete backend without pretending a laptop
 
 ### 2.2 One observation builder
 
-Every alpha policy is `obs[1,61] → actions[1,14]` — verified across walking, standing, ground
+Every official policy is `obs[1,61] → actions[1,14]` — verified across walking, standing, ground
 pick, ball kick and sit. So there is exactly one layout:
 
 ```
@@ -572,7 +572,8 @@ Three things about it are individually plausible and wrong:
 ### 2.3 The policy
 
 Shaped like the runtime's, deliberately. `robotd/src/control.rs` holds the priority chain and
-every numeric default from `control_step`, which it replaces:
+motion mechanics from `control_step`; `robotd-params` owns deployment defaults so they can match
+the policy family's training contract:
 
 ```text
 skill windows ← advance / expire (roulade window, kick timer, ground-pick phase, sit↔stand rise)
@@ -580,7 +581,7 @@ command       ← the caller's smoothed command, re-encoded for the active skill
 net           ← roulade > kick > ground pick > sit/rise > stand-by-magnitude (or forced) > walk
 action        ← ONNX
 targets       ← home pose + action_scale × action
-filters       ← first-order low-pass on head and legs
+filters       ← optional first-order low-pass on head and legs
 ```
 
 Two subtleties of the prototype are worth naming because they are easy to "fix" by accident.
@@ -665,11 +666,11 @@ Not done, and deliberately: pre-binding the ONNX input/output tensors. The curre
 allocates a 61-float vector per inference, ~244 bytes at 50 Hz. Worth measuring on the board
 before optimising.
 
-**Carried over from the runtime because it works** — head and leg low-pass filters, action
-scale, voltage-adaptive scaling, the standing-transition gain change. These are tunables
-(§4.2), not decisions to revisit. The low-pass alphas in particular are the values the alpha
-policies are *trained* with, so they must match training or transfer degrades. The rule is not
-to regress what already runs.
+**Deployment tuning must match training.** Action scale, voltage-adaptive scaling, the
+standing-transition gain change and optional head/leg low-pass filters remain tunables (§4.2).
+The generic built-ins remain the Pollen policy contract: head/leg low-pass 0.5 / 0.7 and a
+7.4 V nominal supply. The deployed `robotd.toml` explicitly writes 1.0 / 1.0 / 7.0 for the Bruz
+XC330 family, which was trained and evaluated with unfiltered targets at that supply.
 
 ### 2.4 Safety
 
@@ -709,8 +710,8 @@ a robot lying on its side, and the wrong one for softening a landing: gravity pa
 `fall_gravity_z` held for 200 ms *is* the robot on the floor, and the window worth acting in
 has closed by then.
 
-So `limp_fall` (on by default; with the default velstand gait and no standing network, the
-hand-back is to velstand at zero command) runs a second, separate detector — `duck_control::fall` — on the rate rather than the position. Projected gravity
+So `limp_fall` (on by default; with `walk_stand.onnx` as the gait and no standing network, the
+hand-back is to that gait at zero command) runs a second, separate detector — `duck_control::fall` — on the rate rather than the position. Projected gravity
 rotates with the trunk, so `ġ = −ω × g` is exact and comes straight from the gyro in the same
 body-IMU sample as its fused quaternion; extrapolating it over ~0.3 s says where gravity is
 heading. It fires when
@@ -764,7 +765,7 @@ complete windows, and one padded at startup paused a simulated robot a tenth of 
 boot. Roller mode is not watched at all: the model has never seen wheels.
 
 The model is trained entirely in simulation, in `microduck_rl` (`pickup/`, `scripts/pickup_*.py`):
-the deployed velstand walks, stands and falls under the training randomisation while a simulated
+the deployed walk/stand gait walks, stands and falls under the training randomisation while a simulated
 hand — a mocap body welded softly to the trunk or the head — lifts, carries, holds it at any
 orientation including upside down, spins it, shakes it, sets it down and drops it. (The first
 model's hand only gripped the trunk and only passed through large tilts; on the robot it missed a
@@ -1073,8 +1074,8 @@ mostly variants, dead skills and dead sensors, all of which are gone.
 
 One switch is coarser than the rest. `policy.mode` — `walk` or `roller` — selects which policies
 load *and* the tuning defaults, so every unset field resolves per mode and moving a robot onto
-wheels is one line plus a restart. It is a preset, not a variant: the roller line is the
-prototype's, rebased on the alpha defaults.
+wheels is one line plus a restart. It is a preset, not a variant: the roller policy and scripted
+move timing come from the prototype, with the Bruz deployment tuning shared across modes.
 
 ### 4.3 The gamepad is a client
 
