@@ -2682,11 +2682,15 @@ async fn an_unknown_ref_says_which_ref() {
 /// than quietly reading something else.
 #[tokio::test]
 async fn a_ref_cannot_escape_the_source_directory() {
-    let fx = Fixture::new();
-    fx.publish("1.0.0", None);
-    let mut engine = fx.engine_healthy();
-
     for bad in ["../outside", "sub/dir", ".."] {
+        // Each case gets its own lock path. A child forked by another test in this
+        // process can briefly inherit the current fixture's flock; reusing that
+        // path for the next case would then turn the expected validation error
+        // into an unrelated Busy result.
+        let fx = Fixture::new();
+        fx.publish("1.0.0", None);
+        let mut engine = fx.engine_healthy();
+
         let err = apply_ref(&mut engine, bad).await.unwrap_err();
         assert!(
             matches!(err, updater::Error::Verification(_)),
