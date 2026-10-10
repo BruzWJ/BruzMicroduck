@@ -1351,6 +1351,7 @@ The workflow enforces these invariants:
 
 - The selected ref must be the repository's default branch, and the checked-out SHA must equal the
   dispatch SHA.
+- Before drafting, the pinned policy set must install anonymously through the production seeder.
 - The tag is derived from the stable SemVer in `Cargo.toml`; `xtask package` independently checks the
   same version.
 - An existing published version is never overwritten. Only a draft left by the same commit may be
