@@ -834,21 +834,25 @@ mod tests {
         );
     }
 
-    /// The shipped example loads into the editor, and every value it does set explicitly is
-    /// the default — the editor-side echo of robotd's own example-matches-defaults test, and
-    /// the reason a fresh robot's config shows no surprising overrides.
+    /// The shipped config differs from the generic daemon only where it binds a fresh board to
+    /// the Bruz policy family's training contract.
     #[test]
-    fn the_shipped_example_sets_nothing_away_from_default() {
+    fn the_shipped_config_has_only_the_bruz_policy_contract_overrides() {
         let m = model(SHIPPED);
-        for row in m.rows() {
-            if let Some(set) = &row.set {
-                assert_eq!(
-                    set, &row.default,
-                    "{} is shipped away from its default",
-                    row.entry.key
-                );
-            }
-        }
+        let changed: Vec<_> = m
+            .rows()
+            .into_iter()
+            .filter(Row::differs)
+            .map(|row| row.entry.key)
+            .collect();
+        assert_eq!(
+            changed,
+            [
+                "policy.head_lowpass",
+                "policy.legs_lowpass",
+                "policy.nominal_voltage"
+            ]
+        );
     }
 
     /// An unset bitrate shows what it will actually stream at, and follows the quality as it
@@ -934,7 +938,7 @@ mod tests {
                 .clone()
         };
         let walk = hint(&m, "policy.walk").expect("resolves");
-        assert!(walk.contains("velstand"), "{walk}");
+        assert!(walk.contains("walk_stand.onnx"), "{walk}");
         assert_eq!(hint(&m, "policy.legs_lowpass").as_deref(), Some("0.7"));
         assert_eq!(
             hint(&m, "audio.pet_detect").as_deref(),
@@ -1329,7 +1333,7 @@ mod tests {
         let cleared = std::fs::read_to_string(&config).expect("read");
         assert!(!cleared.contains("walk ="), "{cleared}");
         assert!(
-            !cleared.contains("alpha_walking"),
+            !cleared.contains("walk_stand.onnx"),
             "no default is pinned: {cleared}"
         );
     }

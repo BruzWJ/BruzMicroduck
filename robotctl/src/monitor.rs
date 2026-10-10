@@ -3448,8 +3448,8 @@ mod tests {
         assert!(
             view.absorb(Update::Policy(Box::new(proto::SubscribeResult {
                 accepted: true,
-                walk: Some("alpha_walking.onnx".to_owned()),
-                stand: Some("alpha_stand.onnx".to_owned()),
+                walk: Some("walk.onnx".to_owned()),
+                stand: Some("stand.onnx".to_owned()),
                 unavailable: None,
                 ..Default::default()
             })))
@@ -3458,8 +3458,8 @@ mod tests {
         assert!(view.absorb(Update::State(Box::new(a_state()))).is_ok());
 
         let screen = render_to(&mut view, 110, 32);
-        assert!(screen.contains("alpha_walking.onnx"), "{screen}");
-        assert!(screen.contains("standing alpha_stand.onnx"), "{screen}");
+        assert!(screen.contains("walk.onnx"), "{screen}");
+        assert!(screen.contains("standing stand.onnx"), "{screen}");
     }
 
     /// Nothing said about the policy is reported as such. The alternative — an empty caption —
@@ -3478,7 +3478,7 @@ mod tests {
         assert!(
             view.absorb(Update::Policy(Box::new(proto::SubscribeResult {
                 accepted: true,
-                walk: Some("alpha_walking.onnx".to_owned()),
+                walk: Some("walk.onnx".to_owned()),
                 stand: None,
                 unavailable: None,
                 ..Default::default()
@@ -3503,7 +3503,7 @@ mod tests {
             Some(proto::Id::Number(SUBSCRIBE_ID)),
             &proto::SubscribeResult {
                 accepted: true,
-                walk: Some("alpha_walking.onnx".to_owned()),
+                walk: Some("walk.onnx".to_owned()),
                 ..Default::default()
             },
         ))
@@ -3511,7 +3511,7 @@ mod tests {
         let Some(Update::Policy(policy)) = decode(&ack) else {
             panic!("the subscribe answer must decode as a policy: {ack}");
         };
-        assert_eq!(policy.walk.as_deref(), Some("alpha_walking.onnx"));
+        assert_eq!(policy.walk.as_deref(), Some("walk.onnx"));
 
         // A response to some other call is not the subscribe answer.
         let other = serde_json::to_string(&proto::Response::ok(

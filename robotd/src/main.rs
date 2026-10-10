@@ -423,7 +423,7 @@ fn origin_of(path: &std::path::Path) -> &'static str {
     if let Ok(rest) = path.strip_prefix(params::POLICY_LIBRARY)
         && let Some(org) = rest.components().next()
     {
-        return if org.as_os_str() == OFFICIAL_ORG {
+        return if org.as_os_str() == params::OFFICIAL_POLICY_ORG {
             "official"
         } else {
             "community"
@@ -431,10 +431,6 @@ fn origin_of(path: &std::path::Path) -> &'static str {
     }
     "local"
 }
-
-/// The org whose policies are official. One constant, matching `updater::policy::OFFICIAL_ORG`:
-/// a robot that can be *told* which org to trust has a badge that means nothing.
-const OFFICIAL_ORG: &str = "pollen-robotics";
 
 /// The per-slot answer to `robot.policies`: what is loaded, from where, and why not.
 ///
@@ -5709,8 +5705,8 @@ mod tests {
     #[test]
     fn the_daemon_driven_skills_count_as_skills() {
         let names = do_names(&PolicyNames {
-            ground_pick: Some("alpha_ground_pick.onnx".to_owned()),
-            sitstand: Some("alpha_sitstand.onnx".to_owned()),
+            ground_pick: Some("ground_pick.onnx".to_owned()),
+            sitstand: Some("sit_stand.onnx".to_owned()),
             skills: vec!["roulade".to_owned()],
             ..Default::default()
         });
@@ -6140,7 +6136,7 @@ mod tests {
     #[test]
     fn the_published_policy_names_are_one_modes_answer() {
         let mut walking = Params::default();
-        walking.policy.stand = Some(PathBuf::from("/srv/alpha_stand.onnx"));
+        walking.policy.stand = Some(PathBuf::from("/srv/stand.onnx"));
         let walk = PolicyNames::of(&walking.policy.resolved());
         assert!(walk.stand.is_some(), "walking can carry a standing network");
 
@@ -6486,7 +6482,7 @@ mod tests {
         params.policy.skills = vec![
             params::SkillDef {
                 name: "roulade".into(),
-                path: Some(PathBuf::from("/srv/roulade.onnx")),
+                path: Some(PathBuf::from("/srv/forward_roll.onnx")),
                 duration: 1.0,
                 chain: true,
                 ..Default::default()
@@ -6940,8 +6936,8 @@ mod tests {
     fn subscribing_names_the_policy() {
         let mut params = Params::default();
         params.policy.enabled = true;
-        params.policy.walk = Some("/opt/robot/releases/7/alpha_walking.onnx".into());
-        params.policy.stand = Some("/opt/robot/releases/7/alpha_stand.onnx".into());
+        params.policy.walk = Some("/opt/robot/releases/7/walk.onnx".into());
+        params.policy.stand = Some("/opt/robot/releases/7/stand.onnx".into());
         let s = Arc::new(RobotState::new(
             &params,
             std::path::Path::new("/test/robotd.toml"),
@@ -6961,8 +6957,8 @@ mod tests {
         assert!(result.accepted);
         // File names, not paths: the directory is what `robotctl version` reports, and the
         // name is the part that differs between two builds someone is comparing.
-        assert_eq!(result.walk.as_deref(), Some("alpha_walking.onnx"));
-        assert_eq!(result.stand.as_deref(), Some("alpha_stand.onnx"));
+        assert_eq!(result.walk.as_deref(), Some("walk.onnx"));
+        assert_eq!(result.stand.as_deref(), Some("stand.onnx"));
         assert_eq!(result.unavailable, None);
     }
 
@@ -8045,7 +8041,7 @@ mod tests {
         assert!(policy.slot(Slot::Walk).is_none(), "the override is dropped");
         assert_eq!(
             policy.resolved().walk,
-            PathBuf::from(params::POLICY_DIR).join("velstand.onnx"),
+            PathBuf::from(params::POLICY_DIR).join("walk_stand.onnx"),
             "and the slot resolves to this robot's own policy"
         );
         let reason = errors.get(Slot::Walk).expect("the reason is kept");
@@ -8873,17 +8869,25 @@ mod tests {
         use std::path::Path;
 
         assert_eq!(
-            origin_of(&Path::new(params::POLICY_DIR).join("alpha_walking.onnx")),
+            origin_of(&Path::new(params::POLICY_DIR).join("walk.onnx")),
             "official",
             "the set the robot fetched from our own repo"
         );
         assert_eq!(
             origin_of(
                 &Path::new(params::POLICY_LIBRARY)
-                    .join("pollen-robotics/microduck-flamingo/main/policy.onnx")
+                    .join("BWJ2310/bruzmicroduck-xc330-custom-weight-policies/main/walk.onnx")
             ),
             "official",
-            "and one fetched singly from the same org"
+            "and a library path rooted under the same org"
+        );
+        assert_eq!(
+            origin_of(
+                &Path::new(params::POLICY_LIBRARY)
+                    .join("pollen-robotics/microduck-flamingo/main/policy.onnx")
+            ),
+            "community",
+            "the predecessor publisher is no longer the official source"
         );
         assert_eq!(
             origin_of(

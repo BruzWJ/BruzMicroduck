@@ -3451,15 +3451,11 @@ mod tests {
             request_line(&cli.command).expect("a request").0
         };
 
-        let load = wire(&[
-            "load",
-            "walk",
-            "/opt/robot/policies/current/alpha_walking.onnx",
-        ]);
+        let load = wire(&["load", "walk", "/opt/robot/policies/current/walk.onnx"]);
         assert!(load.contains(r#""method":"robot.loadPolicy""#), "{load}");
         assert!(load.contains(r#""slot":"walk""#), "{load}");
         assert!(
-            load.contains(r#""path":"/opt/robot/policies/current/alpha_walking.onnx""#),
+            load.contains(r#""path":"/opt/robot/policies/current/walk.onnx""#),
             "{load}"
         );
 

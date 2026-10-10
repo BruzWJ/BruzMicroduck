@@ -15,9 +15,9 @@
 //! filters      ← optional first-order low-pass on head and legs
 //! ```
 //!
-//! The priority chain and every numeric default come from `microduck_runtime`'s
-//! `control_step`, which this replaces. Two of its subtleties are worth naming because they
-//! are easy to "fix" by accident:
+//! The priority chain and motion mechanics come from `microduck_runtime`'s `control_step`, which
+//! this replaces; deployment tuning follows the installed policy family's training contract.
+//! Two runtime subtleties are worth naming because they are easy to "fix" by accident:
 //!
 //!  - **A kick window runs at standing tuning.** The kick's observation carries an all-zero
 //!    command, and in the prototype the standing transition fires on exactly that — so a
@@ -53,17 +53,18 @@ const CHAIN_WINDOW: f64 = 0.15;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Tuning {
     /// Scales raw policy output before it becomes a joint offset. The prototype's current
-    /// alpha default.
+    /// walking default.
     pub action_scale: f64,
     /// The standing policy is trained to be applied whole.
     pub standing_action_scale: f64,
     /// Standing runs softer, at this fraction of the running gain. `--standing-kp-ratio`.
     pub standing_gain_ratio: f64,
     pub gain: u16,
-    /// First-order low-pass on the head joints. `None` is no filtering. The alpha policies
-    /// are trained with 0.5 — it must match training or transfer degrades.
+    /// First-order low-pass on the head joints. `None` is no filtering. The generic default
+    /// matches the generic Pollen policy family; the Bruz deployment supplies `None` explicitly through
+    /// its config because those policies were trained without a runtime target filter.
     pub head_lowpass: Option<f64>,
-    /// Same, for the ten leg joints. Trained with 0.7.
+    /// Same, for the ten leg joints.
     pub legs_lowpass: Option<f64>,
 }
 
@@ -93,7 +94,7 @@ pub struct SkillTuning {
     /// Gain multiplier while the pick runs.
     pub ground_pick_gain_ratio: f64,
     /// How long the sitstand network rises (posture flag 0) before the main policy takes over.
-    /// 1 s is enough on the robot — velstand owns the tail of the rise fine.
+    /// 1 s is enough on the robot — `walk_stand.onnx` owns the tail of the rise.
     pub sitstand_rise_s: f64,
     /// How long the seat takes to settle after the posture flag flips: the ~2 s glide the
     /// network is trained on. The shutdown sit waits this plus a second before easing into the
@@ -803,26 +804,17 @@ mod tests {
         );
     }
 
-    /// The prototype's **current alpha configuration** — its built-in defaults, which the
-    /// installer deliberately passes no flags to override. The filters are ON at the values
-    /// the policies are trained with; changing any of these silently changes how the robot
-    /// moves relative to the thing it replaces.
+    /// The lower-level default follows the generic Pollen policy contract, just like an
+    /// empty `robotd.toml`. The Bruz deployment disables both filters explicitly in its config;
+    /// keeping that choice out of this default is what makes a failed policy migration safe.
     #[test]
-    fn the_defaults_match_the_prototype() {
+    fn the_defaults_match_the_generic_policy_contract() {
         let t = Tuning::default();
         assert_eq!(t.action_scale, 0.9);
         assert_eq!(t.standing_action_scale, 1.0);
         assert_eq!(t.standing_gain_ratio, 0.8);
-        assert_eq!(
-            t.head_lowpass,
-            Some(0.5),
-            "trained with ACTION_LOW_PASS_HEAD_ALPHA"
-        );
-        assert_eq!(
-            t.legs_lowpass,
-            Some(0.7),
-            "trained with ACTION_LOW_PASS_LEG_ALPHA"
-        );
+        assert_eq!(t.head_lowpass, Some(0.5));
+        assert_eq!(t.legs_lowpass, Some(0.7));
 
         let s = SkillTuning::default();
         assert_eq!(s.ground_pick_period, 4.0);

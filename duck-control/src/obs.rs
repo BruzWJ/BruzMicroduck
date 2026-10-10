@@ -5,7 +5,7 @@
 //! loudly — it produces a plausible-looking robot that falls over, and the symptom looks
 //! like a tuning or timing problem rather than an indexing one.
 //!
-//! Every alpha policy is `obs[1,61] → actions[1,14]`, verified across walking, standing,
+//! Every official policy is `obs[1,61] → actions[1,14]`, verified across walking, standing,
 //! ground pick, ball kick and sit. So there is exactly one layout, not the five the
 //! prototype carried (51/54-D legacy, 49-D wheeled, 85-D tracking are all v1/v1.5 history).
 //!
@@ -231,7 +231,7 @@ impl Observation {
 
     /// Map a policy's 14 outputs onto the 15 joints, leaving the mouth untouched.
     ///
-    /// The mouth is absent from every alpha policy, so its slot stays at whatever the
+    /// The mouth is absent from every official policy, so its slot stays at whatever the
     /// caller had. Getting this wrong shifts every joint after index 9 by one, which is
     /// both catastrophic and completely silent.
     pub fn scatter_action(action: &[f32; ACTION_LEN]) -> [f64; NUM_JOINTS] {
@@ -297,7 +297,7 @@ mod tests {
         )
     }
 
-    /// The widths must sum to exactly what the ONNX graph declares. Every alpha policy is
+    /// The widths must sum to exactly what the ONNX graph declares. Every official policy is
     /// `obs[1,61]`, and a mismatch is rejected by the runtime rather than misread — but it
     /// is far better to fail here than at session run time on a robot.
     #[test]

@@ -419,7 +419,7 @@ mod tests {
     #[test]
     fn a_source_record_round_trips() {
         let source = Source {
-            repo: "pollen-robotics/microduck-policies".into(),
+            repo: "BWJ2310/bruzmicroduck-xc330-custom-weight-policies".into(),
             version: "v1".into(),
         };
         assert_eq!(Source::parse(&source.render()), Some(source));
@@ -456,14 +456,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         std::fs::create_dir_all(root.join("releases/seed-v2")).unwrap();
-        std::fs::write(root.join("releases/seed-v2/alpha_walking.onnx"), "w").unwrap();
+        std::fs::write(root.join("releases/seed-v2/walk.onnx"), "w").unwrap();
 
         swap_current(root, "seed-v2").unwrap();
         assert_eq!(
             std::fs::read_link(root.join("current")).unwrap(),
             Path::new("releases/seed-v2")
         );
-        assert!(root.join("current/alpha_walking.onnx").exists());
+        assert!(root.join("current/walk.onnx").exists());
     }
 
     /// Swapping over an existing link replaces it rather than landing inside what it points at,
@@ -494,16 +494,13 @@ mod tests {
         let manifest = serde_json::json!({
             "schema_version": 1,
             "policies": [
-                { "file": "alpha_walking.onnx", "kind": "perpetual" },
+                { "file": "walk.onnx", "kind": "perpetual" },
                 { "file": "polite_bow.onnx", "kind": "episodic", "duration_s": 1.0 },
             ]
         });
         assert_eq!(
             files_in_manifest(&serde_json::to_vec(&manifest).unwrap()),
-            vec![
-                "alpha_walking.onnx".to_string(),
-                "polite_bow.onnx".to_string()
-            ]
+            vec!["walk.onnx".to_string(), "polite_bow.onnx".to_string()]
         );
     }
 
@@ -870,7 +867,7 @@ mod tests {
 
     /// **The Hub returns tags in no useful order, and this is the order it actually returned.**
     ///
-    /// `v3, v1, v2` for `pollen-robotics/microduck-policies`, with no dates on any of them. The
+    /// `v3, v1, v2` from a policy repository, with no dates on any of them. The
     /// rule used to be "the list, reversed", which made v2 the newest and had a board report
     /// "newest v2 — up to date" while listing v3 underneath it.
     #[test]
@@ -919,15 +916,20 @@ mod tests {
     #[test]
     fn origin_is_decided_by_the_org() {
         assert_eq!(
-            origin_of_repo("pollen-robotics/microduck-policies"),
+            origin_of_repo("BWJ2310/bruzmicroduck-xc330-custom-weight-policies"),
             "official"
         );
         assert_eq!(
             origin_of_repo("RemiFabre/microduck-flamingo-cycle"),
             "community"
         );
+        assert_eq!(
+            origin_of_repo("pollen-robotics/microduck-policies"),
+            "community",
+            "the predecessor migration is not a second trusted org"
+        );
         // Not a prefix match: an org that merely starts the same way is somebody else.
-        assert_eq!(origin_of_repo("pollen-robotics-fake/x"), "community");
+        assert_eq!(origin_of_repo("BWJ2310-fake/x"), "community");
         assert_eq!(origin_of_repo("nonsense"), "community");
     }
 
@@ -999,14 +1001,10 @@ mod tests {
 /// a policy somebody chose must survive an update and a rollback.
 pub const LIBRARY_ROOT: &str = "/var/lib/robot/policies";
 
-/// The org whose policies are "official". One constant: a robot that can be *told* which org to
-/// trust has a badge that means nothing.
-pub const OFFICIAL_ORG: &str = "pollen-robotics";
-
 /// `"official"` or `"community"`, from the repo that published it.
 pub fn origin_of_repo(repo: &str) -> &'static str {
     match repo.split_once('/') {
-        Some((org, _)) if org == OFFICIAL_ORG => "official",
+        Some((org, _)) if org == robotd_params::OFFICIAL_POLICY_ORG => "official",
         _ => "community",
     }
 }

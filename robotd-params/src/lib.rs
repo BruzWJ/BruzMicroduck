@@ -40,6 +40,13 @@ pub const RELEASE_DIR: &str = "/opt/robot/daemon/current";
 /// independently of daemon releases. See `docs/design/policy-channel-design.md` §9.
 pub const POLICY_DIR: &str = "/opt/robot/policies/current";
 
+/// The Hub organisation whose policy repos the robot labels official.
+///
+/// Both the downloader and the daemon's per-slot report use this decision. Keeping it beside the
+/// shared policy paths prevents a repo rename from leaving one side calling a policy official and
+/// the other calling the same file community-provided.
+pub const OFFICIAL_POLICY_ORG: &str = "BWJ2310";
+
 /// Where the duck detector lives — outside the release, the way [`POLICY_DIR`] is, and for the
 /// same reason: the model is trained and published elsewhere (`pollen-robotics/duck_detector`,
 /// on the Hub as `pollen-robotics/microduck-duck-detector`), a retrain is a tag rather than a
@@ -996,23 +1003,23 @@ pub struct PolicyParams {
     /// Episodic forward roll. The installed official manifest supplies it in both modes.
     pub roulade: Option<PathBuf>,
     /// Scales raw policy output into a joint offset. Absent resolves per mode: 0.9 walking
-    /// (the prototype's alpha default), 0.8 roller.
+    /// (the prototype's walking default), 0.8 roller.
     pub action_scale: Option<f64>,
     pub standing_action_scale: f64,
     /// Standing runs softer, at this fraction of `gain`.
     pub standing_gain_ratio: f64,
     /// Position P gain while running.
     pub gain: u16,
-    /// First-order low-pass on the head joint targets, `1.0` = pass-through. Default 0.5
-    /// in both modes — the value the alpha policies are *trained* with, so it must match
-    /// or transfer degrades. (The roller preset used to ship it off; the prototype rebased
-    /// its roller line on the alpha defaults, and this follows.)
+    /// First-order low-pass on the head joint targets, `1.0` = pass-through. Unset resolves to
+    /// 0.5, the generic Pollen training default. A deployment tied to another policy family
+    /// writes that family's value explicitly.
     pub head_lowpass: Option<f64>,
-    /// Same, for the ten leg joints. Walking default 0.7.
+    /// Same, for the ten leg joints. Unset resolves to the generic 0.7 default.
     pub legs_lowpass: Option<f64>,
-    /// One ground-pick cycle, seconds. The move ends at the set's `end_phase` (70% of the
-    /// cycle, as the prototype does). Absent resolves from the installed set's phase-encoded
-    /// entry for this mode, else 4.0 walking, 3.0 roller (the crouch).
+    /// One ground-pick cycle, seconds. The move ends at the installed set's `end_phase`;
+    /// different trained policies may use only part of the cycle or its complete return-to-rest
+    /// tail. Absent resolves from the phase-encoded entry for this mode, else 4.0 walking,
+    /// 3.0 roller (the crouch).
     pub ground_pick_period: Option<f64>,
     /// Action scale while the ground pick runs. Absent: the set's entry, else 1.0 walking,
     /// 0.8 roller.
@@ -1186,9 +1193,9 @@ pub struct SetPolicy {
     /// The `.onnx`, as it is named in the repo and on disk. The only field a standalone manifest
     /// has no use for, since a repo with one policy has nothing to disambiguate.
     pub file: String,
-    /// What a client asks for, when this is a one-shot. Absent means the file's stem, so
-    /// `roulade.onnx` needs no name while `ball_kick_left.onnx` says `kick_left` — the names are
-    /// roles and the files are training runs, an indirection worth keeping.
+    /// What a client asks for, when this is a one-shot. Absent means the file's stem. The official
+    /// `forward_roll.onnx` says `roulade` explicitly so renaming its artifact does not rename the
+    /// established command; names are roles and files are artifacts.
     pub name: Option<String>,
     /// `"episodic"`, `"perpetual"` or `"scripted"`, and the difference is who supplies the
     /// ending.
@@ -1240,8 +1247,7 @@ pub struct SetCommand {
     pub idle: Option<[f64; 3]>,
     /// Phase encoding: seconds per full cycle.
     pub period_s: Option<f64>,
-    /// Phase encoding: the fraction of the cycle at which the move hands back. The pick's rise
-    /// is over well before 1.0, and running to 1.0 replays the reach on the way out.
+    /// Phase encoding: the fraction of the cycle at which this trained policy hands back.
     pub end_phase: Option<f64>,
     /// Posture flag: the value that means "sit".
     pub sit: Option<f64>,
@@ -1368,8 +1374,8 @@ impl SetManifest {
     /// lives on the Hub and cannot be checked from here, so the guard belongs on the board.
     ///
     /// It guards the *name* and the *encoding*, not the file. A set that marks
-    /// `alpha_ground_pick.onnx` episodic with neither a name nor a phase command still produces a
-    /// skill — called `alpha_ground_pick`, running a phase-scripted network on zeros. That is a
+    /// `mislabelled_pick.onnx` episodic with neither a name nor a phase command still produces a
+    /// skill — called `mislabelled_pick`, running a phase-scripted network on zeros. That is a
     /// publisher's mistake rather than a trap: it shadows nothing, it is plainly visible in
     /// `robotctl policy list`, and nothing invokes it unless somebody asks for it by that name.
     /// Catching it would mean a hardcoded list of our own filenames, which is the coupling this
@@ -1395,7 +1401,7 @@ pub const DAEMON_OWNED_SKILLS: [&str; 2] = ["ground_pick", "sit_toggle"];
 /// prototype's cutoff. Ending at 100% replays the reach on the way out.
 pub const DEFAULT_GROUND_PICK_END_PHASE: f64 = 0.7;
 /// How long the sitstand network rises (posture flag 0) before the gait takes over, when the
-/// set does not say. 1 s is enough on the robot — velstand owns the tail of the rise fine.
+/// set does not say. 1 s is enough on the robot — `walk_stand.onnx` owns the tail of the rise.
 pub const DEFAULT_SITSTAND_RISE_S: f64 = 1.0;
 /// How long the seat takes after the flag flips, when the set does not say: the ~2 s glide the
 /// sit↔stand is trained on (`POSTURE_RAMP_S`).
@@ -1669,7 +1675,7 @@ impl PolicyParams {
     }
 
     /// [`Self::resolved`] against a manifest already read. `None` is the unprovisioned/local
-    /// case; numeric motion tuning still resolves to the safe prototype defaults below.
+    /// case; numeric motion tuning still resolves to the built-in deployment defaults below.
     ///
     /// **The set says how its own policies run.** The ground pick's cycle and the sit↔stand's rise
     /// used to be literals here, per mode, which meant a retrained pick with a longer cycle was a
@@ -1687,26 +1693,26 @@ impl PolicyParams {
         };
 
         let (walk_default, stand, sitstand, ground_pick) = match self.mode {
-            // The velstand gait (set v5) walks on a twist and stands still at zero command,
+            // `walk_stand.onnx` walks on a twist and stands still at zero command,
             // so no standing network is loaded by default: with `stand` unset the walking
-            // policy runs at every velocity. `alpha_walking.onnx` + `alpha_stand.onnx` stay
+            // policy runs at every velocity. `walk.onnx` + `stand.onnx` stay
             // in the set for a board that loads them back by hand.
             Mode::Walk => (
-                "velstand.onnx",
+                "walk_stand.onnx",
                 None,
-                Some("alpha_sitstand.onnx"),
-                Some("alpha_ground_pick.onnx"),
+                Some("sit_stand.onnx"),
+                Some("ground_pick.onnx"),
             ),
-            // The prototype's roller preset, since rebased on the alpha defaults: roller
-            // policy, crouch on the ground-pick trigger, and everything else — sit/stand,
-            // kicks, the trained low-pass — as the walking mode has it. `stand` stays
-            // unloaded, deliberately: the prototype loads the standing network in roller
-            // mode and then skips every standing transition while `roller_mode` is set, so
-            // it never runs — not loading it is the same robot without the dead session.
+            // The roller preset: roller policy, crouch on the ground-pick trigger and shared
+            // sit/stand, kicks and roll. Policy-family target filtering is an explicit deployment
+            // value, not a mode default.
+            // `stand` stays unloaded, deliberately: the prototype loads the standing network
+            // in roller mode and then skips every standing transition while `roller_mode` is
+            // set, so it never runs — not loading it is the same robot without the dead session.
             Mode::Roller => (
                 "roller.onnx",
                 None,
-                Some("alpha_sitstand.onnx"),
+                Some("sit_stand.onnx"),
                 Some("roller_crouch.onnx"),
             ),
         };
@@ -1802,8 +1808,8 @@ pub struct SafetyParams {
     pub battery_empty_shutdown: bool,
 
     /// Go limp *while falling*, to land soft instead of fighting the floor all the way
-    /// down. **On by default.** With the default velstand gait (set v5) no standing network
-    /// is loaded, so the hand-back is to velstand at zero command, which stands still.
+    /// down. **On by default.** With the default `walk_stand.onnx` gait no standing network
+    /// is loaded, so the hand-back is to that gait at zero command, which stands still.
     ///
     /// The only thing the daemon does about a fall. Drop to `gain_limp`, let the robot
     /// collapse, pose it back to standing once it has landed, then hand it to the standing
@@ -2318,13 +2324,14 @@ mod tests {
         let manifest: super::SetManifest = serde_json::from_value(serde_json::json!({
             "policies": [
                 // A gait: perpetual, so not something to ask for by name.
-                { "file": "alpha_walking.onnx", "kind": "perpetual" },
+                { "file": "walk.onnx", "kind": "perpetual" },
                 // A perpetual one-shot: no length of its own, so it takes a config entry rather
                 // than appearing.
                 { "file": "flamingo.onnx", "kind": "perpetual",
                   "unwind_s": 1.5, "command": { "idle": [0, 0, 0] } },
-                { "file": "roulade.onnx", "kind": "episodic", "duration_s": 1.0, "chain": true },
-                { "file": "ball_kick_left.onnx", "name": "kick_left",
+                { "file": "forward_roll.onnx", "name": "roulade",
+                  "kind": "episodic", "duration_s": 1.0, "chain": true },
+                { "file": "kick_left.onnx", "name": "kick_left",
                   "kind": "episodic", "duration_s": 0.5 },
                 { "file": "new_trick.onnx", "kind": "episodic", "duration_s": 2.0,
                   "action_scale": 0.8 }
@@ -2339,8 +2346,8 @@ mod tests {
         assert_eq!(
             skills,
             vec![
-                ("roulade.onnx", 1.0),
-                ("ball_kick_left.onnx", 0.5),
+                ("forward_roll.onnx", 1.0),
+                ("kick_left.onnx", 0.5),
                 ("new_trick.onnx", 2.0)
             ],
             "gaits and perpetual one-shots are not skills on their own"
@@ -2363,16 +2370,17 @@ mod tests {
         let manifest: super::SetManifest = serde_json::from_value(serde_json::json!({
             "policies": [
                 // Named as the daemon's own: shadowing, and refused.
-                { "file": "alpha_sitstand.onnx", "name": "sit_toggle",
+                { "file": "sit_stand.onnx", "name": "sit_toggle",
                   "kind": "episodic", "duration_s": 2.0 },
                 // Mislabelled but not renamed: a junk skill, and it is allowed through.
-                { "file": "alpha_ground_pick.onnx", "kind": "episodic", "duration_s": 4.0 },
+                { "file": "mislabelled_pick.onnx", "kind": "episodic", "duration_s": 4.0 },
                 // Labelled correctly: episodic on a phase command is the ground pick, and the
                 // encoding keeps it out of the skill list whatever it is called.
                 { "file": "roller_crouch.onnx", "name": "crouch", "kind": "episodic",
                   "duration_s": 3.5, "mode": "roller",
                   "command": { "encoding": "phase", "period_s": 5.0, "end_phase": 0.7 } },
-                { "file": "roulade.onnx", "kind": "episodic", "duration_s": 1.0 }
+                { "file": "forward_roll.onnx", "name": "roulade",
+                  "kind": "episodic", "duration_s": 1.0 }
             ]
         }))
         .unwrap();
@@ -2380,25 +2388,25 @@ mod tests {
         let claimed: Vec<String> = manifest.skills().map(|p| p.skill_name()).collect();
         assert_eq!(
             claimed,
-            vec!["alpha_ground_pick".to_string(), "roulade".to_string()],
+            vec!["mislabelled_pick".to_string(), "roulade".to_string()],
             "sit_toggle is refused, the phase-encoded crouch is the ground pick; the mislabelled \
              one is a visible mistake, not a trap"
         );
     }
 
-    /// A name is the role and a file is the training run, so `ball_kick_left.onnx` answers to
-    /// `kick_left` while `roulade.onnx` needs no name at all.
+    /// A name is the role and a file is the artifact, so `forward_roll.onnx` can retain the
+    /// established `roulade` command while an unnamed community file uses its stem.
     #[test]
     fn a_set_policy_names_itself_after_its_file_unless_it_says_otherwise() {
         let manifest: super::SetManifest = serde_json::from_value(serde_json::json!({
             "policies": [
-                { "file": "roulade.onnx" },
-                { "file": "ball_kick_left.onnx", "name": "kick_left" }
+                { "file": "forward_roll.onnx", "name": "roulade" },
+                { "file": "polite_bow.onnx" }
             ]
         }))
         .unwrap();
         let names: Vec<String> = manifest.policies.iter().map(|p| p.skill_name()).collect();
-        assert_eq!(names, ["roulade", "kick_left"]);
+        assert_eq!(names, ["roulade", "polite_bow"]);
     }
 
     /// The manifest is the set's source of truth: one containing only a gait contributes no
@@ -2406,7 +2414,7 @@ mod tests {
     #[test]
     fn a_set_manifest_with_no_skills_contributes_none() {
         let manifest: super::SetManifest = serde_json::from_value(serde_json::json!({
-            "policies": [{ "file": "alpha_walking.onnx", "kind": "perpetual" }]
+            "policies": [{ "file": "walk.onnx", "kind": "perpetual" }]
         }))
         .unwrap();
         assert!(
@@ -2429,15 +2437,15 @@ mod tests {
         serde_json::from_value(serde_json::json!({
             "schema_version": 2,
             "policies": [
-                { "file": "alpha_walking.onnx", "kind": "perpetual" },
-                { "file": "alpha_stand.onnx",   "kind": "perpetual" },
+                { "file": "walk.onnx", "kind": "perpetual" },
+                { "file": "stand.onnx",   "kind": "perpetual" },
                 { "file": "roller.onnx",        "kind": "perpetual", "mode": "roller",
                   "action_scale": 0.8 },
-                { "file": "alpha_sitstand.onnx", "name": "sitstand", "kind": "scripted",
+                { "file": "sit_stand.onnx", "name": "sitstand", "kind": "scripted",
                   "command": { "encoding": "posture_flag", "slot": "twist.vx",
                                "sit": 1.0, "stand": 0.0, "idle": [0.0, 0.0, 0.0] },
                   "ramp_s": 2.5, "unwind_s": 1.5 },
-                { "file": "alpha_ground_pick.onnx", "name": "ground_pick", "kind": "episodic",
+                { "file": "ground_pick.onnx", "name": "ground_pick", "kind": "episodic",
                   "duration_s": 2.8,
                   "command": { "encoding": "phase", "slots": "twist.vx,twist.vy",
                                "period_s": 4.0, "end_phase": 0.7 } },
@@ -2445,11 +2453,12 @@ mod tests {
                   "duration_s": 3.5, "mode": "roller", "action_scale": 0.8,
                   "command": { "encoding": "phase", "slots": "twist.vx,twist.vy",
                                "period_s": 5.0, "end_phase": 0.7 } },
-                { "file": "roulade.onnx",         "kind": "episodic", "duration_s": 1.0,
+                { "file": "forward_roll.onnx", "name": "roulade",
+                  "kind": "episodic", "duration_s": 1.0,
                   "chain": true },
-                { "file": "ball_kick_left.onnx",  "name": "kick_left",  "kind": "episodic",
+                { "file": "kick_left.onnx",  "name": "kick_left",  "kind": "episodic",
                   "duration_s": 0.5 },
-                { "file": "ball_kick_right.onnx", "name": "kick_right", "kind": "episodic",
+                { "file": "kick_right.onnx", "name": "kick_right", "kind": "episodic",
                   "duration_s": 0.5 }
             ]
         }))
@@ -2516,7 +2525,7 @@ mod tests {
         assert_eq!(resolved.sitstand_rise_s, 1.5);
         assert_eq!(resolved.sitstand_ramp_s, 2.5);
         assert!(
-            resolved.sitstand.unwrap().ends_with("alpha_sitstand.onnx"),
+            resolved.sitstand.unwrap().ends_with("sit_stand.onnx"),
             "scripted is recorded, not turned into a skill"
         );
     }
@@ -2542,10 +2551,11 @@ mod tests {
     fn a_set_that_says_nothing_about_timing_leaves_the_prototypes_numbers() {
         let old: super::SetManifest = serde_json::from_value(serde_json::json!({
             "policies": [
-                { "file": "alpha_ground_pick.onnx", "kind": "scripted" },
+                { "file": "ground_pick.onnx", "kind": "scripted" },
                 { "file": "roller_crouch.onnx", "kind": "scripted" },
-                { "file": "alpha_sitstand.onnx", "kind": "perpetual" },
-                { "file": "roulade.onnx", "kind": "episodic", "duration_s": 1.0, "chain": true }
+                { "file": "sit_stand.onnx", "kind": "perpetual" },
+                { "file": "forward_roll.onnx", "name": "roulade",
+                  "kind": "episodic", "duration_s": 1.0, "chain": true }
             ]
         }))
         .unwrap();
@@ -2575,7 +2585,7 @@ mod tests {
     fn a_period_alone_makes_a_phase_entry() {
         let set: super::SetManifest = serde_json::from_value(serde_json::json!({
             "policies": [
-                { "file": "alpha_ground_pick.onnx", "kind": "episodic", "duration_s": 3.5,
+                { "file": "ground_pick.onnx", "kind": "episodic", "duration_s": 3.5,
                   "command": { "period_s": 5.0 } }
             ]
         }))
@@ -2998,7 +3008,7 @@ mod tests {
         params.set_slot(Slot::Walk, None);
         assert_eq!(
             params.resolved().walk,
-            std::path::Path::new(super::POLICY_DIR).join("velstand.onnx"),
+            std::path::Path::new(super::POLICY_DIR).join("walk_stand.onnx"),
             "reset must restore the default, not empty the slot"
         );
     }
@@ -3320,14 +3330,19 @@ mod tests {
         assert_eq!(media.bitrate_resolved(), 2_000_000);
     }
 
-    /// The shipped example must agree with the built-in defaults, or the file documents a
-    /// robot that does not exist — and an operator reading it would draw wrong conclusions
-    /// about what their board is actually doing.
+    /// The shipped config is the generic robot except for the three values bound to the pinned
+    /// Bruz policy family. Keeping that exception exact matters: fresh boards need the Bruz
+    /// training contract, while a daemon running another set still needs conservative generic
+    /// defaults.
     #[test]
-    fn the_shipped_example_matches_the_defaults() {
+    fn the_shipped_config_differs_only_for_the_bruz_policy_contract() {
         let shipped = include_str!("../../deploy/robotd.toml");
         let from_file: Params = toml::from_str(shipped).expect("deploy/robotd.toml must parse");
         let built_in = Params::default();
+        let mut deployed_policy = built_in.policy.clone();
+        deployed_policy.head_lowpass = Some(1.0);
+        deployed_policy.legs_lowpass = Some(1.0);
+        deployed_policy.nominal_voltage = 7.0;
 
         assert_eq!(from_file.bus.port, built_in.bus.port);
         assert_eq!(from_file.bus.fast_sync_read, built_in.bus.fast_sync_read);
@@ -3340,7 +3355,7 @@ mod tests {
             from_file.control.publish_velocity_and_load,
             built_in.control.publish_velocity_and_load
         );
-        assert_eq!(from_file.policy.resolved(), built_in.policy.resolved());
+        assert_eq!(from_file.policy.resolved(), deployed_policy.resolved());
         assert_eq!(from_file.safety.limp_fall, built_in.safety.limp_fall);
         assert_eq!(from_file.pickup, built_in.pickup);
         assert_eq!(
@@ -3372,12 +3387,11 @@ mod tests {
         );
     }
 
-    /// The resolved walk-mode defaults are the prototype's **current alpha configuration**
-    /// — the values `microduck_runtime` ships as built-in defaults, which its installer
-    /// deliberately passes no flags to override. Changing any of these silently changes how
-    /// the robot moves relative to the thing this daemon replaces.
+    /// Built-in policy tuning stays compatible with the generic Pollen policy family. The Bruz
+    /// deployment writes its different contract explicitly instead of changing what an empty
+    /// config means for any policy already installed on a board.
     #[test]
-    fn walk_mode_resolves_to_the_prototype_alpha_config() {
+    fn walk_mode_keeps_the_generic_policy_tuning_defaults() {
         let p = Params::default()
             .policy
             .resolved_with(Some(&representative_set()));
@@ -3386,16 +3400,8 @@ mod tests {
         assert_eq!(p.standing_action_scale, 1.0);
         assert_eq!(p.standing_gain_ratio, 0.8, "--standing-kp-ratio");
         assert_eq!(p.gain, 200);
-        assert_eq!(
-            p.head_lowpass,
-            Some(0.5),
-            "trained with the filter ON at 0.5"
-        );
-        assert_eq!(
-            p.legs_lowpass,
-            Some(0.7),
-            "trained with the filter ON at 0.7"
-        );
+        assert_eq!(p.head_lowpass, Some(0.5));
+        assert_eq!(p.legs_lowpass, Some(0.7));
         assert_eq!(p.ground_pick_period, 4.0);
         assert_eq!(p.ground_pick_action_scale, 1.0);
         assert_eq!(p.ground_pick_gain_ratio, 1.0);
@@ -3423,19 +3429,16 @@ mod tests {
                 .and_then(|p| p.file_name())
                 .map(|n| n.to_string_lossy().into_owned())
         };
-        assert_eq!(p.walk, PathBuf::from(POLICY_DIR).join("velstand.onnx"));
+        assert_eq!(p.walk, PathBuf::from(POLICY_DIR).join("walk_stand.onnx"));
         assert!(
             p.stand.is_none(),
-            "velstand stands on its own; no standing network by default"
+            "walk_stand stands on its own; no standing network by default"
         );
-        assert_eq!(name(&p.sitstand).as_deref(), Some("alpha_sitstand.onnx"));
-        assert_eq!(
-            name(&p.ground_pick).as_deref(),
-            Some("alpha_ground_pick.onnx")
-        );
-        assert_eq!(name(&p.kick_left).as_deref(), Some("ball_kick_left.onnx"));
-        assert_eq!(name(&p.kick_right).as_deref(), Some("ball_kick_right.onnx"));
-        assert_eq!(name(&p.roulade).as_deref(), Some("roulade.onnx"));
+        assert_eq!(name(&p.sitstand).as_deref(), Some("sit_stand.onnx"));
+        assert_eq!(name(&p.ground_pick).as_deref(), Some("ground_pick.onnx"));
+        assert_eq!(name(&p.kick_left).as_deref(), Some("kick_left.onnx"));
+        assert_eq!(name(&p.kick_right).as_deref(), Some("kick_right.onnx"));
+        assert_eq!(name(&p.roulade).as_deref(), Some("forward_roll.onnx"));
     }
 
     /// Command smoothing matches the prototype's `--cmd-alpha` / `--head-alpha`.
@@ -3446,12 +3449,9 @@ mod tests {
         assert_eq!(c.head_alpha, 0.2);
     }
 
-    /// One line — `mode = "roller"` — must reproduce the current set's roller preset, based on
-    /// the prototype's alpha defaults: the roller policy and its tuning (kp 200, scale 0.8, the
-    /// crouch on the ground-pick trigger at its manifest's trained 5 s / 0.8), and
-    /// everything else exactly as walking mode has it — sit/stand, kicks, roulade, the
-    /// trained low-pass. Only the standing network stays out (the prototype loads it and
-    /// then skips every standing transition in roller mode, so it never runs).
+    /// One line — `mode = "roller"` — reproduces the current set's roller preset: the roller
+    /// policy and its tuning, plus the shared sit/stand, kicks and roll. Only the standing network
+    /// stays out because the roller controller never runs it.
     #[test]
     fn roller_mode_resolves_to_the_current_set_preset() {
         let dir = tempfile::tempdir().unwrap();
@@ -3468,25 +3468,12 @@ mod tests {
             "the prototype never runs standing in roller mode"
         );
         assert!(
-            p.sitstand
-                .as_ref()
-                .unwrap()
-                .ends_with("alpha_sitstand.onnx"),
+            p.sitstand.as_ref().unwrap().ends_with("sit_stand.onnx"),
             "the rebased roller line keeps the sit"
         );
-        assert!(
-            p.kick_left
-                .as_ref()
-                .unwrap()
-                .ends_with("ball_kick_left.onnx")
-        );
-        assert!(
-            p.kick_right
-                .as_ref()
-                .unwrap()
-                .ends_with("ball_kick_right.onnx")
-        );
-        assert!(p.roulade.as_ref().unwrap().ends_with("roulade.onnx"));
+        assert!(p.kick_left.as_ref().unwrap().ends_with("kick_left.onnx"));
+        assert!(p.kick_right.as_ref().unwrap().ends_with("kick_right.onnx"));
+        assert!(p.roulade.as_ref().unwrap().ends_with("forward_roll.onnx"));
         assert!(
             p.ground_pick
                 .as_ref()
@@ -3496,18 +3483,13 @@ mod tests {
         assert_eq!(p.action_scale, 0.8);
         assert_eq!(p.ground_pick_period, 5.0);
         assert_eq!(p.ground_pick_action_scale, 0.8);
-        assert_eq!(
-            p.head_lowpass,
-            Some(0.5),
-            "the rebased roller line keeps the trained filters"
-        );
+        assert_eq!(p.head_lowpass, Some(0.5));
         assert_eq!(p.legs_lowpass, Some(0.7));
         assert_eq!(p.gain, 200);
     }
 
     /// `"none"` disables an optional slot outright — the prototype's `--sitstand-policy None`
-    /// convention — and `1.0` turns a low-pass into a pass-through, which is how its preset
-    /// spells "off".
+    /// convention — and `1.0` turns a low-pass into a pass-through.
     #[test]
     fn none_and_unity_are_the_off_switches() {
         let dir = tempfile::tempdir().unwrap();

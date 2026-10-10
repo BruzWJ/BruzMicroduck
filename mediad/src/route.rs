@@ -478,7 +478,7 @@ mod tests {
             }),
             proto::Call::RobotLoadPolicy(proto::LoadPolicyParams {
                 slot: Some("walk".to_owned()),
-                path: Some("/opt/robot/policies/current/alpha_walking.onnx".to_owned()),
+                path: Some("/opt/robot/policies/current/walk.onnx".to_owned()),
             }),
             proto::Call::RobotReloadPolicies,
             proto::Call::PadBindings,

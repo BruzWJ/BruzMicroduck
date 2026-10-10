@@ -47,8 +47,8 @@ POLICY_ROOT="${1:-/opt/robot/policies}"
 # board past it — `robotctl policy update`, which needs no daemon release — is left where it is.
 # Bumping this ships inside a release, so bump it when the daemon's defaults need the new set
 # (a slot defaulting to a file only the new set carries), and tag the set first.
-POLICY_REPO="${POLICY_REPO:-pollen-robotics/microduck-policies}"
-POLICY_VERSION="${POLICY_VERSION:-v7}"
+POLICY_REPO="${POLICY_REPO:-BWJ2310/bruzmicroduck-xc330-custom-weight-policies}"
+POLICY_VERSION="${POLICY_VERSION:-v1}"
 POLICY_BASE_URL="${POLICY_BASE_URL:-https://huggingface.co/${POLICY_REPO}/resolve/${POLICY_VERSION}}"
 
 # The set says what is in it. `manifest.json` lists every policy, and that list is what gets

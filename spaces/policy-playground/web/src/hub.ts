@@ -16,8 +16,8 @@
  */
 
 const HUB_API = "https://huggingface.co/api/models";
-const OFFICIAL_ORG = "pollen-robotics";
-const SET_REPO = "pollen-robotics/microduck-policies";
+const OFFICIAL_ORG = "BWJ2310";
+const SET_REPO = "BWJ2310/bruzmicroduck-xc330-custom-weight-policies";
 const SEARCH = "microduck";
 
 /** Fields an entry in a set inherits: the claims about the robot, never the prose about the set. */
@@ -68,7 +68,7 @@ export function notATrick(policy: Policy): string | null {
 /**
  * Whether this is something to show off, or part of how the duck gets around.
  *
- * **A trick has an ending.** `roulade` takes a second and finishes; `alpha_walking` walks until
+ * **A trick has an ending.** `roulade` takes a second and finishes; `walk` walks until
  * something tells it not to, and it declares no way to be told — no `command.idle`, no `unwind_s`.
  * Held for three seconds it runs and hands straight back to whatever the duck was walking with,
  * which is not wrong and is not a trick either. The Python version made this a caution beside a

@@ -5558,7 +5558,7 @@ mod tests {
             skills: vec![
                 proto::SkillParams {
                     name: "roulade".to_owned(),
-                    path: Some(format!("{}/roulade.onnx", robotd_params::POLICY_DIR)),
+                    path: Some(format!("{}/forward_roll.onnx", robotd_params::POLICY_DIR)),
                     duration: Some(1.0),
                     chain: Some(true),
                     ..Default::default()
@@ -5587,7 +5587,7 @@ mod tests {
         assert!(rendered.contains("* 1 from config"), "{rendered}");
         // An official policy prints its file, not seven copies of one directory — and a
         // community one prints the repo it came from rather than the library root.
-        assert!(rendered.contains("roulade.onnx"), "{rendered}");
+        assert!(rendered.contains("forward_roll.onnx"), "{rendered}");
         assert!(
             !rendered.contains(robotd_params::POLICY_DIR),
             "the shared prefix is dropped: {rendered}"
@@ -5628,13 +5628,13 @@ mod tests {
             skills: vec![
                 proto::SkillParams {
                     name: "kick_left".to_owned(),
-                    path: Some(format!("{}/ball_kick_left.onnx", robotd_params::POLICY_DIR)),
+                    path: Some(format!("{}/kick_left.onnx", robotd_params::POLICY_DIR)),
                     duration: Some(0.5),
                     ..Default::default()
                 },
                 proto::SkillParams {
                     name: "roulade".to_owned(),
-                    path: Some(format!("{}/roulade.onnx", robotd_params::POLICY_DIR)),
+                    path: Some(format!("{}/forward_roll.onnx", robotd_params::POLICY_DIR)),
                     duration: Some(1.0),
                     chain: Some(true),
                     ..Default::default()
@@ -6948,7 +6948,7 @@ mod tests {
         let out = component_verdict(&component(
             Some(false),
             false,
-            Some("policy unavailable: reading /opt/robot/policies/current/velstand.onnx"),
+            Some("policy unavailable: reading /opt/robot/policies/current/walk_stand.onnx"),
         ));
 
         assert!(out.starts_with("UNHEALTHY: policy unavailable"), "{out}");

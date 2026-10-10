@@ -206,16 +206,16 @@ build_daemons() {
 # A `policies/` beside the repo wins if it has one: that is somebody's own set, and fetching over
 # it would silently swap the gait they are working on.
 policies() {
-    if [ -f "$REPO/policies/alpha_stand.onnx" ]; then
+    if [ -f "$REPO/policies/stand.onnx" ]; then
         POLICIES="$REPO/policies"
         return 0
     fi
     POLICIES="$STATE/policies/current"
-    [ -f "$POLICIES/alpha_stand.onnx" ] || {
+    [ -f "$POLICIES/stand.onnx" ] || {
         say "no policy set here — fetching the official one"
         sh "$REPO/scripts/seed-policies.sh" "$STATE/policies" || true
     }
-    [ -f "$POLICIES/alpha_stand.onnx" ] ||
+    [ -f "$POLICIES/stand.onnx" ] ||
         die "no policy set in $STATE/policies. It needs the network once, or your own .onnx files in $REPO/policies."
 }
 
@@ -239,13 +239,13 @@ up() {
     cat > "$STATE/robotd.toml" <<TOML
 [policy]
 enabled = true
-walk = "$POLICIES/alpha_walking.onnx"
-stand = "$POLICIES/alpha_stand.onnx"
-sitstand = "$POLICIES/alpha_sitstand.onnx"
-ground_pick = "$POLICIES/alpha_ground_pick.onnx"
-kick_left = "$POLICIES/ball_kick_left.onnx"
-kick_right = "$POLICIES/ball_kick_right.onnx"
-roulade = "$POLICIES/roulade.onnx"
+walk = "$POLICIES/walk.onnx"
+stand = "$POLICIES/stand.onnx"
+sitstand = "$POLICIES/sit_stand.onnx"
+ground_pick = "$POLICIES/ground_pick.onnx"
+kick_left = "$POLICIES/kick_left.onnx"
+kick_right = "$POLICIES/kick_right.onnx"
+roulade = "$POLICIES/forward_roll.onnx"
 
 # Singing is opt-in, and a room full of ducks that will not sing together is a poor demonstration
 # of a room full of ducks. On a real robot this is a decision someone makes; here it is the point.

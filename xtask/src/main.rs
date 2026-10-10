@@ -765,7 +765,7 @@ mod tests {
         let link = std::fs::read_link(root.join("current"))
             .ok()
             .map(|p| p.display().to_string());
-        let content = std::fs::read_to_string(root.join("current/velstand.onnx")).ok();
+        let content = std::fs::read_to_string(root.join("current/walk_stand.onnx")).ok();
         (link, content)
     }
 
@@ -1020,14 +1020,14 @@ mod tests {
         let manifest = serde_json::json!({
             "schema_version": 1,
             "policies": [
-                { "file": "alpha_walking.onnx", "kind": "perpetual" },
-                { "file": "ball_kick_left.onnx", "name": "kick_left",
+                { "file": "walk.onnx", "kind": "perpetual" },
+                { "file": "kick_left.onnx", "name": "kick_left",
                   "kind": "episodic", "duration_s": 0.5 },
                 // A command block: nested keys the pattern must neither match nor choke on.
-                { "file": "alpha_ground_pick.onnx", "name": "ground_pick", "kind": "episodic",
+                { "file": "ground_pick.onnx", "name": "ground_pick", "kind": "episodic",
                   "duration_s": 2.8, "command": { "encoding": "phase", "period_s": 4.0,
                   "end_phase": 0.7, "slots": "twist.vx,twist.vy" } },
-                { "file": "roulade.onnx" }
+                { "file": "polite_bow.onnx" }
             ]
         });
         let tmp = tempfile::tempdir().unwrap();
@@ -1061,10 +1061,10 @@ mod tests {
         assert_eq!(
             files,
             vec![
-                "alpha_walking.onnx".to_string(),
-                "ball_kick_left.onnx".to_string(),
-                "alpha_ground_pick.onnx".to_string(),
-                "roulade.onnx".to_string()
+                "walk.onnx".to_string(),
+                "kick_left.onnx".to_string(),
+                "ground_pick.onnx".to_string(),
+                "polite_bow.onnx".to_string()
             ],
             "the pattern and the manifest have drifted"
         );
@@ -1081,7 +1081,7 @@ mod tests {
 
         let (link, content) = seed(&root, "v1", Some(&hub));
         assert_eq!(link.as_deref(), Some("releases/seed-v1"));
-        assert_eq!(content.as_deref(), Some("hub-velstand.onnx"));
+        assert_eq!(content.as_deref(), Some("hub-walk_stand.onnx"));
 
         let mut installed: Vec<String> = std::fs::read_dir(root.join("releases/seed-v1"))
             .unwrap()
@@ -1119,7 +1119,7 @@ mod tests {
             serde_json::to_string_pretty(&serde_json::json!({
                 "schema_version": 1,
                 "policies": [
-                    { "file": "velstand.onnx", "kind": "perpetual" },
+                    { "file": "walk_stand.onnx", "kind": "perpetual" },
                     { "file": escape },
                 ]
             }))
@@ -1131,7 +1131,7 @@ mod tests {
 
         let (link, content) = seed(&root, "v1", Some(&hub));
         assert_eq!(link.as_deref(), Some("releases/seed-v1"));
-        assert_eq!(content.as_deref(), Some("hub-velstand.onnx"));
+        assert_eq!(content.as_deref(), Some("hub-walk_stand.onnx"));
         assert!(
             !root.join("escaped.onnx").exists() && !tmp.path().join("escaped.onnx").exists(),
             "nothing was written outside the set"
@@ -1163,7 +1163,7 @@ mod tests {
         let root = tmp.path().join("policies");
         let seeded = root.join("releases/seed-v1");
         std::fs::create_dir_all(&seeded).unwrap();
-        std::fs::write(seeded.join("velstand.onnx"), "unclaimed").unwrap();
+        std::fs::write(seeded.join("walk_stand.onnx"), "unclaimed").unwrap();
         std::os::unix::fs::symlink("releases/seed-v1", root.join("current")).unwrap();
 
         let hub = tmp.path().join("hub-v5");
@@ -1226,11 +1226,11 @@ mod tests {
         let (link, content) = seed(&root, "v1", Some(&v1));
 
         assert_eq!(link.as_deref(), Some("releases/seed-v2"));
-        assert_eq!(content.as_deref(), Some("chosen-velstand.onnx"));
+        assert_eq!(content.as_deref(), Some("chosen-walk_stand.onnx"));
     }
 
     /// **A set below the pin is moved up to it.** The daemon's slot defaults name files, and a
-    /// default that names a file only the newer set carries — v5's `velstand.onnx` — would leave a
+    /// default that names a file only the newer set carries — v5's `walk_stand.onnx` — would leave a
     /// board that updated the daemon but not its set unable to load its gait, unhealthy, and
     /// rolled back. So the pin is the minimum the daemon runs with, and the hook enforces it.
     #[test]
@@ -1248,11 +1248,11 @@ mod tests {
         let (link, content) = seed(&root, "v5", Some(&v5));
 
         assert_eq!(link.as_deref(), Some("releases/seed-v5"));
-        assert_eq!(content.as_deref(), Some("pinned-velstand.onnx"));
+        assert_eq!(content.as_deref(), Some("pinned-walk_stand.onnx"));
         let record = std::fs::read_to_string(root.join("current/.source")).unwrap();
         assert!(record.contains("version=v5"), "{record}");
         assert!(
-            root.join("releases/seed-v4/velstand.onnx").exists(),
+            root.join("releases/seed-v4/walk_stand.onnx").exists(),
             "the set it came from is kept, the way the updater keeps a predecessor"
         );
     }
@@ -1273,7 +1273,7 @@ mod tests {
         let (link, content) = seed(&root, "v9", Some(&v9));
 
         assert_eq!(link.as_deref(), Some("releases/seed-v10"));
-        assert_eq!(content.as_deref(), Some("ten-velstand.onnx"));
+        assert_eq!(content.as_deref(), Some("ten-walk_stand.onnx"));
     }
 
     /// Only *our* sets move. One whose record names another repo is somebody's choice, whatever
@@ -1283,7 +1283,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("policies");
         std::fs::create_dir_all(root.join("releases/seed-v1")).unwrap();
-        std::fs::write(root.join("releases/seed-v1/velstand.onnx"), "theirs").unwrap();
+        std::fs::write(root.join("releases/seed-v1/walk_stand.onnx"), "theirs").unwrap();
         std::fs::write(
             root.join("releases/seed-v1/.source"),
             "repo=someone/microduck-policies\nversion=v1\nfetched=2026-01-01T00:00:00Z\n",
@@ -1314,7 +1314,7 @@ mod tests {
 
         let (link, content) = seed(&root, "v5", None);
         assert_eq!(link.as_deref(), Some("releases/seed-v4"));
-        assert_eq!(content.as_deref(), Some("old-velstand.onnx"));
+        assert_eq!(content.as_deref(), Some("old-walk_stand.onnx"));
     }
 
     /// A policy revision is defined by its manifest. Model files beside a missing manifest are
@@ -1361,7 +1361,7 @@ mod tests {
         fake_hub(&hub, "hub");
         std::fs::create_dir_all(root.join("releases/from-a-tool")).unwrap();
         std::fs::write(
-            root.join("releases/from-a-tool/velstand.onnx"),
+            root.join("releases/from-a-tool/walk_stand.onnx"),
             "installed-by-something-else",
         )
         .unwrap();
@@ -1398,7 +1398,7 @@ mod tests {
         );
         assert_eq!(
             content.as_deref(),
-            Some("one-velstand.onnx"),
+            Some("one-walk_stand.onnx"),
             "and the board keeps something that works"
         );
     }
