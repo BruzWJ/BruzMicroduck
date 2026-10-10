@@ -3,11 +3,11 @@
 What a `manifest.json` beside a microduck `.onnx` says, and what the robot does with each field.
 One vocabulary for two shapes: a **single-policy repo** (`<user>/microduck-<name>` on the Hub,
 one `policy.onnx`, the fields at the top level) and the **official set**
-(`pollen-robotics/microduck-policies`, ten files, the same fields once per entry under
+(`BWJ2310/bruzmicroduck-xc330-custom-weight-policies`, ten files, the same fields once per entry under
 `policies`). One reader understands both, and asking a publisher for something is "add a field",
 never "adopt our format".
 
-`uv run publish` in `pollen-robotics/microduck_rl` writes a conforming single-policy repo from a
+`uv run publish` in `BruzWJ/BruzMicroduck_RL` writes a conforming single-policy repo from a
 checkpoint or an ONNX file. `robotctl policy load <slot> <repo>` and `robotctl policy add <name>
 <repo>` read it. `docs/design/policy-channel-design.md` §9 has the reasoning; this file is the
 contract.
@@ -46,7 +46,7 @@ a policy only on a claim that is present and wrong.
 | `obs_len` | int | fetch | `61`; refused if it disagrees with the robot |
 | `action_len` | int | fetch | `14`; refused if it disagrees |
 | `robot.model` | str | fetch | `microduck`; refused if another robot |
-| `robot.hw_rev`, `robot.servos`, `robot.control_hz` | | display | `1`, `xl330`, `50` |
+| `robot.hw_rev`, `robot.servos`, `robot.control_hz` | | display | `1`, `xc330-t181`, `50` |
 | `name` | str | skills | what a client asks for; defaults to the file's stem |
 | `description` | str | display | one line, untrusted — what `policy search` shows under each hit, and `policy fetch` on the way in |
 | `kind` | str | skills, slots | see above |
@@ -79,7 +79,7 @@ and offline rehearsal.
   "model_api": 1,
   "obs_len": 61,
   "action_len": 14,
-  "robot": { "model": "microduck", "hw_rev": 1, "servos": "xl330", "control_hz": 50 },
+  "robot": { "model": "microduck", "hw_rev": 1, "servos": "xc330-t181", "control_hz": 50 },
   "name": "polite-bow",
   "kind": "episodic",
   "duration_s": 4.0,
@@ -88,9 +88,9 @@ and offline rehearsal.
   "description": "Bows from a two-foot stand and comes back up.",
   "command": { "encoding": "constant", "idle": [0, 0, 0],
                "twist": "unused (zeros)", "head": "unused (zeros)", "body": "unused (zeros)" },
-  "training": { "task_id": "Mjlab-PoliteBow-Flat-MicroDuck", "repo": "pollen-robotics/microduck_rl",
+  "training": { "task_id": "Mjlab-PoliteBow-Flat-MicroDuck", "repo": "BruzWJ/BruzMicroduck_RL",
                 "commit": "0bf9897", "branch": "bow", "dirty": false,
-                "run": "pollen-robotics/mjlab_microduck/abc123", "checkpoint": 3000,
+                "run": "BWJ2310/mjlab_microduck/abc123", "checkpoint": 3000,
                 "exported": "2026-09-02T14:05:00Z" }
 }
 ```
@@ -105,9 +105,11 @@ drives.
 ## The official set
 
 The same fields, once per entry, under `policies`, plus `file`. The live copy is
-`https://huggingface.co/pollen-robotics/microduck-policies/blob/main/manifest.json`; the set's
+`https://huggingface.co/BWJ2310/bruzmicroduck-xc330-custom-weight-policies/blob/main/manifest.json`; the set's
 `phase` entries set each mode's ground-pick timing and its `scripted` entry the sit↔stand's,
 which is how a retrained pick with a longer cycle is a tag rather than a daemon release.
+Artifact names describe motions. Where the established command differs, the manifest says so
+explicitly: `forward_roll.onnx` has `name: "roulade"`, so clients keep invoking `roulade`.
 
 Every `file` is a plain file name — no directory, no leading dot. A set whose manifest names one
 with a path in it has that entry skipped, by the seeder and by `robotctl policy update` both.

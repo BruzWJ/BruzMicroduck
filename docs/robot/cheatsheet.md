@@ -193,8 +193,8 @@ Two tables: the seven slots, then the skills — what runs by default, and what 
 
 ```text
    SKILL        RUNS FOR  POLICY
-   kick_left       0.5 s  ball_kick_left.onnx
-   roulade           1 s  roulade.onnx
+   kick_left       0.5 s  kick_left.onnx
+   roulade         1.5 s  forward_roll.onnx
  * polite-bow        4 s  fffiloni/microduck-polite-bow-b1d864/main/policy.onnx
    ground_pick         —  driven by the robot itself
    sit_toggle          —  driven by the robot itself
@@ -403,31 +403,29 @@ updates and official-set updates; those operations do not remove the line that p
 cannot be empty. Some policies need that: one that does its own standing wants the standing
 network out of the way, or the robot hands itself to that whenever the command is zero.
 
-#### Publishing a policy for every robot
+#### Publishing an additional policy
 
-A policy in the official set becomes available to every robot, and adding one is four steps with
-no daemon release:
+Keep `BWJ2310/bruzmicroduck-xc330-custom-weight-policies` as the exact ten-policy official set;
+do not add an eleventh file to it. Publish each additional policy as its own community repository
+from `BruzMicroduck_RL`, for example:
 
-1. Upload the `.onnx` to `pollen-robotics/microduck-policies`.
-2. Add an entry to its `manifest.json`:
-   ```json
-   { "file": "polite-bow.onnx", "kind": "episodic", "duration_s": 4.0 }
-   ```
-   The set's manifest is `schema_version: 2`; a plain one-shot needs no more than those three.
-3. Tag it with the next numeric version — for example
-   `hf repos tag create pollen-robotics/microduck-policies v8` after `v7`.
-4. On each robot that should take it now: `sudo robotctl policy update`. A later daemon release
-   may raise `[workspace.metadata.policies]` when fresh or behind boards must seed at least this tag.
+```bash
+uv run publish \
+  --onnx polite-bow.onnx \
+  --repo <user>/microduck-polite-bow \
+  --kind episodic \
+  --duration-s 4.0
+```
 
-That entry is what a one-shot needs and nothing more: **`episodic` with a `duration_s`, on the
-all-zero command it was trained against, becomes a skill the robot answers to by name** — ready
-for `robot do` and a button, with nothing else edited. A **`perpetual`** one is a gait and needs
-a slot pointed at it instead.
+Install that policy on each robot that should have it:
 
-A policy the daemon has to *drive* — writing a phase over time, or flipping a posture flag —
-declares that under `command.encoding`, and its numbers become that arm's timing rather than a
-new skill. The ground pick and the sit↔stand are the two, and getting one of those entries wrong
-is the one mistake here worth being careful about.
+```bash
+sudo robotctl policy add polite-bow <user>/microduck-polite-bow
+```
+
+An episodic policy with a duration becomes a named skill for `robot do` and button bindings. A
+perpetual gait, or a policy whose command encoding drives phase or posture, instead replaces a
+daemon-owned slot with `sudo robotctl policy load <slot> <repo>`.
 
 The manifest in full, every field, and what each one changes on the robot:
 [`../policy-manifest.md`](../policy-manifest.md).

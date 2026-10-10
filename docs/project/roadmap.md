@@ -253,7 +253,7 @@ someone can try one they did not train and get back.
 
 **Designed**, in [`policy-channel-design.md`](../design/policy-channel-design.md), which owns
 the decisions this section used to leave open. The short version: a slot is filled from one of
-three origins — official (`pollen-robotics/*`, the reset target), community (any other
+three origins — official (`BWJ2310/*`, the reset target), community (any other
 Hub repo, reported but never auto-applied) or local (a path on the board); `policy
 load` writes the config key and `policy reset` removes it, so persistence and undo are the
 mechanism that already exists; and the official policies publish and version as one Hub set
@@ -270,7 +270,7 @@ home-pose gates.
    touches no Hub and no publishing decisions. `API_VERSION` 17 → 18.
 2. **Official policies leave the artifact.** *Done.* `robotd` reads
    `/opt/robot/policies/current`, which `scripts/seed-policies.sh` fills by downloading the
-   pinned set from `pollen-robotics/microduck-policies` — the arrangement `setup-board.sh`
+   pinned set from `BWJ2310/bruzmicroduck-xc330-custom-weight-policies` — the arrangement `setup-board.sh`
    already uses for ONNX Runtime. `policies/` and its three `--include` lists are gone. Publishing
    and tagging the Hub set makes a gait independently installable; bumping
    `[workspace.metadata.policies]` in a later daemon
