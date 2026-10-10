@@ -94,6 +94,15 @@ jobs:
                   stream.write(f"{name.upper()}={value}\n")
           PY
 
+      - name: Verify the pinned policy set is publicly installable
+        shell: bash
+        run: |
+          set -euo pipefail
+          policy_root="$RUNNER_TEMP/policy-preflight"
+          scripts/seed-policies.sh "$policy_root"
+          test -L "$policy_root/current"
+          test -s "$policy_root/current/manifest.json"
+
       - name: Compare selected source with the latest release
         shell: bash
         env:

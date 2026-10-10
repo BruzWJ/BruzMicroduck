@@ -423,6 +423,21 @@ mod tests {
         assert!(entry.contains("\"make_latest\": \"true\""));
         assert!(!entry.contains("secrets."));
         assert!(!entry.contains("cargo run -p xtask -- sign"));
+        let policy_preflight = entry
+            .split("- name: Verify the pinned policy set is publicly installable")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("- name: Compare selected source with the latest release")
+                    .next()
+            })
+            .expect("release workflow must verify its public policy dependency before drafting");
+        assert!(policy_preflight.contains("scripts/seed-policies.sh"));
+        assert!(
+            !policy_preflight.contains("HF_TOKEN")
+                && !policy_preflight.contains("Authorization")
+                && !policy_preflight.contains("--header"),
+            "the stable policy dependency must be tested through an anonymous Hub download"
+        );
         let latest_release_check = entry
             .split("- name: Compare selected source with the latest release")
             .nth(1)
