@@ -226,12 +226,12 @@ pub const REGISTRY: &[Entry] = &[
     entry(
         "policy.head_lowpass",
         Kind::OptionalFloat,
-        "Low-pass on head targets; must match training (0.5)",
+        "Low-pass on head targets; unset resolves to 0.5",
     ),
     entry(
         "policy.legs_lowpass",
         Kind::OptionalFloat,
-        "Low-pass on leg targets; walking default 0.7",
+        "Low-pass on leg targets; unset resolves to 0.7",
     ),
     entry(
         "policy.ground_pick_period",

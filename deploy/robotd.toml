@@ -125,13 +125,10 @@ enabled = true
 
 # Drive mode: "walk" (legs, the default) or "roller". The mode changes which policies load
 # AND the tuning defaults below — every value left unset resolves per mode, so switching a
-# robot to the roller is this one line plus `systemctl restart robotd`. The roller preset
-# is the prototype launcher's, rebased on the alpha defaults as its installer now is:
-# roller.onnx as the locomotion policy, the crouch on the ground-pick trigger (timed by the
-# installed set's manifest, action scale 0.8) — and everything else as walking has it:
-# sit/stand, kicks, roulade, the
-# trained low-pass. Only the standing network stays out: the prototype loads it in roller
-# mode and then never runs it, standing transitions being skipped on wheels.
+# robot to the roller is this one line plus `systemctl restart robotd`. The roller preset uses
+# roller.onnx as locomotion and the manifest's roller crouch on the ground-pick trigger (action
+# scale 0.8), keeps sit/stand, kicks and rolls, and uses the unfiltered targets from Bruz training.
+# Only the standing network stays out: the controller never runs it on wheels.
 mode = "walk"
 
 # Policy files. Unset means the mode's default in /opt/robot/policies/current, which is
@@ -145,27 +142,27 @@ mode = "walk"
 # swaps the network live; `robotctl policy reset [slot]` removes it again. The literal "none"
 # disables an optional slot outright.
 #
-# All must be 61-input, 14-output: every alpha policy is obs[1,61] -> actions[1,14], and
+# All must be 61-input, 14-output: every official policy is obs[1,61] -> actions[1,14], and
 # robotd checks that at load rather than discovering it mid-stride. (microduck_runtime also
 # ships a 51-D family — legacy 3-value command — which robotd refuses at load with
 # "observation width is 51, expected 61".)
 #
 # Walk-mode defaults, spelled out, all under /opt/robot/policies/current/:
-# walk        = "velstand.onnx"          walks on a twist, stands still at zero command
-# stand       = "none"                   velstand stands on its own; "alpha_stand.onnx" is
+# walk        = "walk_stand.onnx"          walks on a twist, stands still at zero command
+# stand       = "none"                   walk_stand stands on its own; "stand.onnx" is
 #                                        the old standing + body-pose network, still in the set
-# sitstand    = "alpha_sitstand.onnx"    sit <-> stand, posture flag
-# ground_pick = "alpha_ground_pick.onnx" A-button pick
-# kick_left   = "ball_kick_left.onnx"
-# kick_right  = "ball_kick_right.onnx"
-# roulade     = "roulade.onnx"           X-button forward roll
+# sitstand    = "sit_stand.onnx"    sit <-> stand, posture flag
+# ground_pick = "ground_pick.onnx" A-button pick
+# kick_left   = "kick_left.onnx"
+# kick_right  = "kick_right.onnx"
+# roulade     = "forward_roll.onnx"      X-button forward roll
 
 # Requires ONNX Runtime on the board. It is dlopened, not linked, so a missing library is
 # a startup failure rather than a build one — robotd reports it through robot.health and
 # holds its pose. scripts/install.sh installs it; ORT_DYLIB_PATH overrides where to look.
 
 # Scales raw policy output into a joint offset. Unset resolves per mode: 0.9 walking (the
-# prototype's current alpha default), 0.8 roller.
+# prototype's current walking default), 0.8 roller.
 # action_scale = 0.9
 
 # The standing policy is trained to be applied whole.
@@ -176,19 +173,20 @@ mode = "walk"
 # gain = 200
 
 # First-order low-pass on the head and leg joint targets, as a blend factor in (0, 1].
-# 1.0 is pass-through (off). Unset resolves per mode: 0.5 / 0.7 walking — the values the
-# alpha policies are TRAINED with (mjlab ACTION_LOW_PASS_{HEAD,LEG}_ALPHA); they must match
-# training or transfer degrades. Both modes: the rebased roller preset keeps them too.
-# head_lowpass = 0.5
-# legs_lowpass = 0.7
+# 1.0 is pass-through (off). The generic daemon defaults are 0.5 / 0.7 for the Pollen policy
+# family. This deployed config is tied to the Bruz XC330 policy channel above, whose models were
+# trained without runtime target filtering, so the family contract is explicit and survives a
+# daemon rollback.
+head_lowpass = 1.0
+legs_lowpass = 1.0
 
 # The ground pick: one cycle length in seconds, its action scale, and a gain multiplier while
 # it runs. Unset period/scale come from the installed set's manifest — the phase-encoded entry
 # tagged with this mode (4.0 / 1.0 for the walking pick, 5.0 / 0.8 for the roller crouch, as
 # they are trained) — or, when those fields are omitted, from the prototype's 4.0 / 1.0 walking,
-# 3.0 / 0.8 roller. The move hands back at the manifest's `end_phase`
-# (70% of the cycle); there is no key for that. The sitstand's rise and settle times come from
-# the set the same way.
+# 3.0 / 0.8 roller. The move hands back at the manifest's `end_phase`: Bruz ground-pick runs its
+# complete cycle through 1.0, while roller-crouch hands back at 0.7. There is no config key for
+# that. The sitstand's rise and settle times come from the set the same way.
 # ground_pick_period = 4.0
 # ground_pick_action_scale = 1.0
 # ground_pick_gain_ratio = 1.0
@@ -197,7 +195,9 @@ mode = "walk"
 # EMA, clamped 6.0..9.5 V). The servos' effective kP tracks their supply, so this holds the
 # robot's response steady as the pack sags. On by default.
 # voltage_adapt = true
-# nominal_voltage = 7.4
+# The Bruz XC330 family was identified and evaluated at the 7 V servo supply used by this build.
+# Explicit for the same rollback reason as its filter contract above; the generic default is 7.4.
+nominal_voltage = 7.0
 
 [safety]
 # The fall verdict: is the robot down? On projected gravity in the trunk frame — upright
@@ -237,8 +237,8 @@ mode = "walk"
 #
 # The only thing the daemon does about a fall. With it off, a fall changes nothing: the
 # policy keeps driving and the humans stay in charge, which is the prototype's behaviour.
-# ON by default. With the default configuration (velstand as `walk`, `stand` unset) there is
-# no standing network, and the hand-back is to velstand at zero command, which stands still.
+# ON by default. With the default configuration (`walk_stand.onnx` as `walk`, `stand` unset) there
+# is no standing network, and the hand-back is to the gait at zero command, which stands still.
 # limp_fall = true
 
 # When a fall counts as started. This is the whole feature, and both ways of getting it

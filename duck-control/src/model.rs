@@ -1,7 +1,7 @@
 //! The robot, as data.
 //!
-//! One variant — **alpha** — because that is the only robot that exists. Every shipped
-//! policy is `alpha_*`; v1/v1.5/v1.6 are history. A second revision becomes a second set
+//! One kinematic variant — **alpha** — because that is the only robot that exists. Published
+//! policy artifacts use motion names; v1/v1.5/v1.6 are robot history. A second revision becomes a second set
 //! of tables, which is honest until there is a second robot to generalise from.
 //!
 //! The numeric values here are lifted from `microduck_runtime`'s `motor.rs`, where they
@@ -23,7 +23,7 @@ pub use duck_ipc_proto::JOINT_NAMES;
 const _: () = assert!(JOINT_NAMES.len() == NUM_JOINTS);
 const _: () = assert!(JOINT_IDS.len() == NUM_JOINTS);
 
-/// The mouth is absent from every alpha policy — they are all 61-D observation, 14-action,
+/// The mouth is absent from every official policy — they are all 61-D observation, 14-action,
 /// and the action vector skips this index. Named so that omission is deliberate rather
 /// than an off-by-one someone has to rediscover.
 pub const MOUTH_INDEX: usize = 9;

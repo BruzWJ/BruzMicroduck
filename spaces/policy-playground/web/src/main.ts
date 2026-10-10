@@ -489,7 +489,7 @@ function card(policy: Policy): HTMLElement {
 
   const facts = el("p", "card-facts");
   facts.append(el("span", "chip", howLong(policy)));
-  if (policy.official) facts.append(el("span", "chip chip-official", "made by Pollen"));
+  if (policy.official) facts.append(el("span", "chip chip-official", "Bruz official"));
   if (alreadyOn(policy)) facts.append(el("span", "chip chip-live", "✓ on your duck"));
 
   // Who made it, and a way to go and look. A trick is somebody's work — often somebody a child
@@ -655,7 +655,7 @@ function render(): void {
 
   // **Listed rather than hidden, and not offered as something to press.** These are the gaits and
   // the postures — the things a duck moves *with* rather than things it can show you. Leaving them
-  // in the same grid put "alpha walking" beside "polite bow" with an identical button, which is a
+  // in the same grid put "walking" beside "polite bow" with an identical button, which is a
   // page telling a child they are the same kind of thing.
   const rest = state.policies.filter((p) => !isATrick(p));
   if (rest.length) {
