@@ -5,7 +5,7 @@ custom HAT with commercially available boards and sensors.
 
 The design target is to preserve the upstream robot's policy inputs, outputs,
 and physical behavior so the existing
-[microduck_rl](https://github.com/pollen-robotics/microduck_rl) training pipeline
+[BruzMicroduck_rl](https://github.com/BruzWJ/BruzMicroduck_RL) training pipeline
 and exported models remain usable; see the [policy contract](../policy-manifest.md)
 and [control-loop design](../design/robotd-design.md).
 
@@ -13,10 +13,8 @@ and [control-loop design](../design/robotd-design.md).
 | --- | --- | --- |
 | Servo communication | [ROBOTIS OpenRB-150](https://robotis.us/products/openrb-150) | 1 |
 | Host-to-OpenRB data | USB-C data cable | 1 |
-| Servo-bus fan-out | [ROBOTIS 3P JST Expansion Board](https://robotis.us/products/3p-jst-expansion-board) | 1 |
+| (Optional )Servo-bus fan-out | [ROBOTIS 3P JST Expansion Board](https://robotis.us/products/3p-jst-expansion-board) | 1 |
 | Servos | [DYNAMIXEL XL330-M288-T](https://robotis.us/products/dynamixel-xl330-m288-t?variant=51033242960012) | 15 |
-| Servo idler components | [ROBOTIS FPX330-H101, 4-piece set](https://robotis.us/products/fpx330-h101-4pcs-set?variant=51033243549836) | 1 set (4 pieces) |
-| Side frames | [ROBOTIS FPX330-S102, 4-piece set](https://robotis.us/products/fpx330-s102-4pcs-set?variant=51033242501260) | 1 set (4 pieces) |
 | Head Ball bearings | [McMaster-Carr 6656K181 — 15 mm ID × 22 mm OD × 4 mm thick](https://www.mcmaster.com/6656K181/) | 2 |
 | Feet&Mouth Ball bearings | [McMaster-Carr 6656K68 — 10 mm ID × 15 mm OD × 3 mm thick](https://www.mcmaster.com/6656K68/) | 3 |
 | Head 6DoF IMU | [SparkFun 6 Degrees of Freedom Breakout — LSM6DSO (Qwiic), SEN-18020](https://www.sparkfun.com/sparkfun-6-degrees-of-freedom-breakout-lsm6dso-qwiic.html) | 1 |
@@ -28,6 +26,8 @@ and [control-loop design](../design/robotd-design.md).
 | NP-F battery | [Amazon battery listing](https://www.amazon.com/dp/B0007Q9PWQ?ref=ppx_yo2ov_dt_b_fed_asin_title) — requested as NP-F500; see note below | 1 |
 | NP-F battery adapter plate | [Accsoon Toprig NP-F Battery Adapter Mount Plate](https://www.amazon.com/dp/B0BR6JLLFC?ref=ppx_yo2ov_dt_b_fed_asin_title) | 1 |
 | Main computer | [Radxa ZERO 3W](https://radxa.com/products/zeros/zero3w/) | 1 |
+| Voltage regulator | [regulate 7.4V to 7V or 6V based on the servo you use](https://www.amazon.com/dp/B07DD9L6P6) | 1 |
+| DC Power adapter | [DC Power Jack Plug Adapter Barrel Connector](https://www.amazon.com/dp/B0CR8TZ41W) | 1 |
 
 The complete OpenRB firmware, power, wiring and servo-ID contract is in
 [`robotd-design.md` §1.1](../design/robotd-design.md#11-the-two-buses-and-who-owns-them).
