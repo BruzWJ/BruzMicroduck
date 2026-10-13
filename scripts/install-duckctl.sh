@@ -1,16 +1,16 @@
 #!/bin/sh
 # Install the `duckctl` a branch last built, on Linux or macOS, with no Rust toolchain.
 #
-#   curl -fsSL https://raw.githubusercontent.com/pollen-robotics/microduck/main/scripts/install-duckctl.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/BruzWJ/BruzMicroduck/replica/scripts/install-duckctl.sh | sh
 #   curl -fsSL .../install-duckctl.sh | sh -s -- udp-pad
 #
 # The binary comes from the `daemon-dev-<branch>` prerelease that `.github/workflows/dev.yml`
-# replaces on every push; the branch defaults to `main`. It goes to `$DUCKCTL_DIR`, by default
+# replaces on every push; the branch defaults to `replica`. It goes to `$DUCKCTL_DIR`, by default
 # `~/.local/bin`, which needs no sudo.
 set -eu
 
-REPO=pollen-robotics/microduck
-branch="${1:-main}"
+REPO=BruzWJ/BruzMicroduck
+branch="${1:-replica}"
 dir="${DUCKCTL_DIR:-$HOME/.local/bin}"
 
 case "$(uname -s)" in

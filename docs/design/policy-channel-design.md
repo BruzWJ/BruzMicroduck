@@ -585,7 +585,7 @@ x = "polite-bow"
 ```
 
 `robotctl pad bindings` shows them, `pad bind` changes one, `pad reset` puts them back. By
-default A sits, B picks up, and X, Y and the bumpers are free, and `padd` re-reads the file
+default A sits, B picks up, the bumpers kick and X and Y are free, and `padd` re-reads the file
 within a second — nothing restarts.
 
 Only those six — the face buttons and the bumpers. `Start`, the D-pad's stick modes and held

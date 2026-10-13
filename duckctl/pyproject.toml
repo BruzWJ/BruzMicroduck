@@ -28,8 +28,8 @@ classifiers = [
 ]
 
 [project.urls]
-Repository = "https://github.com/pollen-robotics/microduck"
-Documentation = "https://github.com/pollen-robotics/microduck/blob/main/docs/robot/duckctl.md"
+Repository = "https://github.com/BruzWJ/BruzMicroduck"
+Documentation = "https://github.com/BruzWJ/BruzMicroduck/blob/replica/docs/robot/duckctl.md"
 
 [tool.maturin]
 bindings = "bin"

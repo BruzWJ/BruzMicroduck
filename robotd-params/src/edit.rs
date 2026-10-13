@@ -705,8 +705,8 @@ mod tests {
         let m = model("");
         for row in m.rows() {
             assert!(!row.overridden(), "{}", row.entry.key);
-            // X, Y and the bumpers ship with no skill, and an empty binding is a button switched off.
-            if !matches!(row.entry.key, "pad.x" | "pad.y" | "pad.lb" | "pad.rb") {
+            // X and Y ship with no skill, and an empty binding is a button switched off.
+            if !matches!(row.entry.key, "pad.x" | "pad.y") {
                 assert!(!row.effective().is_empty(), "{}", row.entry.key);
             }
         }
@@ -1001,7 +1001,7 @@ mod tests {
         let bindings = super::pad_bindings(&path).unwrap();
         assert_eq!(bindings.x, "polite-bow");
         assert_eq!(
-            bindings.b, "ground_pick",
+            bindings.lb, "kick_left",
             "the rest resolve to their defaults"
         );
     }
@@ -1012,16 +1012,16 @@ mod tests {
     fn binding_the_default_removes_the_key() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("robotd.toml");
-        std::fs::write(&path, "[pad]\nb = \"polite-bow\"\n").unwrap();
+        std::fs::write(&path, "[pad]\nlb = \"polite-bow\"\n").unwrap();
 
-        super::bind_pad(&path, "b", "ground_pick").unwrap();
+        super::bind_pad(&path, "lb", "kick_left").unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(!written.contains("polite-bow"), "{written}");
         assert!(
-            !written.contains("b ="),
+            !written.contains("lb ="),
             "the default is not pinned: {written}"
         );
-        assert_eq!(super::pad_bindings(&path).unwrap().b, "ground_pick");
+        assert_eq!(super::pad_bindings(&path).unwrap().lb, "kick_left");
     }
 
     /// **Resetting a button clears it back to the default and leaves the file clean.** The undo

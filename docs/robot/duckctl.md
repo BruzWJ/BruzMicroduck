@@ -22,25 +22,25 @@ uvx duckctl --name <robot-name> info
 
 That runs the latest release, downloaded once and cached; nothing is compiled. To have a plain
 `duckctl` on the PATH instead, `uv tool install duckctl` (`uv tool upgrade duckctl` to move it on).
-It is the build of the latest `daemon-v*` release, so it can be behind `main`;
+It is the build of the latest `daemon-v*` release, so it can be behind `replica`;
 [`ci-setup.md`](../project/ci-setup.md#duckctl-on-pypi) has how it is published.
 
-For what a branch last built — `main` included — on Linux or macOS:
+For what a branch last built — `replica` included — on Linux or macOS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/pollen-robotics/microduck/main/scripts/install-duckctl.sh | sh
+curl -fsSL https://raw.githubusercontent.com/BruzWJ/BruzMicroduck/replica/scripts/install-duckctl.sh | sh
 ```
 
-It installs what `main` last built to `~/.local/bin`. For another branch's build, name it:
+It installs what `replica` last built to `~/.local/bin`. For another branch's build, name it:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/pollen-robotics/microduck/main/scripts/install-duckctl.sh | sh -s -- udp-pad
+curl -fsSL https://raw.githubusercontent.com/BruzWJ/BruzMicroduck/replica/scripts/install-duckctl.sh | sh -s -- my-branch
 ```
 
 On Windows, in PowerShell:
 
 ```powershell
-irm https://github.com/pollen-robotics/microduck/releases/download/daemon-dev-main/duckctl-windows-x86_64.zip -OutFile duckctl.zip
+irm https://github.com/BruzWJ/BruzMicroduck/releases/download/daemon-dev-replica/duckctl-windows-x86_64.zip -OutFile duckctl.zip
 ```
 
 ```powershell
@@ -63,10 +63,10 @@ Or install it once, at the cost of a snapshot that no longer follows the branch:
 cargo install --path duckctl
 ```
 
-Without a clone, the same from GitHub — `main`, or add `--branch <name>` for another:
+Without a clone, the same from GitHub — `replica`, or add `--branch <name>` for another:
 
 ```bash
-cargo install --locked --git https://github.com/pollen-robotics/microduck duckctl
+cargo install --locked --git https://github.com/BruzWJ/BruzMicroduck duckctl
 ```
 
 Building needs no system headers: libdbus is compiled in. Then:

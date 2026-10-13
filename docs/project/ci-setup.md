@@ -39,3 +39,28 @@ A development board running the former unpublished updater must start from a cle
 it is provisioned against the first release in the current format. The boundary and the reason a
 plain reprovision is not a migration are owned by
 [`updater-design.md` §5.4](../design/updater-design.md#54-publication-authority-and-integrity).
+
+## Workflow inventory
+
+- `release.yml` is the sole manual recipe for a complete stable daemon release.
+- `dev.yml` publishes the hash-verified moving development release for every branch push.
+- `_build-duckctl.yml` builds the cross-platform `duckctl` archives and wheels used by development
+  releases and PyPI.
+- `duckctl-pypi.yml` publishes stable `duckctl` wheels to PyPI from a `daemon-vX.Y.Z` tag.
+
+The release-shape tripwires in `xtask` inspect both `release.yml` and `dev.yml`; keep their binary
+lists aligned with `deploy/updater.toml` when a daemon is added or removed.
+
+## duckctl on PyPI
+
+PyPI publishing uses trusted publishing, not a repository secret. Before the first upload, an owner
+of the chosen PyPI distribution must configure a GitHub publisher for this repository, the
+`duckctl-pypi.yml` workflow and the `pypi` environment. The package currently declares the PyPI
+distribution name `duckctl`, so that name must be available to or administered by this project's
+maintainers before the workflow can publish it.
+
+The manual release workflow creates its tag with `GITHUB_TOKEN`. GitHub deliberately does not start
+another workflow from that event, so after `release.yml` succeeds, open **Actions → duckctl to
+PyPI → Run workflow** and select the new `daemon-vX.Y.Z` tag. A retry is safe: the publisher skips
+files that PyPI already accepted. A stable tag pushed outside Actions also triggers the workflow
+directly.

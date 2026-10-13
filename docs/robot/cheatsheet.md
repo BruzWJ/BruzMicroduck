@@ -319,8 +319,8 @@ a           sit_toggle
 b           ground_pick
 x             (nothing)
 y             (nothing)
-lb            (nothing)
-rb            (nothing)
+lb          kick_left
+rb          kick_right
 
 `robotctl pad bind <button> <skill>` changes one; padd picks it up within a second.
 ```
@@ -333,8 +333,8 @@ a           sit_toggle
 b           ground_pick
 x           polite-bow
 y             (nothing)
-lb            (nothing)
-rb            (nothing)
+lb          kick_left
+rb          kick_right
 ```
 
 That writes one line, and only the button you named:
@@ -617,7 +617,8 @@ the thumb:
 | --- | --- |
 | **A** / cross | sit ↔ stand |
 | **B** / circle | ground pick |
-| **X**, **Y**, **LB / RB** | nothing — free for a skill of your own (`robotctl pad bind`, e.g. `lb kick_left`) |
+| **X**, **Y** | nothing — free for a skill of your own (`robotctl pad bind`) |
+| **LB / RB** | left / right kick |
 | **RT / LT** | mouth (either trigger) — RT also quacks; LT rides the "wheee" while held |
 | **D-pad left** | move mode: left stick forward/back and strafe, right stick turns. The mode a pad starts in |
 | **D-pad up** | head mode: left stick head yaw and pitch, right stick neck pitch and head roll. The body holds still |

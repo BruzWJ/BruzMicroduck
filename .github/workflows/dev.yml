@@ -136,8 +136,8 @@ jobs:
           # netpadd is the same intent client fed by UDP instead of Bluetooth. Its unit is enabled
           # beside padd's and an ExecCondition on `[netpad] enabled` picks which of the two runs.
           cp target/aarch64-unknown-linux-gnu/release/netpadd staged/
-          # mediad is the WebRTC gateway. Shipped so a board *can* run it; its unit has no
-          # [Install], so nothing starts it until someone does. See mediad/systemd/mediad.service.
+          # mediad is the WebRTC gateway. Its install hook enables it after the GStreamer stack
+          # is prepared; a missing camera is reported without blocking the rest of the robot.
           cp target/aarch64-unknown-linux-gnu/release/mediad staged/
           # The voice generator (postinstall renders the per-robot bank with it) and the
           # mic classifier pair — pet-detect for live listening, pet-features for training.
@@ -262,7 +262,7 @@ jobs:
           \`duckctl\` from this branch, on Linux or macOS:
 
           \`\`\`
-          curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/scripts/install-duckctl.sh | sh -s -- ${GITHUB_REF_NAME}
+          curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}/scripts/install-duckctl.sh | sh -s -- ${GITHUB_REF_NAME}
           \`\`\`
 
           On Windows, \`duckctl-windows-x86_64.zip\` below — docs/robot/duckctl.md has the steps.

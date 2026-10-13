@@ -30,7 +30,8 @@
 //! ```text
 //! A (South)       sit ↔ stand
 //! B (East)        ground pick
-//! X / Y, LB / RB  nothing, until a skill is bound there
+//! X / Y           nothing, until a skill is bound there
+//! LB / RB         left / right kick
 //! RT / LT         mouth (either trigger; the max wins) · RT quacks · LT rides the wheee
 //! D-pad up        head mode — the sticks pose the head, the body holds still
 //! D-pad right     head + move — left stick walks and turns, right stick looks around
@@ -297,7 +298,7 @@ fn main() -> std::process::ExitCode {
         socket = %args.socket.display(),
         hz = args.hz,
         roller,
-        "driving — A sit, B ground pick, triggers mouth; D-pad up head, \
+        "driving — A sit, B ground pick, LB/RB kicks, triggers mouth; D-pad up head, \
          right head + move, left move, down body + head; Start stands up then toggles the policy, \
          Start (1.5s) home pose; Select (2-4s) rest, Select (4s) power off"
     );

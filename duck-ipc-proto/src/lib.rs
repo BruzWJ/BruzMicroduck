@@ -438,9 +438,9 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// reboot instead of a power-off. The pad's held Select, released before the power-off threshold.
 /// A new route: a `robotd` predating it answers METHOD_NOT_FOUND, by name.
 ///
-/// # v40 — `robot.flashlight` (retired in v43)
+/// # v40 — `robot.flashlight` (retired in v45)
 ///
-/// The custom face-board light route was introduced here. v43 removes that hardware and the
+/// The custom face-board light route was introduced here. v45 removes that hardware and the
 /// route with it; this entry remains so the version history records what a v40–v42 peer may send.
 ///
 /// # v41 — an IMU board that does not answer, while the bus is coming up

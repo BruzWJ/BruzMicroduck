@@ -1,9 +1,8 @@
 # `duckctl` on PyPI, so `uvx duckctl` runs the latest release on any machine with `uv`.
 #
-# On a stable release tag only, `daemon-vX.Y.Z`, the same tag `release.yml` builds or promotes the
-# daemon from: a PyPI version is permanent and is what everyone gets by default, so it follows the
-# releases rather than the branches. A branch's client is on its `daemon-dev-<branch>` prerelease
-# (`dev.yml`). Staging tags are not published; the stable tag that promotes them is.
+# On a stable release tag only, `daemon-vX.Y.Z`, the same tag the manual `release.yml` run creates:
+# a PyPI version is permanent and is what everyone gets by default, so it follows releases rather
+# than branches. A branch's client is on its `daemon-dev-<branch>` prerelease (`dev.yml`).
 #
 # Wheels only, no sdist. A wheel is the binary CI built (`_build-duckctl.yml`), so nothing is ever
 # compiled on the user's machine; a platform with no wheel gets uv's "no matching distribution"
@@ -13,8 +12,9 @@
 # secrets. It needs a publisher on PyPI naming this repository, this file and the `pypi`
 # environment — `docs/project/ci-setup.md` has the one-time setup.
 #
-# `workflow_dispatch` is for a tag a manual promotion created, which starts no workflow, or a run to
-# repeat: start it from the tag (Use workflow from → Tags → `daemon-vX.Y.Z`).
+# A tag created by `release.yml` with `GITHUB_TOKEN` starts no second workflow. After that release
+# succeeds, start this workflow from its tag (Use workflow from → Tags → `daemon-vX.Y.Z`).
+# The tag-push trigger also covers a stable tag pushed outside Actions; either path is safe to retry.
 name: duckctl to PyPI
 
 on:

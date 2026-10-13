@@ -137,9 +137,7 @@ pub struct PadDriveParams {
 }
 
 impl Default for PadDriveParams {
-    /// Started as the prototype's alpha defaults (`padd`'s old command-line defaults). Since the
-    /// v8 velstand, which tracks yaw commands, forward/back is 0.4 m/s and turning 1.0 rad/s —
-    /// what that policy follows well on the robot.
+    /// The deployed Bruz v1 walking policy's trained command range.
     fn default() -> Self {
         Self {
             vx_max: 0.4,
@@ -250,8 +248,8 @@ impl Default for PadImuHeadControlParams {
 /// needs. It would also put "the button that stops the robot" behind a config key, which is the
 /// one binding worth not being able to lose.
 ///
-/// The defaults keep the pad sparse on purpose: A sits or stands, B picks up, and X, Y and the
-/// bumpers do nothing until somebody puts a skill there (the kicks are still in the set, unbound). A named button is rebound; the rest
+/// The defaults keep the pad sparse on purpose: A sits or stands, B picks up, the bumpers kick,
+/// and X and Y do nothing until somebody puts a skill there. A named button is rebound; the rest
 /// stay as they were.
 ///
 /// A name here is not checked against anything at parse time: which skills exist is a property of
@@ -283,8 +281,8 @@ impl Default for PadParams {
             b: "ground_pick".to_owned(),
             x: String::new(),
             y: String::new(),
-            lb: String::new(),
-            rb: String::new(),
+            lb: "kick_left".to_owned(),
+            rb: "kick_right".to_owned(),
         }
     }
 }
@@ -2802,7 +2800,7 @@ mod tests {
         );
     }
 
-    /// The shipped mapping: A sits, B picks up, X, Y and the bumpers are free.
+    /// The shipped mapping: A sits, B picks up, the bumpers kick, and X and Y are free.
     #[test]
     fn the_default_bindings() {
         let pad = super::PadParams::default();
@@ -2810,8 +2808,8 @@ mod tests {
         assert_eq!(pad.b, "ground_pick");
         assert_eq!(pad.x, "");
         assert_eq!(pad.y, "");
-        assert_eq!(pad.lb, "");
-        assert_eq!(pad.rb, "");
+        assert_eq!(pad.lb, "kick_left");
+        assert_eq!(pad.rb, "kick_right");
     }
 
     /// **The D-pad stopped being bindable, and a robot still carrying the old key boots.** It is
@@ -2824,13 +2822,13 @@ mod tests {
     }
 
     /// Binding one button leaves the rest alone — the file is a list of decisions, and rebinding
-    /// X must not silently take the ground pick off B.
+    /// X must not silently take the kicks off the bumpers.
     #[test]
     fn binding_one_button_leaves_the_others() {
         let params: super::Params =
             toml::from_str("[pad]\nx = \"polite-bow\"\n").expect("a pad section");
         assert_eq!(params.pad.x, "polite-bow");
-        assert_eq!(params.pad.b, "ground_pick", "untouched");
+        assert_eq!(params.pad.lb, "kick_left", "untouched");
         assert_eq!(params.pad.a, "sit_toggle", "untouched");
     }
 
